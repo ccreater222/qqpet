@@ -1198,8 +1198,8 @@ test('idempotency records require exactly one of result or error and preserve re
   const base = baseState()
   const document = createPersistedRuntimeState(base)
   const error = { code: 'invalid_payload', message: 'bad', refreshProjection: false }
-  const resultRecord = { petId: 'pet-x', deviceId: 'device-x', opId: 'op-result', commandType: 'admin.grantCheat', result: { ok: true } }
-  const errorRecord = { petId: 'pet-x', deviceId: 'device-x', opId: 'op-error', commandType: 'admin.grantCheat', error }
+  const resultRecord = { petId: 'pet-x', deviceId: 'device-x', opId: 'op-result', commandType: 'admin.grantCheat', resultPresent: true, result: { ok: true } }
+  const errorRecord = { petId: 'pet-x', deviceId: 'device-x', opId: 'op-error', commandType: 'admin.grantCheat', resultPresent: false, error }
   const resultCache = { schemaVersion: OP_ID_CACHE_SCHEMA_VERSION, records: [resultRecord] }
   const errorCache = { schemaVersion: OP_ID_CACHE_SCHEMA_VERSION, records: [errorRecord] }
   validateOpIdCache(resultCache)
@@ -1213,6 +1213,11 @@ test('idempotency records require exactly one of result or error and preserve re
   const neitherCache = { schemaVersion: OP_ID_CACHE_SCHEMA_VERSION, records: [{ ...resultRecord, result: undefined }] }
   assert.throws(() => validateOpIdCache(neitherCache))
 
+  const badResultPresent = { schemaVersion: OP_ID_CACHE_SCHEMA_VERSION, records: [{ ...resultRecord, resultPresent: 'yes' }] }
+  assert.throws(() => validateOpIdCache(badResultPresent))
+  const falseWithResult = { schemaVersion: OP_ID_CACHE_SCHEMA_VERSION, records: [{ ...resultRecord, resultPresent: false }] }
+  assert.throws(() => validateOpIdCache(falseWithResult))
+
   const cheat = executeCommandIdempotent('pet-x', 'device-x', document, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 10 } }, context(base, { actorRole: 'owner' }), 'op-replay-result')
   const cheatRetry = executeCommandIdempotent('pet-x', 'device-x', cheat.document, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 10 } }, context(cheat.document.engine, { actorRole: 'owner' }), 'op-replay-result')
   assert.deepEqual(cheatRetry.outcome.result, cheat.outcome.result)
@@ -1221,4 +1226,26 @@ test('idempotency records require exactly one of result or error and preserve re
   const rejectedRetry = executeCommandIdempotent('pet-x', 'device-x', rejected.document, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 0 } }, context(rejected.document.engine, { actorRole: 'owner' }), 'op-replay-error')
   assert.deepEqual(rejectedRetry.outcome.error, rejected.outcome.error)
   assert.equal(Object.prototype.hasOwnProperty.call(rejectedRetry.outcome, 'error'), true)
+
+  const dead = baseState()
+  dead.save.petInfo.health = 0
+  const buryDocument = createPersistedRuntimeState(dead)
+  const buryCommand = { type: 'pet.bury', payload: {} }
+  const buryFirst = executeCommandIdempotent('pet-x', 'device-x', buryDocument, buryCommand, context(dead), 'op-bury')
+  const buryRetry = executeCommandIdempotent('pet-x', 'device-x', buryFirst.document, buryCommand, context(buryFirst.document.engine), 'op-bury')
+  assert.equal(buryFirst.outcome.ok, true)
+  assert.equal(Object.prototype.hasOwnProperty.call(buryFirst.outcome, 'result'), false)
+  assert.equal(buryRetry.duplicate, true)
+  assert.equal(Object.prototype.hasOwnProperty.call(buryRetry.outcome, 'result'), false)
+
+  const nullDocument = createPersistedRuntimeState(base)
+  nullDocument.idempotency.records.push({
+    petId: 'pet-x', deviceId: 'device-x', opId: 'op-null-result', commandType: 'pet.pokeFace',
+    resultPresent: true, result: null,
+  })
+  validatePersistedRuntimeState(nullDocument)
+  const nullReplay = executeCommandIdempotent('pet-x', 'device-x', nullDocument, { type: 'pet.pokeFace', payload: { spotId: 'H' } }, context(base), 'op-null-result')
+  assert.equal(nullReplay.duplicate, true)
+  assert.equal(Object.prototype.hasOwnProperty.call(nullReplay.outcome, 'result'), true)
+  assert.equal(nullReplay.outcome.result, null)
 })

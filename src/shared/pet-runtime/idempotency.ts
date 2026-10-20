@@ -16,6 +16,8 @@ export interface IdempotencyRecord {
   deviceId: string
   opId: string
   commandType: PetCommand['type']
+  /** True means result is present (including explicit null); false means no-result success. */
+  resultPresent: boolean
   result?: JsonValue
   error?: CommandError
 }
@@ -40,7 +42,7 @@ export interface IdempotentCommandOutcome {
 }
 
 const OP_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/
-const RECORD_KEYS = ['petId', 'deviceId', 'opId', 'commandType', 'result', 'error'] as const
+const RECORD_KEYS = ['petId', 'deviceId', 'opId', 'commandType', 'resultPresent', 'result', 'error'] as const
 const ERROR_KEYS = ['code', 'message', 'refreshProjection', 'retryable'] as const
 const COMMAND_ERROR_CODES = new Set([
   'invalid_payload', 'no_pet', 'pet_dead', 'paused', 'busy', 'insufficient_funds',
@@ -82,14 +84,19 @@ function validateRecord(value: unknown): asserts value is IdempotencyRecord {
   validateBoundedString(record.deviceId, 'idempotency deviceId')
   validateOpId(record.opId)
   if (typeof record.commandType !== 'string' || isCommandKey(record.commandType) === false) reject('invalid_payload', 'invalid idempotency commandType')
+  if (typeof record.resultPresent !== 'boolean') reject('invalid_payload', 'idempotency resultPresent must be boolean')
   const hasResult = Object.prototype.hasOwnProperty.call(record, 'result')
   const hasError = Object.prototype.hasOwnProperty.call(record, 'error')
-  if (hasResult === hasError) reject('invalid_payload', 'idempotency record must contain exactly one of result or error')
-  if (hasResult) {
+  if (hasResult && hasError) reject('invalid_payload', 'idempotency result and error are mutually exclusive')
+  if (record.resultPresent) {
+    if (hasResult === false) reject('invalid_payload', 'resultPresent=true requires a result property')
+    if (hasError) reject('invalid_payload', 'resultPresent=true cannot carry an error')
     if (record.result === undefined) reject('invalid_payload', 'idempotency result must be present')
     try { stableStringify(record.result) } catch { reject('invalid_payload', 'idempotency result is not JSON-safe') }
+  } else {
+    if (hasResult) reject('invalid_payload', 'resultPresent=false cannot carry a result property')
+    if (hasError) validateError(record.error)
   }
-  if (hasError) validateError(record.error)
 }
 
 export function emptyOpIdCache(): OpIdCache {
@@ -180,13 +187,17 @@ export function executeCommandIdempotent(
     return {
       duplicate: true,
       document,
-      outcome: { ok: true, state: document.engine, events: [], ...(existing.result === undefined ? {} : { result: existing.result }) },
+      outcome: existing.resultPresent
+        ? { ok: true, state: document.engine, events: [], result: existing.result as JsonValue }
+        : { ok: true, state: document.engine, events: [] },
     }
   }
   const outcome = executeCommand(document.engine, command, ctx)
   const record: IdempotencyRecord = outcome.ok
-    ? { petId, deviceId, opId, commandType: command.type, result: outcome.result === undefined ? null : outcome.result }
-    : { petId, deviceId, opId, commandType: command.type, error: outcome.error }
+    ? outcome.result === undefined
+      ? { petId, deviceId, opId, commandType: command.type, resultPresent: false }
+      : { petId, deviceId, opId, commandType: command.type, resultPresent: true, result: outcome.result }
+    : { petId, deviceId, opId, commandType: command.type, resultPresent: false, error: outcome.error }
   return {
     duplicate: false,
     document: {
