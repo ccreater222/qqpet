@@ -161,7 +161,8 @@ export function validateWireCommandResult(value: unknown): value is WireCommandR
   if (isCommandKey(value.commandType) === false) return false
   if (value.status !== 'applied' && value.status !== 'rejected' && value.status !== 'duplicate') return false
   if (value.status === 'applied' && value.error !== undefined) return false
-  if (value.status === 'rejected' && value.error === undefined) return false
+  if (value.status === 'rejected' && (value.error === undefined || value.result !== undefined)) return false
+  if (value.status === 'duplicate' && value.error !== undefined && value.result !== undefined) return false
   if (isNonNegativeInteger(value.commandSeq) === false) return false
   if (isNonNegativeInteger(value.revision) === false) return false
   if (isNonNegativeInteger(value.eventSeq) === false) return false
@@ -225,7 +226,8 @@ function commandResult(value: Record<string, unknown>): boolean {
   if (isNonEmptyString(value.opId) === false || isCommandKey(value.commandType) === false) return false
   if (value.status !== 'applied' && value.status !== 'rejected' && value.status !== 'duplicate') return false
   if (value.status === 'applied' && value.error !== undefined) return false
-  if (value.status === 'rejected' && value.error === undefined) return false
+  if (value.status === 'rejected' && (value.error === undefined || value.result !== undefined)) return false
+  if (value.status === 'duplicate' && value.error !== undefined && value.result !== undefined) return false
   if (isNonNegativeInteger(value.commandSeq) === false) return false
   if (isNonNegativeInteger(value.revision) === false || isNonNegativeInteger(value.eventSeq) === false) return false
   if (validateCommandResultData(value.commandType, value.result) === false) return false
@@ -244,6 +246,7 @@ function commandStatusResult(value: Record<string, unknown>): boolean {
   if (value.result !== undefined) {
     if (validateWireCommandResult(value.result) === false) return false
     if (value.result.opId !== value.opId) return false
+    if (value.status !== 'not_applied' && value.result.status !== value.status) return false
   }
   return true
 }
@@ -253,6 +256,41 @@ function protocolError(value: Record<string, unknown>): boolean {
   if (typeof value.message !== 'string' || typeof value.refreshProjection !== 'boolean') return false
   if (value.revision !== undefined && isNonNegativeInteger(value.revision) === false) return false
   return true
+}
+
+function protocolFrameScanView(value: Record<string, unknown>): Record<string, unknown> {
+  // The hello frame intentionally transmits exactly one auth token over the TLS protocol boundary.
+  if (value.t === 'hello' && isRecord(value.auth) && value.auth.kind === 'token') {
+    const auth: Record<string, unknown> = { ...value.auth }
+    delete auth.token
+    return { ...value, auth }
+  }
+  // Owner-only bundles may carry session answer keys. Redact just the bundle subtree
+  // for the frame-wide scan; the bundle validator immediately scans it for never-upload data.
+  if (value.t === 'portableBundle') return { ...value, bundle: '[owner-only-bundle]' }
+  if (value.t === 'command' && isRecord(value.command) && isRecord(value.command.payload)) {
+    if (value.command.type === 'admin.importPortableBundle' || value.command.type === 'admin.resumeServer') {
+      return {
+        ...value,
+        command: { ...value.command, payload: { ...value.command.payload, bundle: '[owner-only-bundle]' } },
+      }
+    }
+  }
+  if (value.t === 'commandResult' && value.commandType === 'admin.exportForDetach' && isRecord(value.result)) {
+    return { ...value, result: { ...value.result, bundle: '[owner-only-bundle]' } }
+  }
+  if (value.t === 'commandStatusResult' && isRecord(value.result) && value.result.commandType === 'admin.exportForDetach') {
+    if (isRecord(value.result.result)) {
+      return {
+        ...value,
+        result: {
+          ...value.result,
+          result: { ...value.result.result, bundle: '[owner-only-bundle]' },
+        },
+      }
+    }
+  }
+  return value
 }
 
 function parseCore(value: unknown, direction: 'client' | 'server'): ProtocolValidationResult<Record<string, unknown>> {
@@ -267,6 +305,8 @@ function parseCore(value: unknown, direction: 'client' | 'server'): ProtocolVali
     return invalid('invalid_protocol_version', 'unsupported protocol version: ' + String(value.v))
   }
   if (typeof value.t !== 'string' || value.t.length === 0) return invalid('invalid_frame', 'protocol frame has no type')
+  const forbidden = findForbiddenJsonKey(protocolFrameScanView(value))
+  if (forbidden !== null) return invalid('invalid_frame', 'protocol frame contains forbidden data')
   const allowed = direction === 'client' ? CLIENT_MESSAGE_TYPE_SET : SERVER_MESSAGE_TYPE_SET
   if (allowed.has(value.t) === false) return invalid('unknown_message_type', 'message type is not valid for this direction')
   if (REQUEST_CORRELATED.has(value.t) && isNonEmptyString(value.requestId) === false) {
@@ -333,6 +373,11 @@ export function parseServerMessage(value: unknown): ProtocolValidationResult<Ser
       }
       if (message.fromEventSeq > message.toEventSeq) return invalid('invalid_frame', 'replay fromEventSeq must not exceed toEventSeq')
       if (orderedEvents(message.events) === false) return invalid('invalid_frame', 'invalid replay events')
+      for (const event of message.events) {
+        if (event.eventSeq < message.fromEventSeq || event.eventSeq > message.toEventSeq) {
+          return invalid('invalid_frame', 'replay eventSeq is outside the requested range')
+        }
+      }
       break
     case 'ready':
       if (isNonNegativeInteger(message.revision) === false || isNonNegativeInteger(message.eventSeq) === false) {

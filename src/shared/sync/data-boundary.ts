@@ -218,16 +218,26 @@ export function assertNoNeverUpload(value: unknown, path = '$'): void {
   }
 }
 
-/** Defense-in-depth projection filter for values crossing the wire boundary. */
+/** Defense-in-depth projection filter: recursively removes never-upload keys, including inside nested JSON strings. */
 export function filterNeverUpload<T>(value: T): T {
-  const filter = (current: unknown): unknown => {
+  const filter = (current: unknown, jsonDepth: number): unknown => {
+    if (typeof current === 'string') {
+      const parsed = parseEmbeddedJsonString(current)
+      if (parsed === NO_EMBEDDED_JSON) return current
+      const hit = findForbiddenJsonKey(parsed, { includeSessionAnswerKeys: false })
+      if (hit === null) return current
+      if (hit.kind === 'nested_json_depth' || jsonDepth >= MAX_NESTED_JSON_DEPTH) {
+        failSchema('invalid_schema', '$', 'nested JSON string exceeds the maximum filtering depth')
+      }
+      return JSON.stringify(filter(parsed, jsonDepth + 1))
+    }
     if (current === null || typeof current !== 'object') return current
-    if (Array.isArray(current)) return current.map(filter)
+    if (Array.isArray(current)) return current.map(entry => filter(entry, jsonDepth))
     const output: Record<string, unknown> = {}
     for (const key of Object.keys(current)) {
       if (isNeverUploadKey(key)) continue
       Object.defineProperty(output, key, {
-        value: filter((current as Record<string, unknown>)[key]),
+        value: filter((current as Record<string, unknown>)[key], jsonDepth),
         enumerable: true,
         writable: true,
         configurable: true,
@@ -235,7 +245,7 @@ export function filterNeverUpload<T>(value: T): T {
     }
     return output
   }
-  return filter(value) as T
+  return filter(value, 0) as T
 }
 
 export function assertSharedSaveData(value: unknown): asserts value is SharedSaveData {
@@ -247,6 +257,7 @@ export function assertSharedSaveData(value: unknown): asserts value is SharedSav
   }
   requireJsonValue(value, '$.shared')
   requireRecord(value, '$.shared')
+  assertNoForbiddenJsonKey(value, '$.shared')
   assertRequiredKeys(value, SHARED_SAVE_KEYS, '$.shared')
   assertOnlyKeys(value, SHARED_SAVE_KEYS, '$.shared')
   assertNoNeverUpload(value, '$.shared')
@@ -380,12 +391,17 @@ const FISH_NUMBER_KEYS = [
   'avatar', 'AIXIN', 'growth', 'strong', 'iq', 'charm', 'born', 'siLiao',
 ] as const
 const FARM_KEYS = ['house', 'kennel', 'fence', 'experience', 'rank', 'burden', 'warehouse', 'farmland', 'weather', 'username', 'wealth', 'checked'] as const
-const FARM_LAND_KEYS = ['farmland', 'crop', 'time', 'harvest', 'grass', 'worm'] as const
+/** Mirrors UserInfo/farm writes in tools/qqfarm FarmMain, MyStore, FarmlandControl and InstallFace. */
+const FARM_LAND_KEYS = [
+  'farmland', 'crop', 'time', 'harvest', 'state', 'growth', 'progress', 'yield', 'grass', 'worm',
+] as const
+const FARM_BURDEN_KEYS = ['name', 'Items', 'number'] as const
+const FARM_WAREHOUSE_KEYS = ['fruit', 'number', 'name', 'price'] as const
 const ISLAND_CANONICAL_FIELDS = [
-  'day', 'sent', 'letter', 'note', 'lit', 'lamps', 'tier', 'pieces', 'piece', 'want', 'loved',
+  'day', 'sent', 'letter', 'lit', 'lamps', 'tier', 'pieces', 'piece', 'want', 'loved',
   'errands', 'fought', 'wins',
 ] as const
-const ISLAND_PRESENTATION_FIELDS = ['news'] as const
+const ISLAND_PRESENTATION_FIELDS = ['news', 'note'] as const
 const ISLAND_ERRAND_FIELDS = ['from', 'kind', 'to', 'got', 'took'] as const
 const ISLAND_ERRAND_PRESENTATION_FIELDS = ['ask'] as const
 const ISLAND_ERRAND_KINDS = [
@@ -490,6 +506,12 @@ function assertOptionalBooleanField(record: Record<string, unknown>, key: string
 
 function assertOptionalNonNegativeIntegerField(record: Record<string, unknown>, key: string, path: string): void {
   if (record[key] !== undefined) requireNonNegativeInteger(record[key], path + '.' + key)
+}
+
+function assertNumericStringOrFiniteNumber(value: unknown, path: string): void {
+  if (typeof value === 'number' && Number.isFinite(value)) return
+  if (typeof value === 'string' && value.trim().length > 0 && Number.isFinite(Number(value))) return
+  failSchema('invalid_schema', path, 'expected a finite number or numeric string')
 }
 
 function assertSharedGoodBlob(value: unknown, path: string): void {
@@ -614,18 +636,47 @@ function assertFarmLandBlob(value: unknown, path: string): void {
   requireString(value.farmland, path + '.farmland')
   assertOptionalStringField(value, 'crop', path)
   assertOptionalFiniteNumberField(value, 'time', path)
+  assertOptionalStringField(value, 'harvest', path)
+  assertOptionalNonNegativeIntegerField(value, 'state', path)
+  assertOptionalStringField(value, 'growth', path)
+  assertOptionalFiniteNumberField(value, 'progress', path)
+  assertOptionalFiniteNumberField(value, 'yield', path)
   assertOptionalFiniteNumberField(value, 'grass', path)
   assertOptionalFiniteNumberField(value, 'worm', path)
 }
 
+function assertFarmBurdenItem(value: unknown, path: string): void {
+  assertBlobObject(value, path, FARM_BURDEN_KEYS, ['Items', 'number'])
+  assertOptionalStringField(value, 'name', path)
+  requireString(value.Items, path + '.Items')
+  requireFiniteNumber(value.number, path + '.number')
+}
+
+function assertFarmWarehouseItem(value: unknown, path: string): void {
+  assertBlobObject(value, path, FARM_WAREHOUSE_KEYS, ['fruit', 'number'])
+  requireString(value.fruit, path + '.fruit')
+  requireFiniteNumber(value.number, path + '.number')
+  assertOptionalStringField(value, 'name', path)
+  assertOptionalFiniteNumberField(value, 'price', path)
+}
+
 function assertFarmBlob(value: unknown, path: string): void {
   assertBlobObject(value, path, FARM_KEYS)
-  for (const key of ['house', 'kennel', 'fence', 'experience', 'rank', 'weather', 'username', 'wealth'] as const) {
+  for (const key of ['house', 'kennel', 'fence', 'weather', 'username'] as const) {
     assertOptionalStringField(value, key, path)
   }
+  for (const key of ['experience', 'rank', 'wealth'] as const) {
+    if (value[key] !== undefined) assertNumericStringOrFiniteNumber(value[key], path + '.' + key)
+  }
   assertOptionalFiniteNumberField(value, 'checked', path)
-  if (value.burden !== undefined) assertBlobArray(value.burden, path + '.burden')
-  if (value.warehouse !== undefined) assertBlobArray(value.warehouse, path + '.warehouse')
+  if (value.burden !== undefined) {
+    assertBlobArray(value.burden, path + '.burden')
+    value.burden.forEach((item, index) => assertFarmBurdenItem(item, path + '.burden[' + index + ']'))
+  }
+  if (value.warehouse !== undefined) {
+    assertBlobArray(value.warehouse, path + '.warehouse')
+    value.warehouse.forEach((item, index) => assertFarmWarehouseItem(item, path + '.warehouse[' + index + ']'))
+  }
   if (value.farmland !== undefined) {
     assertBlobArray(value.farmland, path + '.farmland')
     value.farmland.forEach((land, index) => assertFarmLandBlob(land, path + '.farmland[' + index + ']'))
@@ -688,7 +739,6 @@ function assertIslandCanonical(value: unknown, path: string): void {
   assertOptionalFiniteNumberField(value, 'day', path)
   assertOptionalNonNegativeIntegerField(value, 'sent', path)
   assertOptionalStringField(value, 'letter', path)
-  assertOptionalStringField(value, 'note', path)
   assertOptionalStringField(value, 'want', path)
   assertOptionalBooleanField(value, 'piece', path)
   assertOptionalBooleanField(value, 'loved', path)
@@ -708,7 +758,7 @@ function assertIslandCanonical(value: unknown, path: string): void {
 
 /**
  * Migration filter for island: keeps the canonical decision/counter/flag
- * subset and strips AI-created news prose plus per-errand `ask` wording.
+ * subset and strips AI-created news/note prose plus per-errand `ask` wording.
  */
 export function filterIslandCanonicalState(value: unknown, path = '$.island'): JsonObject {
   requireRecord(value, path)

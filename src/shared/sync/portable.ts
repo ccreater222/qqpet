@@ -19,6 +19,7 @@ import type { SaveData } from '../save'
 import type { DeviceLocalOverlay, SharedSaveData } from './data-boundary'
 import {
   assertDeviceLocalOverlay,
+  assertNoForbiddenJsonKey,
   assertNoNeverUpload,
   assertSharedSaveData,
   toSharedSaveData,
@@ -481,6 +482,7 @@ export function assertEngineState(value: unknown): asserts value is EngineState 
   assertRequiredKeys(value, ENGINE_REQUIRED_KEYS, '$.engine')
   assertOnlyKeys(value, ENGINE_STATE_KEYS, '$.engine')
   assertNoNeverUpload(value, '$.engine')
+  assertNoForbiddenJsonKey(value, '$.engine', { includeSessionAnswerKeys: false })
   assertSchemaVersion(value.schemaVersion, RUNTIME_SCHEMA_VERSION, '$.engine.schemaVersion', 'runtime')
   assertSharedSaveData(value.save)
   requireNonNegativeInteger(value.gameTimeMs, '$.engine.gameTimeMs')
@@ -536,9 +538,13 @@ export function assertPortablePetBundle(value: unknown): asserts value is Portab
   }
   assertRequiredKeys(value, ['format', 'schemaVersion', 'exportedAtWallMs', 'authority', 'shared', 'engine'], '$.bundle')
   assertOnlyKeys(value, ['format', 'schemaVersion', 'exportedAtWallMs', 'authority', 'originLocalDeviceId', 'shared', 'engine'], '$.bundle')
+  assertNoForbiddenJsonKey(value, '$.bundle', { includeSessionAnswerKeys: false })
   requireNonNegativeInteger(value.exportedAtWallMs, '$.bundle.exportedAtWallMs')
   assertAuthorityStamp(value.authority, '$.bundle.authority')
   if (value.originLocalDeviceId !== undefined) assertNonEmptyString(value.originLocalDeviceId, '$.bundle.originLocalDeviceId')
+  if (value.authority.owner === 'local' && value.originLocalDeviceId === undefined) {
+    failSchema('missing_field', '$.bundle.originLocalDeviceId', 'local-authority bundle requires originLocalDeviceId')
+  }
   assertSharedSaveData(value.shared)
   assertEngineState(value.engine)
   if (stableStringify(value.shared) !== stableStringify(value.engine.save)) {
@@ -562,8 +568,10 @@ const LEGACY_ENGINE_REQUIRED_KEYS = [
 
 function legacySaveCandidate(value: unknown): SaveData {
   requireRecord(value, '$.legacySave')
+  const candidate: Record<string, unknown> = isRecord(value.petInfoData)
+    ? { ...value.petInfoData }
+    : { ...value }
   if (isRecord(value.petInfoData)) {
-    const candidate: Record<string, unknown> = { ...value.petInfoData }
     for (const key of [
       'havePet', 'isBury', 'saveNum', 'nowTimeLine', 'petInfo', 'petComputedlInfo', 'studyInfo',
       'activeOption', 'selfGoodDatas', 'selfGoodUseOption', 'gameSaveDatas', 'illustrated',
@@ -571,9 +579,11 @@ function legacySaveCandidate(value: unknown): SaveData {
     ] as const) {
       if (candidate[key] === undefined && value[key] !== undefined) candidate[key] = value[key]
     }
-    return candidate as unknown as SaveData
   }
-  return value as unknown as SaveData
+  // Mirrors petOf normalization: original config.json machine identity fields are never canonical.
+  delete candidate.machineId
+  delete candidate.oId
+  return candidate as unknown as SaveData
 }
 
 /** Deterministic migration of a legacy bare SaveData/config.json into a v1 portable bundle. */
@@ -742,7 +752,23 @@ export function deserializePortablePetBundle(serialized: string): PortablePetBun
 }
 
 export function assertLocalPetDocumentV2(value: unknown): asserts value is LocalPetDocumentV2 {
+  try {
+    assertJsonSafe(value)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'local document is not JSON-safe'
+    failSchema('invalid_schema', '$.local', message)
+  }
   requireRecord(value, '$.local')
+  assertNoForbiddenJsonKey({
+    format: value.format,
+    schemaVersion: value.schemaVersion,
+    revision: value.revision,
+    eventSeq: value.eventSeq,
+    authority: value.authority,
+    runtime: value.runtime,
+  }, '$.local')
+  assertNoForbiddenJsonKey(value.bundle, '$.local.bundle', { includeSessionAnswerKeys: false })
+  assertNoForbiddenJsonKey(value.device, '$.local.device', { includeNeverUpload: false })
   assertSchemaVersion(value.schemaVersion, LOCAL_DOCUMENT_SCHEMA_VERSION, '$.local.schemaVersion', 'local document')
   if (value.format !== LOCAL_DOCUMENT_FORMAT) failSchema('unsupported_format', '$.local.format', 'expected ' + LOCAL_DOCUMENT_FORMAT)
   assertRequiredKeys(value, ['format', 'schemaVersion', 'revision', 'eventSeq', 'authority', 'bundle', 'runtime', 'device'], '$.local')
@@ -770,6 +796,12 @@ export function assertLocalPetDocumentV2(value: unknown): asserts value is Local
   requireNonNegativeInteger(value.runtime.startedAtWallMs, '$.local.runtime.startedAtWallMs')
   assertDeviceLocalOverlay(value.device)
   const activeLocalAuthority = value.authority.state === 'active'
+  if (activeLocalAuthority && value.authority.stamp.owner !== 'local') {
+    failSchema('identity_mismatch', '$.local.authority.stamp.owner', 'active local authority requires local-owned authority')
+  }
+  if (activeLocalAuthority && value.bundle.authority.owner !== 'local') {
+    failSchema('identity_mismatch', '$.local.bundle.authority.owner', 'active local authority requires local-owned bundle authority')
+  }
   if (activeLocalAuthority && value.bundle.originLocalDeviceId === undefined) {
     failSchema('missing_field', '$.local.bundle.originLocalDeviceId', 'active local authority requires originLocalDeviceId')
   }

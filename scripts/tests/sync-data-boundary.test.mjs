@@ -97,14 +97,22 @@ const VALID_SAVE_JSON_BLOBS = {
     }],
   },
   farm: {
-    house: 'house', kennel: 'kennel', fence: 'fence', experience: '1', rank: '01',
-    burden: [], warehouse: [], farmland: [{ farmland: 'FarmlandS' }], weather: 'Sunny',
-    username: '主人', wealth: '100', checked: 1700000000,
+    house: 'house', kennel: 'kennel', fence: 'fence', experience: 24, rank: 1,
+    burden: [{ name: '白萝卜种子', Items: 'RadishSeed', number: 10 }],
+    warehouse: [{ fruit: 'Radish', number: 24, name: '白萝卜', price: 18 }],
+    farmland: [
+      {
+        farmland: 'FarmlandS', crop: 'RadishSeed', time: 1700000000, harvest: 'xx',
+        state: 6, growth: '收获果实24个,还剩24个', progress: 1, yield: 24, grass: 1, worm: 1,
+      },
+      { farmland: 'Wasteland' },
+    ],
+    weather: 'Sunny', username: '主人', wealth: 100, checked: 1700000000,
   },
   activity: 0,
   album: [{ id: 'photo-1', city: '北京', d: 1700000000 }],
   island: {
-    day: 1700000000, sent: 1, letter: 'npc-1', note: 'canonical note', lit: ['npc-1'],
+    day: 1700000000, sent: 1, letter: 'npc-1', lit: ['npc-1'],
     lamps: [3], tier: 1, pieces: 2, piece: true, want: '1001', loved: true,
     errands: [{ from: 'npc-1', kind: 'talk', to: 'npc-2', got: 0, took: false }],
     fought: ['monster-1'], wins: 2,
@@ -248,22 +256,42 @@ test('engine, portable bundle and local document validate and round-trip canonic
   assert.equal(fixtures.localDocument.device.localDeviceId, fixtures.localDocument.bundle.originLocalDeviceId)
   const serverAuthority = { ...fixtures.authority, owner: 'server', authorityId: 'authority-server-origin' }
   const serverOriginBundle = { ...fixtures.bundle, authority: serverAuthority }
+  assertPortablePetBundle(serverOriginBundle)
+  assert.equal(validateLocalPetDocumentV2({
+    ...fixtures.localDocument,
+    revision: serverAuthority.revision,
+    eventSeq: serverAuthority.eventSeq,
+    authority: { state: 'handoff_pending', stamp: serverAuthority },
+    bundle: serverOriginBundle,
+  }), true)
   assert.equal(validateLocalPetDocumentV2({
     ...fixtures.localDocument,
     revision: serverAuthority.revision,
     eventSeq: serverAuthority.eventSeq,
     authority: { state: 'active', stamp: serverAuthority },
     bundle: serverOriginBundle,
-  }), true)
-  const serverOriginWithoutProvenance = { ...serverOriginBundle }
-  delete serverOriginWithoutProvenance.originLocalDeviceId
-  assert.equal(validateLocalPetDocumentV2({
+  }), false)
+  expectSchemaCode(() => assertLocalPetDocumentV2({
     ...fixtures.localDocument,
     revision: serverAuthority.revision,
     eventSeq: serverAuthority.eventSeq,
     authority: { state: 'active', stamp: serverAuthority },
+    bundle: serverOriginBundle,
+  }), 'identity_mismatch')
+  const serverOriginWithoutProvenance = { ...serverOriginBundle }
+  delete serverOriginWithoutProvenance.originLocalDeviceId
+  assertPortablePetBundle(serverOriginWithoutProvenance)
+  assert.equal(validateLocalPetDocumentV2({
+    ...fixtures.localDocument,
+    revision: serverAuthority.revision,
+    eventSeq: serverAuthority.eventSeq,
+    authority: { state: 'handoff_pending', stamp: serverAuthority },
     bundle: serverOriginWithoutProvenance,
-  }), false)
+  }), true)
+  const localOwnerWithoutOrigin = { ...fixtures.bundle }
+  delete localOwnerWithoutOrigin.originLocalDeviceId
+  assert.equal(validatePortablePetBundle(localOwnerWithoutOrigin), false)
+  expectSchemaCode(() => assertPortablePetBundle(localOwnerWithoutOrigin), 'missing_field')
   const missingOriginBundle = { ...fixtures.bundle }
   delete missingOriginBundle.originLocalDeviceId
   assert.equal(validateLocalPetDocumentV2({ ...fixtures.localDocument, bundle: missingOriginBundle }), false)
@@ -397,6 +425,18 @@ test('saveJsonData per-blob validators reject unknown fields and nested secrets'
     ...VALID_SAVE_JSON_BLOBS.farm,
     farmland: [{ ...VALID_SAVE_JSON_BLOBS.farm.farmland[0], unknownCanonicalField: true }],
   })), false)
+  assert.equal(validateSharedSaveJsonBlob('farm', JSON.stringify({
+    ...VALID_SAVE_JSON_BLOBS.farm,
+    burden: [{ ...VALID_SAVE_JSON_BLOBS.farm.burden[0], unknownCanonicalField: true }],
+  })), false)
+  assert.equal(validateSharedSaveJsonBlob('farm', JSON.stringify({
+    ...VALID_SAVE_JSON_BLOBS.farm,
+    warehouse: [{ ...VALID_SAVE_JSON_BLOBS.farm.warehouse[0], unknownCanonicalField: true }],
+  })), false)
+  assert.equal(validateSharedSaveJsonBlob('farm', JSON.stringify({
+    ...VALID_SAVE_JSON_BLOBS.farm,
+    farmland: [{ ...VALID_SAVE_JSON_BLOBS.farm.farmland[0], harvest: { prose: 'not canonical' } }],
+  })), false)
   assert.equal(validateSharedSaveJsonBlob('island', JSON.stringify({
     ...VALID_SAVE_JSON_BLOBS.island,
     errands: [{ ...VALID_SAVE_JSON_BLOBS.island.errands[0], unknownCanonicalField: true }],
@@ -455,10 +495,12 @@ test('saveJsonData per-blob validators reject unknown fields and nested secrets'
 test('island prose is filtered while canonical island decisions are preserved', () => {
   const rawIsland = JSON.parse(fixtures.save.saveJsonData.island)
   assert.equal(rawIsland.news.length, 1)
+  assert.equal(typeof rawIsland.note, 'string')
   assert.equal(typeof rawIsland.errands[0].ask, 'string')
 
   const filteredIsland = filterIslandCanonicalState(rawIsland)
   assert.equal(Object.prototype.hasOwnProperty.call(filteredIsland, 'news'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(filteredIsland, 'note'), false)
   assert.equal(Object.prototype.hasOwnProperty.call(filteredIsland.errands[0], 'ask'), false)
   assert.deepEqual(filteredIsland.lit, rawIsland.lit)
   assert.deepEqual(filteredIsland.lamps, rawIsland.lamps)
@@ -471,8 +513,10 @@ test('island prose is filtered while canonical island decisions are preserved', 
   assert.equal(Object.prototype.hasOwnProperty.call(filteredBlobs, 'weather'), false)
   const sharedIsland = JSON.parse(filteredBlobs.island)
   assert.equal(Object.prototype.hasOwnProperty.call(sharedIsland, 'news'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(sharedIsland, 'note'), false)
   assert.equal(Object.prototype.hasOwnProperty.call(sharedIsland.errands[0], 'ask'), false)
 
+  assert.equal(validateSharedSaveJsonBlob('island', JSON.stringify({ ...VALID_SAVE_JSON_BLOBS.island, note: 'AI prose' })), false)
   const rawIslandShared = {
     ...fixtures.shared,
     saveJsonData: { ...fixtures.shared.saveJsonData, island: JSON.stringify(rawIsland) },
@@ -483,6 +527,7 @@ test('island prose is filtered while canonical island decisions are preserved', 
   const rebuilt = toSharedSaveData(fixtures.save)
   const rebuiltIsland = JSON.parse(rebuilt.saveJsonData.island)
   assert.equal(Object.prototype.hasOwnProperty.call(rebuiltIsland, 'news'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(rebuiltIsland, 'note'), false)
   assert.equal(Object.prototype.hasOwnProperty.call(rebuiltIsland.errands[0], 'ask'), false)
 
   const badShared = {
@@ -587,6 +632,30 @@ test('legacy bare SaveData and config.json migrate deterministically into v1 bun
   })
   assert.equal(configBundled.engine.advanceWhileEmpty, true)
   assert.equal(serializePortablePetBundle(configBundled).includes('"aiKey"'), false)
+
+  const realLegacyConfig = {
+    machineId: 'outer-machine',
+    oId: 'outer-owner',
+    petInfoData: {
+      ...fixtures.save,
+      machineId: 'legacy-machine-id',
+      oId: 'legacy-owner-id',
+    },
+  }
+  const normalizedConfigBundle = migrateLegacySaveDataToPortableBundle(realLegacyConfig, options)
+  const normalizedConfigText = serializePortablePetBundle(normalizedConfigBundle)
+  assert.equal(normalizedConfigText.includes('legacy-machine-id'), false)
+  assert.equal(normalizedConfigText.includes('legacy-owner-id'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(normalizedConfigBundle.shared, 'machineId'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(normalizedConfigBundle.shared, 'oId'), false)
+  assert.equal(realLegacyConfig.petInfoData.machineId, 'legacy-machine-id')
+  const directLegacyBundle = migrateLegacySaveDataToPortableBundle({
+    ...fixtures.save,
+    machineId: 'direct-machine-id',
+    oId: 'direct-owner-id',
+  }, options)
+  assert.equal(serializePortablePetBundle(directLegacyBundle).includes('direct-machine-id'), false)
+  assert.equal(serializePortablePetBundle(directLegacyBundle).includes('direct-owner-id'), false)
   expectSchemaCode(() => migrateLegacySaveDataToPortableBundle(fixtures.save, {
     ...options,
     seedHex: '0'.repeat(32),
@@ -650,4 +719,44 @@ test('legacy local v2 duplicate localDeviceId migrates only when canonical ident
   const missingOriginBundle = { ...fixtures.bundle }
   delete missingOriginBundle.originLocalDeviceId
   assert.equal(validateLocalPetDocumentV2({ ...fixtures.localDocument, bundle: missingOriginBundle }), false)
+})
+
+test('recursive forbidden scans cover non-blob shared/engine data and nested JSON strings', () => {
+  const dirtyShared = {
+    ...fixtures.shared,
+    activeOption: { ...fixtures.shared.activeOption, note: '{"aiKey":"shared-secret"}' },
+  }
+  assert.equal(validateSharedSaveData(dirtyShared), false)
+  expectSchemaCode(() => assertSharedSaveData(dirtyShared), 'forbidden_field')
+
+  const dirtyEngine = JSON.parse(JSON.stringify(fixtures.engine))
+  dirtyEngine.scheduledJobs[0].payload.note = '{"webhookToken":"engine-secret"}'
+  assert.equal(validateEngineState(dirtyEngine), false)
+  expectSchemaCode(() => assertEngineState(dirtyEngine), 'forbidden_field')
+
+  const dirtyBundle = JSON.parse(JSON.stringify(fixtures.bundle))
+  dirtyBundle.engine.scheduledJobs[0].payload.note = '{"webhookToken":"bundle-secret"}'
+  assert.equal(validatePortablePetBundle(dirtyBundle), false)
+  expectSchemaCode(() => assertPortablePetBundle(dirtyBundle), 'forbidden_field')
+  expectSchemaCode(() => deserializePortablePetBundle(JSON.stringify(dirtyBundle)), 'forbidden_field')
+
+  const dirtyLocal = {
+    ...fixtures.localDocument,
+    bundle: dirtyBundle,
+    engine: undefined,
+  }
+  delete dirtyLocal.engine
+  assert.equal(validateLocalPetDocumentV2(dirtyLocal), false)
+
+  const dirtyFilterInput = {
+    keep: { aiKey: 'remove-me', note: '{"webhookToken":"nested-secret","keep":1}' },
+    list: [{ searchKey: 'remove-search', keep: true }],
+  }
+  const filtered = filterNeverUpload(dirtyFilterInput)
+  assert.deepEqual(filtered, {
+    keep: { note: '{"keep":1}' },
+    list: [{ keep: true }],
+  })
+  assert.equal(dirtyFilterInput.keep.aiKey, 'remove-me')
+  assert.equal(dirtyFilterInput.list[0].searchKey, 'remove-search')
 })

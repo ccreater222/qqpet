@@ -282,6 +282,30 @@ test('protocol parser validates versions, directions, request correlation and sh
     t: 'commandStatusResult', v: 1, requestId: 'req-status', opId: 'op-1', status: 'applied',
     result: { ...commandResult, opId: 'different-op' },
   }).ok, false)
+  assert.equal(parseClientMessage({ ...hello, aiKey: 'frame-secret' }).ok, false)
+  assert.equal(parseClientMessage({ ...hello, auth: { ...hello.auth, aiKey: 'auth-secret' } }).ok, false)
+  assert.equal(parseServerMessage({ ...projection, aiKey: 'projection-secret' }).ok, false)
+  assert.equal(parseServerMessage({ ...projection, note: '{"aiKey":"nested-frame-secret"}' }).ok, false)
+  assert.equal(parseServerMessage({ ...welcome, aiKey: 'welcome-secret' }).ok, false)
+  assert.equal(parseServerMessage({ ...projection, answerKey: 'top-level-answer-secret' }).ok, false)
+  const importBundleCommand = {
+    t: 'command', v: PROTOCOL_VERSION, requestId: 'req-import', opId: 'op-import',
+    command: { type: 'admin.importPortableBundle', payload: { bundle: fixtures.bundle } },
+  }
+  assert.equal(parseClientMessage(importBundleCommand).ok, true)
+  assert.equal(parseClientMessage({ ...importBundleCommand, answerKey: 'frame-answer-secret' }).ok, false)
+  const dirtyImportBundle = JSON.parse(JSON.stringify(fixtures.bundle))
+  dirtyImportBundle.engine.scheduledJobs[0].payload.note = '{"webhookToken":"import-secret"}'
+  assert.equal(parseClientMessage({
+    ...importBundleCommand,
+    command: { type: 'admin.importPortableBundle', payload: { bundle: dirtyImportBundle } },
+  }).ok, false)
+  assert.equal(parseServerMessage({
+    t: 'portableBundle', v: 1, requestId: 'req-bundle', aiKey: 'bundle-frame-secret', bundle: fixtures.bundle,
+  }).ok, false)
+  assert.equal(parseServerMessage({
+    t: 'portableBundle', v: 1, requestId: 'req-bundle', answerKey: 'frame-answer-secret', bundle: fixtures.bundle,
+  }).ok, false)
   assert.equal(parseServerMessage({
     ...projection,
     events: [{ ...orderedEvent, payload: { aiKey: 'secret' } }],
@@ -323,8 +347,31 @@ test('protocol parser validates versions, directions, request correlation and sh
   }).ok, false)
   assert.equal(parseServerMessage({ ...commandResult, status: 'rejected' }).ok, false)
   assert.equal(parseServerMessage({
+    ...commandResult,
+    status: 'rejected',
+    error: { code: 'invalid_payload', message: 'bad', refreshProjection: false },
+    result: { devices: [] },
+  }).ok, false)
+  assert.equal(parseServerMessage({
+    ...commandResult,
+    status: 'duplicate',
+    error: { code: 'invalid_payload', message: 'bad', refreshProjection: false },
+    result: { devices: [] },
+  }).ok, false)
+  assert.equal(parseServerMessage({
     t: 'commandStatusResult', v: 1, requestId: 'req-status', opId: 'op-1', status: 'not_applied',
     result: commandResult,
+  }).ok, false)
+  assert.equal(parseServerMessage({
+    t: 'commandStatusResult', v: 1, requestId: 'req-status', opId: 'op-1', status: 'applied',
+    result: {
+      ...commandResult,
+      status: 'rejected',
+      error: { code: 'invalid_payload', message: 'bad', refreshProjection: false },
+    },
+  }).ok, false)
+  assert.equal(parseServerMessage({
+    t: 'replay', v: PROTOCOL_VERSION, fromEventSeq: 2, toEventSeq: 2, events: [orderedEvent],
   }).ok, false)
   assert.equal(parseServerMessage({
     t: 'portableBundle', v: 1, requestId: 'req-bundle', bundle: fixtures.bundle,
