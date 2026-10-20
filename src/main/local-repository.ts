@@ -4,12 +4,12 @@ import { dirname } from 'node:path'
 import { atomicWrite } from './atomic-write'
 import { startSave } from '../shared/save-logic'
 import { sessionActivityForInterval } from '../shared/pet-runtime/coverage'
-import type { CoverageReopen, CoverageSurvivor, SessionCoverageInterval } from '../shared/pet-runtime/types'
+import type { CoverageReopen, CoverageSurvivor, EngineState, SessionCoverageInterval } from '../shared/pet-runtime/types'
 import { orderedDomainEvent, type DomainEvent, type OrderedDomainEvent } from '../shared/pet-runtime/events'
 import { advanceSchedulerChunk, CATCHUP_CHUNK_TICKS } from '../shared/pet-runtime/scheduler'
 import {
-  emptyOpIdCache, executeCommandIdempotent, migrateOpIdCache, validateOpIdCache,
-  validatePersistedRuntimeState, type OpIdCache, type PersistedRuntimeState,
+  emptyOpIdCache, executeCommandIdempotent, migrateOpIdCache, validateOpIdCache, OP_ID_CACHE_SCHEMA_VERSION,
+  validatePersistedRuntimeState, type IdempotencyRecord, type OpIdCache, type PersistedRuntimeState,
 } from '../shared/pet-runtime/idempotency'
 import type { CommandError, CommandRole, PetCommand } from '../shared/sync/protocol'
 import type { RuntimeCommandContext, RuntimeOutcome } from '../shared/pet-runtime/runtime-types'
@@ -27,7 +27,7 @@ export const LOCAL_REPOSITORY_ENV_FLAG = 'QQPET_LOCAL_REPOSITORY_V2'
 export const LOCAL_SCHEDULER_POLL_MS = 1000
 export const LOCAL_COVERAGE_GRACE_MS = 60_000
 
-export type LocalRepositoryState = 'loading' | 'ready' | 'catching_up' | 'read_only' | 'suspended' | 'stopped'
+export type LocalRepositoryState = 'loading' | 'ready' | 'catching_up' | 'read_only' | 'handoff_pending' | 'suspended' | 'stopped'
 export type LocalRepositoryRole = CommandRole
 
 export interface LocalRepositoryStatus {
@@ -83,16 +83,35 @@ export interface LocalRepositoryOptions {
   initialSave?: unknown
   onProjection?: (projection: LocalPetProjection) => void
   onStatus?: (status: LocalRepositoryStatus) => void
+  yieldToEventLoop?: () => Promise<void>
+  writeDocument?: (file: string, text: string) => void
+}
+
+export interface LocalImportOptions {
+  opId?: string
+  expectedAuthorityId?: string
+  expectedRestoreGeneration?: number
+  expectedEpoch?: number
+  expectedRevision?: number
+  expectedEventSeq?: number
 }
 
 interface LoadedDocument {
   document: LocalPetDocumentV2
   idempotency: OpIdCache
 }
+interface MutationContext {
+  base: LocalPetDocumentV2
+  survivors: CoverageSurvivor[]
+  coverage: SessionCoverageInterval[]
+}
 
 function commandError(message: string, code: CommandError['code'] = 'invalid_payload'): RuntimeOutcome {
   return { ok: false, events: [], error: { code, message, refreshProjection: true } }
 }
+
+function cloneDocument(value: LocalPetDocumentV2): LocalPetDocumentV2 { return JSON.parse(JSON.stringify(value)) as LocalPetDocumentV2 }
+function cloneProjection(value: LocalPetProjection): LocalPetProjection { return JSON.parse(JSON.stringify(value)) as LocalPetProjection }
 
 export function normalizeLocalPetDocument(raw: unknown): LoadedDocument {
   let value = raw
@@ -124,9 +143,10 @@ export class LocalRepository {
   private lastProjectionValue: LocalPetProjection | null = null
   private events: OrderedDomainEvent[] = []
   private lastReopenValue: CoverageReopen | undefined
-  private mutationCoverage: SessionCoverageInterval[] = []
   private stopped = false
   private appInstanceId = ''
+  private detachRollback: LocalPetDocumentV2 | null = null
+  private yieldToEventLoop: () => Promise<void>
 
   constructor(options: LocalRepositoryOptions) {
     if (typeof options.documentPath !== 'string' || options.documentPath.length === 0) throw new Error('LocalRepository documentPath is required')
@@ -138,32 +158,57 @@ export class LocalRepository {
     }
     this.now = options.nowMs ?? (() => Date.now())
     this.newUuid = options.randomUUID ?? randomUUID
+    this.yieldToEventLoop = options.yieldToEventLoop ?? (() => new Promise<void>(resolve => { setTimeout(resolve, 0) }))
     if (Number.isSafeInteger(this.options.pollIntervalMs) === false || this.options.pollIntervalMs <= 0) throw new Error('pollIntervalMs must be a positive safe integer')
     if (Number.isSafeInteger(this.options.maxChunkTicks) === false || this.options.maxChunkTicks <= 0) throw new Error('maxChunkTicks must be a positive safe integer')
   }
 
   get currentDeviceId(): string { return this.localDeviceIdValue }
+  private isReadOnly(): boolean {
+    return this.state === 'read_only' || this.state === 'handoff_pending' || this.localDocument === null || this.localDocument.authority.state !== 'active' || this.localDocument.authority.stamp.owner !== 'local'
+  }
   get lastReopen(): CoverageReopen | undefined { return this.lastReopenValue }
+  private hasActiveAuthority(): boolean {
+    return this.localDocument !== null && this.localDocument.authority.state === 'active' && this.localDocument.authority.stamp.owner === 'local'
+  }
+  private findCached(opId: string): boolean {
+    return this.idempotency.records.some(record => record.petId === this.localDeviceIdValue && record.deviceId === this.localDeviceIdValue && record.opId === opId)
+  }
+  private importRecord(opId: string, stamp: AuthorityStamp): IdempotencyRecord {
+    return {
+      petId: this.localDeviceIdValue, deviceId: this.localDeviceIdValue, opId,
+      commandType: 'admin.importPortableBundle', resultPresent: true,
+      result: { authorityId: stamp.authorityId, epoch: stamp.epoch, revision: stamp.revision, eventSeq: stamp.eventSeq },
+    }
+  }
   getStatus(): LocalRepositoryStatus {
     return {
       mode: 'local', state: this.state, offline: true, role: this.role,
-      readOnly: this.state === 'read_only', catchingUp: this.state === 'catching_up',
+      readOnly: this.isReadOnly(), catchingUp: this.state === 'catching_up',
       authorityState: this.localDocument?.authority.state ?? 'active',
       revision: this.localDocument?.revision ?? 0, eventSeq: this.localDocument?.eventSeq ?? 0,
       ...(this.error === undefined ? {} : { error: this.error }),
     }
   }
-  getProjection(): LocalPetProjection | null { return this.lastProjectionValue }
+  getProjection(): LocalPetProjection | null { return this.lastProjectionValue === null ? null : cloneProjection(this.lastProjectionValue) }
   getDocument(): LocalPetDocumentV2 | null { return this.localDocument === null ? null : JSON.parse(JSON.stringify(this.localDocument)) as LocalPetDocumentV2 }
-  getRecentEvents(): OrderedDomainEvent[] { return [...this.events] }
+  getRecentEvents(): OrderedDomainEvent[] { return JSON.parse(JSON.stringify(this.events)) as OrderedDomainEvent[] }
 
-  load(): LocalPetProjection | null {
-    if (this.loaded) return this.lastProjectionValue
+  async load(): Promise<LocalPetProjection | null> {
+    if (this.loaded) return this.getProjection()
     try {
       const loaded = this.loadOrMigrate()
       this.localDocument = loaded.document
       this.idempotency = loaded.idempotency
       this.localDeviceIdValue = loaded.document.device.localDeviceId
+      this.loaded = true
+      if (loaded.document.authority.state !== 'active' || loaded.document.authority.stamp.owner !== 'local') {
+        this.state = 'read_only'
+        this.error = 'authority_not_active'
+        this.emitProjection()
+        return this.getProjection()
+      }
+
       this.repairCoverage(this.now(), 'crash_repaired')
       if (loaded.document.bundle.engine.advanceWhileEmpty === false && loaded.document.bundle.engine.lastSchedulerWallMs < this.now()) {
         loaded.document.bundle.engine.lastSchedulerWallMs = this.now()
@@ -171,12 +216,10 @@ export class LocalRepository {
       this.openCoverage(this.now())
       this.syncAuthority(this.now())
       this.persist()
-      this.loaded = true
       this.state = 'ready'
       this.emitProjection()
-      this.catchUp(this.now())
-      this.emitProjection()
-      return this.lastProjectionValue
+      await this.catchUp(this.now())
+      return this.getProjection()
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error)
       this.state = 'read_only'
@@ -185,31 +228,40 @@ export class LocalRepository {
     }
   }
 
-  pump(): Promise<void> { return this.enqueue(() => this.pollScheduler()) }
+  pump(): Promise<void> { return this.enqueue(async () => { await this.pollScheduler() }) }
 
-  start(): LocalPetProjection | null {
-    if (this.stopped) throw new Error('LocalRepository has been stopped')
-    const projection = this.load()
-    if (projection === null) return null
-    if (this.options.autoScheduler && this.schedulerTimer === undefined) {
-      this.schedulerTimer = setInterval(() => { void this.pump() }, this.options.pollIntervalMs)
-      if (typeof this.schedulerTimer.unref === 'function') this.schedulerTimer.unref()
-    }
-    return this.lastProjectionValue
+  async start(): Promise<LocalPetProjection | null> {
+    return this.enqueue(async () => {
+      if (this.stopped) throw new Error('LocalRepository has been stopped')
+      const projection = await this.load()
+      if (projection === null) return null
+      if (this.isReadOnly() === false && this.options.autoScheduler && this.schedulerTimer === undefined) {
+        this.schedulerTimer = setInterval(() => { void this.pump() }, this.options.pollIntervalMs)
+        if (typeof this.schedulerTimer.unref === 'function') this.schedulerTimer.unref()
+      }
+      return this.getProjection()
+    })
   }
 
-  flush(): void { if (this.localDocument !== null && this.state !== 'read_only') this.persist() }
+  async flush(): Promise<void> {
+    await this.queue
+    if (this.localDocument !== null && this.isReadOnly() === false && this.state !== 'stopped') this.persist()
+  }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.stopped) return
+    await this.queue
     this.stopped = true
     if (this.schedulerTimer !== undefined) { clearInterval(this.schedulerTimer); this.schedulerTimer = undefined }
-    if (this.localDocument !== null && this.state !== 'read_only' && this.state !== 'stopped') {
+    if (this.localDocument !== null && this.isReadOnly() === false) {
+      const candidate = cloneDocument(this.localDocument)
       const at = this.now()
-      this.touchCoverage(at)
-      this.closeOpenCoverage(at, 'app_shutdown')
-      this.syncAuthority(at)
-      this.persist()
+      this.touchCoverageOn(candidate, at)
+      this.closeOpenCoverageOn(candidate, at, 'app_shutdown')
+      this.syncAuthorityOn(candidate, at)
+      this.persistCandidate(candidate)
+      this.localDocument = candidate
+      this.idempotency = candidate.idempotency ?? this.idempotency
     }
     this.state = 'stopped'
     this.emitProjection()
@@ -218,20 +270,20 @@ export class LocalRepository {
   setRole(role: LocalRepositoryRole): LocalRepositoryStatus { this.role = role; this.emitProjection(); return this.getStatus() }
 
   setAdvanceWhileEmpty(enabled: boolean): LocalPetProjection | null {
-    if (this.localDocument === null || this.state === 'read_only') return this.lastProjectionValue
+    if (this.localDocument === null || this.isReadOnly()) return this.getProjection()
     this.localDocument.bundle.engine.advanceWhileEmpty = enabled
     this.persist()
     this.emitProjection()
-    return this.lastProjectionValue
+    return this.getProjection()
   }
 
   setLocalSettings(patch: Partial<DeviceLocalSettings>): LocalPetProjection | null {
-    if (this.localDocument === null || this.state === 'read_only') return this.lastProjectionValue
+    if (this.localDocument === null || this.isReadOnly()) return this.getProjection()
     this.localDocument.device = { ...this.localDocument.device, settings: { ...this.localDocument.device.settings, ...patch } }
     assertDeviceLocalOverlay(this.localDocument.device)
     this.persist()
     this.emitProjection()
-    return this.lastProjectionValue
+    return this.getProjection()
   }
 
   command(command: PetCommand, opId: string, role: LocalRepositoryRole = 'owner'): Promise<LocalCommandResult> {
@@ -239,9 +291,11 @@ export class LocalRepository {
   }
 
   reset(opId: string = this.newUuid()): Promise<LocalCommandResult> {
-    return this.enqueue(() => {
-      const survivors = this.closeForMutation('pet_reset')
-      return this.executeCommandNow({ type: 'pet.reset', payload: {} }, opId, 'owner', survivors)
+    return this.enqueue(async () => {
+      if (this.localDocument === null || this.isReadOnly()) return { outcome: commandError('local repository is read-only', 'not_available'), events: [], projection: this.getProjection(), duplicate: false }
+      if (this.findCached(opId)) return this.executeCommandNow({ type: 'pet.reset', payload: {} }, opId, 'owner')
+      const mutation = this.prepareMutation('pet_reset')
+      return this.executeCommandNow({ type: 'pet.reset', payload: {} }, opId, 'owner', mutation)
     })
   }
 
@@ -251,31 +305,125 @@ export class LocalRepository {
     return JSON.parse(JSON.stringify(this.localDocument.bundle)) as PortablePetBundleV1
   }
 
-  importPortableBundle(value: PortablePetBundleV1 | string, _opId: string = this.newUuid()): LocalPetProjection | null {
-    if (this.localDocument === null || this.state === 'read_only') return this.lastProjectionValue
-    const parsed = typeof value === 'string' ? JSON.parse(value) as unknown : value
-    const bundle = migratePortablePetBundle(parsed)
-    if (bundle.originLocalDeviceId !== undefined && bundle.originLocalDeviceId !== this.localDeviceIdValue) throw new Error('identity_mismatch: imported bundle originLocalDeviceId does not match local device')
-    if (bundle.authority.owner !== 'local') throw new Error('identity_mismatch: only local-authority bundles can import locally')
-    const survivors = this.closeForMutation('import_replaced')
-    this.localDocument.bundle = { ...bundle, originLocalDeviceId: bundle.originLocalDeviceId ?? this.localDeviceIdValue, authority: this.localDocument.authority.stamp }
-    this.localDocument.bundle.shared = bundle.engine.save
-    this.localDocument.bundle.engine = bundle.engine
-    this.localDocument.revision = this.localDocument.authority.stamp.revision
-    this.localDocument.eventSeq = this.localDocument.authority.stamp.eventSeq
-    this.openCoverageAfterMutation(survivors, this.now())
-    this.persist()
-    this.emitProjection()
-    return this.lastProjectionValue
+  async exportForDetach(incomingEpoch: number = 0): Promise<PortablePetBundleV1> {
+    return this.enqueue(async () => {
+      if (this.localDocument === null || this.hasActiveAuthority() === false) throw new Error('authority_not_active')
+      if (Number.isSafeInteger(incomingEpoch) === false || incomingEpoch < 0) throw new Error('incomingEpoch must be a non-negative safe integer')
+      if (this.schedulerTimer !== undefined) { clearInterval(this.schedulerTimer); this.schedulerTimer = undefined }
+      const previous = cloneDocument(this.localDocument)
+      const candidate = cloneDocument(this.localDocument)
+      const at = this.now()
+      this.closeAllOpenCoverageOn(candidate, at, 'authority_handoff')
+      candidate.authority.stamp.epoch = Math.max(candidate.authority.stamp.epoch, incomingEpoch) + 1
+      candidate.authority.state = 'handoff_pending'
+      candidate.revision += 1
+      this.syncAuthorityOn(candidate, at)
+      this.persistCandidate(candidate)
+      this.localDocument = candidate
+      this.idempotency = candidate.idempotency ?? this.idempotency
+      this.detachRollback = previous
+      this.state = 'handoff_pending'
+      this.openCoverageId = undefined
+      this.emitProjection()
+      return JSON.parse(JSON.stringify(candidate.bundle)) as PortablePetBundleV1
+    })
+  }
+
+  async rollbackDetach(): Promise<LocalPetProjection | null> {
+    return this.enqueue(async () => {
+      if (this.localDocument === null || this.localDocument.authority.state !== 'handoff_pending' || this.detachRollback === null) return this.getProjection()
+      const restored = cloneDocument(this.detachRollback)
+      this.persistCandidate(restored)
+      this.localDocument = restored
+      this.idempotency = restored.idempotency ?? this.idempotency
+      this.openCoverageId = restored.bundle.engine.sessionCoverage.find(interval => interval.disconnectedAtWallMs === undefined)?.coverageId
+      this.detachRollback = null
+      this.state = 'ready'
+      this.emitProjection()
+      return this.getProjection()
+    })
+  }
+
+  async importPortableBundle(value: PortablePetBundleV1 | string, options: string | LocalImportOptions = {}): Promise<LocalPetProjection | null> {
+    const opts: LocalImportOptions = typeof options === 'string' ? { opId: options } : options
+    const opId = opts.opId ?? this.newUuid()
+    return this.enqueue(async () => {
+      if (this.localDocument === null) return this.getProjection()
+      if (this.findCached(opId)) return this.getProjection()
+      try {
+        const parsed = typeof value === 'string' ? JSON.parse(value) as unknown : value
+        const bundle = migratePortablePetBundle(parsed)
+        const incoming = bundle.authority
+        if (bundle.originLocalDeviceId !== undefined && bundle.originLocalDeviceId !== this.localDeviceIdValue) throw new Error('identity_mismatch: originLocalDeviceId')
+        if (opts.expectedAuthorityId !== undefined && incoming.authorityId !== opts.expectedAuthorityId) throw new Error('identity_mismatch: authorityId')
+        if (opts.expectedRestoreGeneration !== undefined && incoming.restoreGeneration !== opts.expectedRestoreGeneration) throw new Error('identity_mismatch: restoreGeneration')
+        if (opts.expectedEpoch !== undefined && incoming.epoch !== opts.expectedEpoch) throw new Error('identity_mismatch: epoch')
+        if (opts.expectedRevision !== undefined && incoming.revision !== opts.expectedRevision) throw new Error('identity_mismatch: revision')
+        if (opts.expectedEventSeq !== undefined && incoming.eventSeq !== opts.expectedEventSeq) throw new Error('identity_mismatch: eventSeq')
+        const currentStamp = this.localDocument.authority.stamp
+        if (incoming.owner === 'local' && incoming.authorityId !== currentStamp.authorityId) throw new Error('identity_mismatch: local authorityId')
+
+        const stamp: AuthorityStamp = {
+          owner: 'local',
+          authorityId: incoming.owner === 'local' ? incoming.authorityId : currentStamp.authorityId,
+          epoch: Math.max(currentStamp.epoch, incoming.epoch) + 1,
+          restoreGeneration: Math.max(currentStamp.restoreGeneration, incoming.restoreGeneration),
+          revision: incoming.revision, eventSeq: incoming.eventSeq,
+          handoffId: incoming.handoffId || currentStamp.handoffId,
+          detachedAtWallMs: incoming.detachedAtWallMs,
+        }
+        const at = this.now()
+        const candidate = cloneDocument(this.localDocument)
+        const survivors = this.captureSurvivorsOn(candidate, 'import_replaced', at)
+        this.closeAllOpenCoverageOn(candidate, at, 'import_replaced')
+
+        const importedEngine = JSON.parse(JSON.stringify(bundle.engine)) as EngineState
+        const hostCoverage: SessionCoverageInterval = {
+          coverageId: this.newUuid(), deviceId: this.localDeviceIdValue,
+          connectedAtWallMs: at, lastHeartbeatWallMs: at,
+        }
+        importedEngine.sessionCoverage = [...importedEngine.sessionCoverage, hostCoverage]
+        importedEngine.coverageReopen = { operationId: this.newUuid(), commitWallMs: at, survivors, state: 'pending' }
+        candidate.bundle = {
+          ...bundle, originLocalDeviceId: bundle.originLocalDeviceId || this.localDeviceIdValue,
+          engine: importedEngine, shared: importedEngine.save, authority: stamp, exportedAtWallMs: at,
+        }
+        candidate.authority = { state: 'active', stamp }
+        candidate.revision = stamp.revision
+        candidate.eventSeq = stamp.eventSeq
+        candidate.idempotency = {
+          schemaVersion: OP_ID_CACHE_SCHEMA_VERSION,
+          records: [...(candidate.idempotency || emptyOpIdCache()).records, this.importRecord(opId, stamp)],
+        }
+
+        this.backup(this.options.documentBackupPath || this.options.documentPath + '.bak', this.options.documentPath)
+        this.persistCandidate(candidate)
+        this.localDocument = candidate
+        this.idempotency = candidate.idempotency ?? emptyOpIdCache()
+        this.openCoverageId = hostCoverage.coverageId
+        this.lastReopenValue = importedEngine.coverageReopen
+        this.state = 'ready'
+        this.error = undefined
+        this.emitProjection()
+        return this.getProjection()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error)
+        this.state = 'read_only'
+        this.emitProjection()
+        return null
+      }
+    })
   }
 
   suspend(): LocalPetProjection | null {
-    if (this.localDocument === null || this.state === 'read_only') return this.lastProjectionValue
+    if (this.localDocument === null || this.isReadOnly()) return this.getProjection()
     const at = this.now()
-    this.touchCoverage(at)
-    const survivors = this.captureSurvivors('suspend', at)
-    this.closeOpenCoverage(at, 'suspend')
-    this.lastReopenValue = { operationId: this.newUuid(), commitWallMs: at, survivors, state: 'suspended', suspendedAtWallMs: at }
+    const open = this.localDocument.bundle.engine.sessionCoverage.find(item => item.coverageId === this.openCoverageId)
+    const pendingReopen = this.localDocument.bundle.engine.coverageReopen?.state === 'pending'
+    const closeAt = pendingReopen || open === undefined ? at : Math.min(at, open.lastHeartbeatWallMs + LOCAL_COVERAGE_GRACE_MS)
+    const survivors = this.captureSurvivors('suspend', closeAt)
+    this.closeOpenCoverage(closeAt, 'suspend')
+    this.lastReopenValue = { operationId: this.newUuid(), commitWallMs: closeAt, survivors, state: 'suspended', suspendedAtWallMs: at }
     this.localDocument.bundle.engine.coverageReopen = this.lastReopenValue
     this.state = 'suspended'
     this.syncAuthority(at)
@@ -285,7 +433,7 @@ export class LocalRepository {
   }
 
   resume(): LocalPetProjection | null {
-    if (this.localDocument === null || this.state === 'read_only' || this.state === 'stopped') return this.lastProjectionValue
+    if (this.localDocument === null || this.isReadOnly() || this.state === 'stopped') return this.getProjection()
     const at = this.now()
     if (this.localDocument.bundle.engine.coverageReopen !== undefined) {
       this.lastReopenValue = this.localDocument.bundle.engine.coverageReopen
@@ -306,37 +454,52 @@ export class LocalRepository {
     return run
   }
 
-  private executeCommandNow(command: PetCommand, opId: string, role: LocalRepositoryRole, reopenSurvivors?: CoverageSurvivor[]): LocalCommandResult {
-    if (this.localDocument === null || this.state === 'read_only') return { outcome: commandError('local repository is read-only', 'not_available'), events: [], projection: this.lastProjectionValue, duplicate: false }
-    if (this.state !== 'ready' && this.state !== 'suspended') return { outcome: commandError('local repository is catching up', 'server_catching_up'), events: [], projection: this.lastProjectionValue, duplicate: false }
+  private executeCommandNow(command: PetCommand, opId: string, role: LocalRepositoryRole, mutation?: MutationContext): LocalCommandResult {
+    if (this.localDocument === null || this.isReadOnly()) return { outcome: commandError('local repository is read-only', 'not_available'), events: [], projection: this.getProjection(), duplicate: false }
+    if (this.state !== 'ready' && this.state !== 'suspended') return { outcome: commandError('local repository is catching up', 'server_catching_up'), events: [], projection: this.getProjection(), duplicate: false }
     const at = this.now()
-    this.touchCoverage(at)
-    const engine = this.localDocument.bundle.engine
-    const idempotentDocument: PersistedRuntimeState = { schemaVersion: 2, engine, idempotency: this.idempotency }
+    const candidate = mutation ? cloneDocument(mutation.base) : cloneDocument(this.localDocument)
+    this.touchCoverageOn(candidate, at)
+    const engine = candidate.bundle.engine
+    const idempotentDocument: PersistedRuntimeState = { schemaVersion: 2, engine, idempotency: candidate.idempotency ?? emptyOpIdCache() }
+
     const ctx: RuntimeCommandContext = {
       gameTimeMs: engine.gameTimeMs, environment: engine.environment, activeClientCount: 1, sessionActive: true,
       actorDeviceId: this.localDeviceIdValue, actorRole: role, wallNowMs: at,
     }
     const result = executeCommandIdempotent(this.localDeviceIdValue, this.localDeviceIdValue, idempotentDocument, command, ctx, opId)
-    if (result.duplicate) return { outcome: result.outcome, events: [], projection: this.lastProjectionValue, duplicate: true }
-    const newRevision = this.localDocument.revision + 1
-    const eventStart = this.localDocument.eventSeq
-    const ordered = result.outcome.events.map((event: DomainEvent, index: number) => orderedDomainEvent(eventStart + index + 1, event))
-    this.localDocument.revision = newRevision
-    this.localDocument.eventSeq = eventStart + ordered.length
-    this.localDocument.bundle.engine = result.document.engine
-    this.localDocument.bundle.shared = result.document.engine.save
-    this.localDocument.bundle.exportedAtWallMs = at
-    this.localDocument.authority.stamp.revision = this.localDocument.revision
-    this.localDocument.authority.stamp.eventSeq = this.localDocument.eventSeq
-    this.localDocument.bundle.authority = this.localDocument.authority.stamp
-    this.idempotency = result.document.idempotency
-    if (reopenSurvivors !== undefined) this.openCoverageAfterMutation(reopenSurvivors, at)
-    this.syncAuthority(at)
-    this.persist()
-    if (result.outcome.events.length > 0) this.events.push(...ordered)
+    if (result.duplicate) return { outcome: result.outcome, events: [], projection: this.getProjection(), duplicate: true }
+    const accepted = result.outcome.ok
+    const eventStart = candidate.eventSeq
+    const ordered = accepted ? result.outcome.events.map((event: DomainEvent, index: number) => orderedDomainEvent(eventStart + index + 1, event)) : []
+
+    candidate.revision = accepted ? this.localDocument.revision + 1 : this.localDocument.revision
+    candidate.eventSeq = eventStart + (accepted ? ordered.length : 0)
+    candidate.bundle.engine = result.document.engine
+    candidate.bundle.shared = result.document.engine.save
+    candidate.idempotency = result.document.idempotency
+    let openedCoverageId: string | undefined
+    let reopenMarker: CoverageReopen | undefined
+    if (mutation !== undefined && accepted) {
+      candidate.bundle.engine.sessionCoverage = [...mutation.coverage]
+      openedCoverageId = this.openCoverageOn(candidate, at)
+      reopenMarker = { operationId: this.newUuid(), commitWallMs: at, survivors: mutation.survivors, state: 'pending' }
+      candidate.bundle.engine.coverageReopen = reopenMarker
+    }
+    this.syncAuthorityOn(candidate, at)
+    try {
+      this.persistCandidate(candidate)
+    } catch (error) {
+      this.error = error instanceof Error ? error.message : String(error)
+      return { outcome: commandError('local persistence failed', 'internal'), events: [], projection: this.getProjection(), duplicate: false }
+    }
+    this.localDocument = candidate
+    this.idempotency = candidate.idempotency ?? emptyOpIdCache()
+    if (openedCoverageId !== undefined) this.openCoverageId = openedCoverageId
+    if (reopenMarker !== undefined) this.lastReopenValue = reopenMarker
+    if (accepted && ordered.length > 0) this.events.push(...ordered)
     this.emitProjection()
-    return { outcome: result.outcome, events: ordered, projection: this.lastProjectionValue, duplicate: false }
+    return { outcome: result.outcome, events: ordered, projection: this.getProjection(), duplicate: false }
   }
 
   private loadOrMigrate(): LoadedDocument {
@@ -344,13 +507,19 @@ export class LocalRepository {
     if (existsSync(documentPath)) {
       const text = readFileSync(documentPath, 'utf8')
       let raw: unknown
-      try { raw = JSON.parse(text) } catch (error) { throw new Error('local document is not valid JSON: ' + String(error)) }
+      try { raw = JSON.parse(text) } catch (error) {
+        this.backup(this.options.documentBackupPath || documentPath + '.bak', documentPath)
+        throw new Error('local document is not valid JSON: ' + String(error))
+      }
       const loaded = normalizeLocalPetDocument(raw)
       const rawRecord = raw as Record<string, unknown>
+      const rawAuthority = rawRecord.authority as Record<string, unknown> | null
+      const rawStamp = rawAuthority && typeof rawAuthority.stamp === 'object' ? rawAuthority.stamp as Record<string, unknown> : null
+      if (rawAuthority === null || rawAuthority.state !== 'active' || rawStamp === null || rawStamp.owner !== 'local') return loaded
       const runtime = rawRecord.runtime as Record<string, unknown> | null
       const duplicateIdentity = runtime !== null && typeof runtime === 'object' && 'localDeviceId' in runtime
       const missingIdempotency = rawRecord.idempotency === undefined
-      if (duplicateIdentity) this.backup(this.options.documentBackupPath || documentPath + '.bak', documentPath)
+      if (duplicateIdentity || missingIdempotency) this.backup(this.options.documentBackupPath || documentPath + '.bak', documentPath)
       if (duplicateIdentity || missingIdempotency) this.writeDocument(loaded.document)
       this.appInstanceId = this.options.appInstanceId || this.newUuid()
       loaded.document.runtime = { appInstanceId: this.appInstanceId, startedAtWallMs: this.now() }
@@ -410,24 +579,42 @@ export class LocalRepository {
 
   private openCoverage(at: number): void {
     if (this.localDocument === null) return
+    this.openCoverageId = this.openCoverageOn(this.localDocument, at)
+  }
+  private openCoverageOn(document: LocalPetDocumentV2, at: number): string {
     const coverage: SessionCoverageInterval = { coverageId: this.newUuid(), deviceId: this.localDeviceIdValue, connectedAtWallMs: at, lastHeartbeatWallMs: at }
-    this.localDocument.bundle.engine.sessionCoverage.push(coverage)
-    this.openCoverageId = coverage.coverageId
+    document.bundle.engine.sessionCoverage.push(coverage)
+    return coverage.coverageId
   }
   private touchCoverage(at: number): void {
-    if (this.localDocument === null || this.openCoverageId === undefined) return
-    const interval = this.localDocument.bundle.engine.sessionCoverage.find(item => item.coverageId === this.openCoverageId)
+    if (this.localDocument !== null) this.touchCoverageOn(this.localDocument, at)
+  }
+  private touchCoverageOn(document: LocalPetDocumentV2, at: number, coverageId: string | undefined = this.openCoverageId): void {
+    if (coverageId === undefined) return
+    const interval = document.bundle.engine.sessionCoverage.find(item => item.coverageId === coverageId)
     if (interval !== undefined && interval.lastHeartbeatWallMs < at) interval.lastHeartbeatWallMs = at
   }
-  private closeOpenCoverage(at: number, reason: 'app_shutdown' | 'suspend' | 'pet_reset' | 'import_replaced'): void {
-    if (this.localDocument === null || this.openCoverageId === undefined) return
-    const interval = this.localDocument.bundle.engine.sessionCoverage.find(item => item.coverageId === this.openCoverageId)
+  private closeOpenCoverage(at: number, reason: 'app_shutdown' | 'suspend' | 'pet_reset' | 'import_replaced' | 'authority_handoff'): void {
+    if (this.localDocument !== null) this.closeOpenCoverageOn(this.localDocument, at, reason)
+    this.openCoverageId = undefined
+  }
+  private closeOpenCoverageOn(document: LocalPetDocumentV2, at: number, reason: 'app_shutdown' | 'suspend' | 'pet_reset' | 'import_replaced' | 'authority_handoff', coverageId: string | undefined = this.openCoverageId): void {
+    if (coverageId === undefined) return
+    const interval = document.bundle.engine.sessionCoverage.find(item => item.coverageId === coverageId)
     if (interval !== undefined) {
       interval.disconnectedAtWallMs = Math.max(interval.connectedAtWallMs, at)
       interval.lastHeartbeatWallMs = Math.max(interval.lastHeartbeatWallMs, interval.disconnectedAtWallMs)
       interval.closeReason = reason
     }
-    this.openCoverageId = undefined
+  }
+  private closeAllOpenCoverageOn(document: LocalPetDocumentV2, at: number, reason: 'authority_handoff' | 'import_replaced'): SessionCoverageInterval[] {
+    for (const interval of document.bundle.engine.sessionCoverage) {
+      if (interval.disconnectedAtWallMs !== undefined) continue
+      interval.disconnectedAtWallMs = Math.max(interval.connectedAtWallMs, at)
+      interval.lastHeartbeatWallMs = Math.max(interval.lastHeartbeatWallMs, interval.disconnectedAtWallMs)
+      interval.closeReason = reason
+    }
+    return document.bundle.engine.sessionCoverage
   }
   private captureSurvivors(reason: 'suspend' | 'pet_reset' | 'import_replaced', at: number): CoverageSurvivor[] {
     if (this.localDocument === null) return []
@@ -435,73 +622,95 @@ export class LocalRepository {
     if (open === undefined) return []
     return [{ kind: 'local_app', appInstanceId: this.localDocument.runtime.appInstanceId, localDeviceId: this.localDeviceIdValue, lastHeartbeatWallMs: open.lastHeartbeatWallMs, eligible: true, activeEndWallMs: at, activeEndProvenance: reason }]
   }
-  private closeForMutation(reason: 'pet_reset' | 'import_replaced'): CoverageSurvivor[] {
+  private captureSurvivorsOn(document: LocalPetDocumentV2, reason: 'suspend' | 'pet_reset' | 'import_replaced', at: number): CoverageSurvivor[] {
+    const open = document.bundle.engine.sessionCoverage.find(item => (this.openCoverageId === undefined || item.coverageId === this.openCoverageId) && item.disconnectedAtWallMs === undefined)
+    if (open === undefined) return []
+    return [{ kind: 'local_app', appInstanceId: document.runtime.appInstanceId, localDeviceId: this.localDeviceIdValue, lastHeartbeatWallMs: open.lastHeartbeatWallMs, eligible: true, activeEndWallMs: at, activeEndProvenance: reason }]
+  }
+  private prepareMutation(reason: 'pet_reset' | 'import_replaced'): MutationContext {
+    const base = cloneDocument(this.localDocument as LocalPetDocumentV2)
     const at = this.now()
-    this.touchCoverage(at)
-    const survivors = this.captureSurvivors(reason, at)
-    this.closeOpenCoverage(at, reason)
-    this.mutationCoverage = JSON.parse(JSON.stringify(this.localDocument?.bundle.engine.sessionCoverage ?? [])) as SessionCoverageInterval[]
-    this.lastReopenValue = { operationId: this.newUuid(), commitWallMs: at, survivors, state: 'pending' }
-    if (this.localDocument !== null) this.localDocument.bundle.engine.coverageReopen = this.lastReopenValue
-    return survivors
+    this.touchCoverageOn(base, at)
+    const survivors = this.captureSurvivorsOn(base, reason, at)
+    this.closeOpenCoverageOn(base, at, reason)
+    const coverage = JSON.parse(JSON.stringify(base.bundle.engine.sessionCoverage)) as SessionCoverageInterval[]
+    return { base, survivors, coverage }
   }
-  private openCoverageAfterMutation(survivors: CoverageSurvivor[], at: number): void {
-    if (this.localDocument === null) return
-    this.localDocument.bundle.engine.sessionCoverage = [...this.mutationCoverage]
-    this.openCoverage(at)
-    this.localDocument.bundle.engine.coverageReopen = { operationId: this.newUuid(), commitWallMs: at, survivors, state: 'pending' }
-    this.lastReopenValue = this.localDocument.bundle.engine.coverageReopen
-  }
-  private catchUp(target: number): void {
-    if (this.localDocument === null) return
-    const engine = this.localDocument.bundle.engine
-    if (target <= engine.lastSchedulerWallMs) { this.syncAuthority(target); this.persist(); return }
+  private async catchUp(target: number): Promise<void> {
+    if (this.localDocument === null || this.isReadOnly()) return
+    const anchor = this.localDocument.bundle.engine.lastSchedulerWallMs
+    if (target <= anchor) return
     let rounds = 0
     this.state = 'catching_up'
     this.emitProjection()
     while (this.localDocument.bundle.engine.lastSchedulerWallMs < target && rounds++ < 100000) {
-      const current = this.localDocument.bundle.engine
+      const candidate = cloneDocument(this.localDocument)
+      const current = candidate.bundle.engine
       const ctx: RuntimeCommandContext = { gameTimeMs: current.gameTimeMs, environment: current.environment, activeClientCount: 1, sessionActive: true, actorDeviceId: null }
-      const coverageAtWallMs = (from: number, to: number) => sessionActivityForInterval((this.localDocument as LocalPetDocumentV2).bundle.engine.sessionCoverage, from, to)
+      const coverageAtWallMs = (from: number, to: number) => sessionActivityForInterval(candidate.bundle.engine.sessionCoverage, from, to)
       const outcome = advanceSchedulerChunk(current, ctx, target, { maxChunkTicks: this.options.maxChunkTicks, coverageAtWallMs })
-      this.localDocument.bundle.engine = outcome.state
-      this.localDocument.bundle.shared = outcome.state.save
-      this.localDocument.bundle.exportedAtWallMs = target
-      this.syncAuthority(target)
-      this.persist()
+      const ordered = outcome.events.map((event: DomainEvent, index: number) => orderedDomainEvent(candidate.eventSeq + index + 1, event))
+      candidate.bundle.engine = outcome.state
+      candidate.bundle.shared = outcome.state.save
+      if (outcome.ticks > 0) candidate.revision += 1
+      candidate.eventSeq += ordered.length
+      this.syncAuthorityOn(candidate, target)
+      try {
+        this.persistCandidate(candidate)
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error)
+        this.state = 'read_only'
+        this.emitProjection()
+        return
+      }
+      this.localDocument = candidate
+      this.idempotency = candidate.idempotency ?? this.idempotency
+      if (ordered.length > 0) this.events.push(...ordered)
+      this.emitProjection()
       if (outcome.frozen || outcome.ticks === 0 || outcome.catchingUp === false) break
+      await this.yieldToEventLoop()
     }
     this.state = 'ready'
-    this.syncAuthority(target)
-    this.persist()
     this.emitProjection()
   }
-  private pollScheduler(): void {
-    if (this.localDocument === null || this.state === 'read_only' || this.state === 'stopped' || this.state === 'suspended') return
+  private async pollScheduler(): Promise<void> {
+    if (this.localDocument === null || this.isReadOnly() || this.state === 'stopped' || this.state === 'suspended') return
     const at = this.now()
     this.touchCoverage(at)
-    this.catchUp(at)
+    await this.catchUp(at)
   }
   private syncAuthority(at: number): void {
-    if (this.localDocument === null) return
-    const stamp = this.localDocument.authority.stamp
-    stamp.revision = this.localDocument.revision
-    stamp.eventSeq = this.localDocument.eventSeq
-    this.localDocument.bundle.authority = stamp
-    this.localDocument.bundle.shared = this.localDocument.bundle.engine.save
-    this.localDocument.bundle.exportedAtWallMs = at
+    if (this.localDocument !== null) this.syncAuthorityOn(this.localDocument, at)
+  }
+  private syncAuthorityOn(document: LocalPetDocumentV2, at: number): void {
+    const stamp = document.authority.stamp
+    stamp.revision = document.revision
+    stamp.eventSeq = document.eventSeq
+    document.bundle.authority = stamp
+    document.bundle.shared = document.bundle.engine.save
+    document.bundle.exportedAtWallMs = at
   }
   private writeDocument(document: LocalPetDocumentV2): void {
     assertLocalPetDocumentV2(document)
-    validateOpIdCache(document.idempotency || emptyOpIdCache())
+    const cache = document.idempotency || emptyOpIdCache()
+    validateOpIdCache(cache)
+    validatePersistedRuntimeState({ schemaVersion: 2, engine: document.bundle.engine, idempotency: cache })
     mkdirSync(dirname(this.options.documentPath), { recursive: true })
-    atomicWrite(this.options.documentPath, JSON.stringify(document, null, 2))
+    const text = JSON.stringify(document, null, 2)
+    if (this.options.writeDocument !== undefined) this.options.writeDocument(this.options.documentPath, text)
+    else atomicWrite(this.options.documentPath, text)
+  }
+  private persistCandidate(candidate: LocalPetDocumentV2): void {
+    candidate.idempotency = candidate.idempotency ?? emptyOpIdCache()
+    this.syncAuthorityOn(candidate, this.now())
+    this.writeDocument(candidate)
   }
   private persist(): void {
     if (this.localDocument === null) return
-    this.localDocument.idempotency = this.idempotency
-    this.syncAuthority(this.now())
-    this.writeDocument(this.localDocument)
+    const candidate = cloneDocument(this.localDocument)
+    candidate.idempotency = this.idempotency
+    this.persistCandidate(candidate)
+    this.localDocument = candidate
     this.emitProjection()
   }
   private backup(backupPath: string, sourcePath: string): void {
@@ -518,9 +727,9 @@ export class LocalRepository {
       shared: engine.save, device: this.localDocument.device,
       runtime: { appInstanceId: this.localDocument.runtime.appInstanceId, startedAtWallMs: this.localDocument.runtime.startedAtWallMs, localDeviceId: this.localDeviceIdValue },
     }
-    this.lastProjectionValue = projection
-    this.options.onStatus?.(projection.status)
-    this.options.onProjection?.(projection)
+    this.lastProjectionValue = cloneProjection(projection)
+    this.options.onStatus?.({ ...projection.status })
+    this.options.onProjection?.(cloneProjection(projection))
   }
 }
 
@@ -531,7 +740,7 @@ export function localRepositoryEnabled(env: NodeJS.ProcessEnv = process.env): bo
 export function startLocalRepositoryIfEnabled(options: LocalRepositoryOptions, env: NodeJS.ProcessEnv = process.env): LocalRepository | null {
   if (localRepositoryEnabled(env) === false) return null
   const repository = new LocalRepository(options)
-  repository.start()
+  void repository.start()
   return repository
 }
 
@@ -540,11 +749,13 @@ export interface LocalRepositoryLifecycleEvents {
   onQuit(listener: () => void): void
 }
 
-/** Registers start-on-ready/stop-on-quit only when the explicit flag is enabled. */
+/** Registers start-on-ready/stop-on-quit only when the explicit flag is enabled.
+ * C6 renderer wiring is deliberately deferred; src/main/index.ts remains legacy-only,
+ * so this helper cannot create a second authority in the current app. */
 export function registerLocalRepositoryLifecycle(options: LocalRepositoryOptions, events: LocalRepositoryLifecycleEvents, env: NodeJS.ProcessEnv = process.env): LocalRepository | null {
   if (localRepositoryEnabled(env) === false) return null
   const repository = new LocalRepository(options)
-  events.onReady(() => { repository.start() })
-  events.onQuit(() => { repository.flush(); repository.stop() })
+  events.onReady(() => { void repository.start() })
+  events.onQuit(async () => { await repository.flush(); await repository.stop() })
   return repository
 }

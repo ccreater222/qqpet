@@ -47,7 +47,7 @@ test('local repository migrates bare save to atomic v2 document and supports ide
   writeJson(legacy, fixtures.save)
   const clock = { value: WALL_TIME_MS }
   const repo = new LocalRepository(repoOptions(dir, clock))
-  const projection = repo.load()
+  const projection = await repo.load()
   assert.ok(projection)
   assert.equal(repo.getStatus().mode, 'local')
   assert.equal(repo.getStatus().offline, true)
@@ -75,7 +75,7 @@ test('local repository migrates bare save to atomic v2 document and supports ide
   assert.equal(repo.getProjection().device.settings.zoom, 1.25)
   repo.setRole('player')
   assert.equal(repo.getStatus().role, 'player')
-  repo.stop()
+  await repo.stop()
   assert.equal(repo.getStatus().state, 'stopped')
 })
 
@@ -84,29 +84,29 @@ test('scheduler catch-up honors advanceWhileEmpty true and false across restart'
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
   const trueRepo = new LocalRepository(repoOptions(dir, clock, { advanceWhileEmpty: true, maxChunkTicks: 1440 }))
-  const start = trueRepo.load()
+  const start = await trueRepo.load()
   const gameStart = start.gameTimeMs
   clock.value += 2 * 60000
   await trueRepo.pump()
   assert.equal(trueRepo.getProjection().gameTimeMs, gameStart + 2 * 60000)
   assert.equal(trueRepo.getStatus().state, 'ready')
-  trueRepo.stop()
+  await trueRepo.stop()
   assert.equal(existsSync(join(dir, 'save.json.tmp')), false)
 
   const falseDir = tempDir()
   writeJson(join(falseDir, 'legacy.json'), fixtures.save)
   const falseClock = { value: WALL_TIME_MS }
   const falseRepo = new LocalRepository(repoOptions(falseDir, falseClock, { advanceWhileEmpty: false, maxChunkTicks: 1440 }))
-  const falseStart = falseRepo.load()
+  const falseStart = await falseRepo.load()
   const falseGame = falseStart.gameTimeMs
-  falseRepo.stop()
+  await falseRepo.stop()
   falseClock.value += 2 * 60000
   const restarted = new LocalRepository(repoOptions(falseDir, falseClock, { advanceWhileEmpty: false, maxChunkTicks: 1440 }))
-  const resumed = restarted.load()
+  const resumed = await restarted.load()
   assert.ok(resumed)
   assert.equal(restarted.getProjection().gameTimeMs, falseGame)
   assert.equal(restarted.getProjection().advanceWhileEmpty, false)
-  restarted.stop()
+  await restarted.stop()
 })
 
 test('reset and portable import close active coverage and reopen exact local survivor intervals', async () => {
@@ -114,7 +114,7 @@ test('reset and portable import close active coverage and reopen exact local sur
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
   const repo = new LocalRepository(repoOptions(dir, clock))
-  repo.load()
+  await repo.load()
   const before = repo.getDocument().bundle.engine.sessionCoverage
   assert.equal(before.length, 1)
   const reset = await repo.reset('op-reset')
@@ -130,16 +130,16 @@ test('reset and portable import close active coverage and reopen exact local sur
 
   const bundle = repo.exportPortableBundle()
   clock.value += 1000
-  repo.importPortableBundle(bundle, 'op-import')
+  await repo.importPortableBundle(bundle, 'op-import')
   coverage = repo.getDocument().bundle.engine.sessionCoverage
   assert.ok(coverage.length >= 3)
   const last = coverage[coverage.length - 1]
   assert.equal(last.connectedAtWallMs, WALL_TIME_MS + 1000)
   assert.equal(repo.lastReopen.survivors[0].activeEndProvenance, 'import_replaced')
-  repo.stop()
+  await repo.stop()
 })
 
-test('legacy duplicate localDeviceId migrates on match and fails read-only without overwriting on mismatch', () => {
+test('legacy duplicate localDeviceId migrates on match and fails read-only without overwriting on mismatch', async () => {
   const matchDir = tempDir()
   const matched = JSON.parse(JSON.stringify(fixtures.localDocument))
   matched.runtime.localDeviceId = matched.device.localDeviceId
@@ -147,7 +147,7 @@ test('legacy duplicate localDeviceId migrates on match and fails read-only witho
   writeJson(matchPath, matched)
   const clock = { value: WALL_TIME_MS }
   const repo = new LocalRepository(repoOptions(matchDir, clock))
-  assert.ok(repo.load())
+  assert.ok(await repo.load())
   assert.equal(repo.currentDeviceId, matched.device.localDeviceId)
   assert.equal(repo.getDocument().runtime.localDeviceId, undefined)
   assert.ok(existsSync(matchPath + '.bak'))
@@ -159,7 +159,7 @@ test('legacy duplicate localDeviceId migrates on match and fails read-only witho
   writeJson(badPath, bad)
   const original = readFileSync(badPath, 'utf8')
   const badRepo = new LocalRepository(repoOptions(badDir, clock))
-  assert.equal(badRepo.load(), null)
+  assert.equal(await badRepo.load(), null)
   assert.equal(badRepo.getStatus().state, 'read_only')
   assert.match(badRepo.getStatus().error, /localDeviceId/)
   assert.equal(readFileSync(badPath, 'utf8'), original)
@@ -170,13 +170,13 @@ test('crash restart repairs coverage and replays the persisted opId without reap
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
   const first = new LocalRepository(repoOptions(dir, clock))
-  first.load()
+  await first.load()
   const yb = first.getProjection().shared.petInfo.yb
   await first.command({ type: 'admin.grantCheat', payload: { stat: 'yb', amount: 7 } }, 'op-crash', 'owner')
   const ybAfter = first.getProjection().shared.petInfo.yb
   clock.value += 120000
   const second = new LocalRepository(repoOptions(dir, clock))
-  assert.ok(second.load())
+  assert.ok(await second.load())
   assert.equal(second.getProjection().shared.petInfo.yb, ybAfter)
   const cov = second.getDocument().bundle.engine.sessionCoverage
   assert.ok(cov.length >= 2)
@@ -186,11 +186,11 @@ test('crash restart repairs coverage and replays the persisted opId without reap
   const replay = await second.command({ type: 'admin.grantCheat', payload: { stat: 'yb', amount: 7 } }, 'op-crash', 'owner')
   assert.equal(replay.duplicate, true)
   assert.equal(second.getProjection().shared.petInfo.yb, ybAfter)
-  second.stop()
+  await second.stop()
   assert.ok(ybAfter >= yb + 7)
 })
 
-test('default legacy path stays untouched unless the explicit local repository flag is set', () => {
+test('default legacy path stays untouched unless the explicit local repository flag is set', async () => {
   assert.equal(localRepositoryEnabled({}), false)
   assert.equal(localRepositoryEnabled({ QQPET_LOCAL_REPOSITORY_V2: '0' }), false)
   const dir = tempDir()
@@ -199,12 +199,12 @@ test('default legacy path stays untouched unless the explicit local repository f
   assert.equal(existsSync(join(dir, 'save.json')), false)
 })
 
-test('suspend/resume closes exact segment without counting suspended time; malformed documents fail read-only', () => {
+test('suspend/resume closes exact segment without counting suspended time; malformed documents fail read-only', async () => {
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
   const repo = new LocalRepository(repoOptions(dir, clock))
-  repo.load()
+  await repo.load()
   clock.value += 1000
   const suspended = repo.suspend()
   assert.equal(suspended.status.state, 'suspended')
@@ -217,18 +217,18 @@ test('suspend/resume closes exact segment without counting suspended time; malfo
   coverage = repo.getDocument().bundle.engine.sessionCoverage
   assert.equal(coverage[coverage.length - 1].connectedAtWallMs, WALL_TIME_MS + 6000)
   assert.equal(repo.getDocument().bundle.engine.coverageReopen, undefined)
-  repo.stop()
+  await repo.stop()
 
   const badDir = tempDir()
   const badPath = join(badDir, 'save.json')
   writeFileSync(badPath, '{not-json')
   const bad = new LocalRepository(repoOptions(badDir, clock))
-  assert.equal(bad.load(), null)
+  assert.equal(await bad.load(), null)
   assert.equal(bad.getStatus().state, 'read_only')
   assert.match(bad.getStatus().error, /not valid JSON/)
 })
 
-test('lifecycle starts only on ready when flagged; quit flushes and stops', () => {
+test('lifecycle starts only on ready when flagged; quit flushes and stops', async () => {
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
@@ -241,9 +241,9 @@ test('lifecycle starts only on ready when flagged; quit flushes and stops', () =
   const repo = registerLocalRepositoryLifecycle(repoOptions(dir, clock), hooks, { QQPET_LOCAL_REPOSITORY_V2: '1' })
   assert.ok(repo)
   assert.equal(existsSync(join(dir, 'save.json')), false)
-  ready[0]()
+  await ready[0]()
   assert.ok(existsSync(join(dir, 'save.json')))
-  quit[0]()
+  await quit[0]()
   assert.equal(repo.getStatus().state, 'stopped')
 })
 
@@ -252,7 +252,7 @@ test('local command queue serializes concurrent retries and persists one idempot
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
   const repo = new LocalRepository(repoOptions(dir, clock))
-  repo.load()
+  await repo.load()
   const startYb = repo.getProjection().shared.petInfo.yb
   const command = { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 11 } }
   const [first, second] = await Promise.all([
@@ -264,5 +264,186 @@ test('local command queue serializes concurrent retries and persists one idempot
   assert.equal(repo.getDocument().idempotency.records.filter(record => record.opId === 'op-queue').length, 1)
   repo.setAdvanceWhileEmpty(false)
   assert.equal(repo.getProjection().advanceWhileEmpty, false)
-  repo.stop()
+  await repo.stop()
+})
+
+test('authority gating rejects handoff_pending loads before opening coverage or accepting commands', async () => {
+  const dir = tempDir()
+  const doc = JSON.parse(JSON.stringify(fixtures.localDocument))
+  doc.authority.state = 'handoff_pending'
+  const path = join(dir, 'save.json')
+  writeJson(path, doc)
+  const clock = { value: WALL_TIME_MS }
+  const repo = new LocalRepository(repoOptions(dir, clock))
+  const projection = await repo.load()
+  assert.ok(projection)
+  assert.equal(repo.getStatus().readOnly, true)
+  assert.equal(repo.getStatus().authorityState, 'handoff_pending')
+  assert.equal(repo.getDocument().bundle.engine.sessionCoverage.length, 1)
+  const before = repo.getDocument().revision
+  const result = await repo.command({ type: 'pet.cheer', payload: {} }, 'op-readonly', 'owner')
+  assert.equal(result.outcome.ok, false)
+  assert.equal(result.outcome.error.code, 'not_available')
+  assert.equal(repo.getDocument().revision, before)
+})
+
+test('detach freezes epoch and server-detach import validates authority then reactivates locally', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  const repo = new LocalRepository(repoOptions(dir, clock))
+  await repo.load()
+  const detached = await repo.exportForDetach(5)
+  assert.equal(detached.authority.owner, 'local')
+  assert.equal(detached.authority.epoch, 6)
+  assert.equal(repo.getDocument().authority.state, 'handoff_pending')
+  assert.equal(repo.getStatus().readOnly, true)
+  assert.equal(repo.getDocument().bundle.engine.sessionCoverage.every(interval => interval.disconnectedAtWallMs !== undefined), true)
+  assert.equal(repo.getDocument().bundle.engine.sessionCoverage[0].closeReason, 'authority_handoff')
+  const blocked = await repo.command({ type: 'pet.cheer', payload: {} }, 'op-after-detach', 'owner')
+  assert.equal(blocked.outcome.ok, false)
+
+  const serverBundle = JSON.parse(JSON.stringify(detached))
+  serverBundle.authority.owner = 'server'
+  serverBundle.authority.authorityId = 'server-authority-1'
+  serverBundle.authority.epoch = 5
+  serverBundle.authority.restoreGeneration = 2
+  const imported = await repo.importPortableBundle(serverBundle, {
+    opId: 'op-server-import', expectedAuthorityId: 'server-authority-1',
+    expectedRestoreGeneration: 2, expectedEpoch: 5, expectedRevision: serverBundle.authority.revision,
+  })
+  assert.ok(imported)
+  const importedDoc = repo.getDocument()
+  assert.equal(importedDoc.authority.state, 'active')
+  assert.equal(importedDoc.authority.stamp.owner, 'local')
+  assert.equal(importedDoc.authority.stamp.epoch, 7)
+  assert.equal(importedDoc.authority.stamp.restoreGeneration, 2)
+  assert.equal(importedDoc.bundle.engine.sessionCoverage.length, detached.engine.sessionCoverage.length + 1)
+  assert.equal(importedDoc.bundle.engine.sessionCoverage.filter(interval => interval.disconnectedAtWallMs === undefined).length, 1)
+  assert.equal(importedDoc.bundle.engine.sessionCoverage.at(-1).connectedAtWallMs, WALL_TIME_MS)
+  assert.ok(importedDoc.idempotency.records.some(record => record.opId === 'op-server-import'))
+  const duplicateImport = await repo.importPortableBundle(serverBundle, { opId: 'op-server-import' })
+  assert.equal(duplicateImport.bundle, undefined)
+  assert.equal(repo.getDocument().bundle.engine.sessionCoverage.length, importedDoc.bundle.engine.sessionCoverage.length)
+})
+
+test('failed import stays read-only and rollbackDetach restores the frozen pre-detach authority', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  const repo = new LocalRepository(repoOptions(dir, clock))
+  await repo.load()
+  const activeEpoch = repo.getDocument().authority.stamp.epoch
+  const bundle = await repo.exportForDetach(1)
+  const failed = await repo.importPortableBundle(bundle, { opId: 'op-bad-import', expectedEpoch: 99 })
+  assert.equal(failed, null)
+  assert.equal(repo.getStatus().state, 'read_only')
+  assert.equal(repo.getStatus().readOnly, true)
+  const rolled = await repo.rollbackDetach()
+  assert.ok(rolled)
+  assert.equal(repo.getStatus().state, 'ready')
+  assert.equal(repo.getDocument().authority.state, 'active')
+  assert.equal(repo.getDocument().authority.stamp.epoch, activeEpoch)
+})
+
+test('failed persistence leaves command/catch-up state, cache, revision and anchors untouched', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  let failWrite = false
+  const repo = new LocalRepository(repoOptions(dir, clock, {
+    writeDocument: (file, text) => { if (failWrite) throw new Error('disk full'); writeFileSync(file, text) },
+  }))
+  await repo.load()
+  const beforeDoc = repo.getDocument()
+  failWrite = true
+  const rejected = await repo.command({ type: 'admin.grantCheat', payload: { stat: 'yb', amount: 3 } }, 'op-write-fail', 'owner')
+  assert.equal(rejected.outcome.ok, false)
+  assert.equal(rejected.outcome.error.code, 'internal')
+  assert.equal(repo.getDocument().revision, beforeDoc.revision)
+  assert.equal(repo.getDocument().idempotency.records.length, 0)
+  assert.deepEqual(repo.getDocument().bundle.engine.save, beforeDoc.bundle.engine.save)
+  clock.value += 120000
+  await repo.pump()
+  assert.equal(repo.getDocument().bundle.engine.gameTimeMs, beforeDoc.bundle.engine.gameTimeMs)
+  assert.equal(repo.getDocument().bundle.engine.lastSchedulerWallMs, beforeDoc.bundle.engine.lastSchedulerWallMs)
+  failWrite = false
+})
+
+test('rejected commands persist idempotency without revision and catch-up emits ordered per-chunk revisions with yields', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  let yields = 0
+  const repo = new LocalRepository(repoOptions(dir, clock, { maxChunkTicks: 1, yieldToEventLoop: async () => { yields++ } }))
+  await repo.load()
+  const start = repo.getDocument()
+  const rejected = await repo.command({ type: 'admin.grantCheat', payload: { stat: 'yb', amount: 0 } }, 'op-rejected-rev', 'owner')
+  assert.equal(rejected.outcome.ok, false)
+  assert.equal(repo.getDocument().revision, start.revision)
+  assert.equal(repo.getDocument().idempotency.records.length, 1)
+  clock.value += 120000
+  await repo.pump()
+  const after = repo.getDocument()
+  assert.ok(after.revision >= start.revision + 2)
+  assert.equal(after.revision, repo.getProjection().revision)
+  assert.equal(after.eventSeq, repo.getProjection().eventSeq)
+  assert.ok(yields >= 1)
+  const events = repo.getRecentEvents()
+  for (let index = 1; index < events.length; index++) assert.ok(events[index].eventSeq > events[index - 1].eventSeq)
+})
+
+test('duplicate reset is idempotent and does not close/reopen again', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  const repo = new LocalRepository(repoOptions(dir, clock))
+  await repo.load()
+  const first = await repo.reset('op-reset-duplicate')
+  const coverageAfterFirst = repo.getDocument().bundle.engine.sessionCoverage
+  const second = await repo.reset('op-reset-duplicate')
+  assert.equal(first.duplicate, false)
+  assert.equal(second.duplicate, true)
+  assert.deepEqual(repo.getDocument().bundle.engine.sessionCoverage, coverageAfterFirst)
+  assert.equal(repo.getDocument().idempotency.records.filter(record => record.opId === 'op-reset-duplicate').length, 1)
+})
+
+test('suspend closes normal coverage at heartbeat grace and projection callbacks/copies do not alias internals', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  let callbackProjection
+  const repo = new LocalRepository(repoOptions(dir, clock, { onProjection: value => { callbackProjection = value } }))
+  await repo.load()
+  const projection = repo.getProjection()
+  projection.shared.petInfo.yb = -1
+  projection.device.petInfo.lastX = 9999
+  projection.authority.stamp.epoch = -1
+  assert.notEqual(repo.getProjection().shared.petInfo.yb, -1)
+  assert.notEqual(repo.getProjection().device.petInfo.lastX, 9999)
+  callbackProjection.shared.petInfo.yb = -2
+  assert.notEqual(repo.getProjection().shared.petInfo.yb, -2)
+  clock.value += 120000
+  repo.suspend()
+  const doc = repo.getDocument()
+  assert.equal(doc.bundle.engine.sessionCoverage[0].disconnectedAtWallMs, WALL_TIME_MS + 60000)
+  assert.equal(repo.lastReopen.commitWallMs, WALL_TIME_MS + 60000)
+  assert.equal(repo.lastReopen.suspendedAtWallMs, WALL_TIME_MS + 120000)
+})
+
+test('flush and stop drain the serialized queue before final write', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  const repo = new LocalRepository(repoOptions(dir, clock))
+  await repo.load()
+  const startYb = repo.getProjection().shared.petInfo.yb
+  const pending = repo.command({ type: 'admin.grantCheat', payload: { stat: 'yb', amount: 13 } }, 'op-drain', 'owner')
+  const flushing = repo.flush()
+  await Promise.all([pending, flushing])
+  await repo.stop()
+  assert.equal(repo.getStatus().state, 'stopped')
+  const saved = JSON.parse(readFileSync(join(dir, 'save.json'), 'utf8'))
+  assert.equal(saved.bundle.engine.save.petInfo.yb, startYb + 13)
+  assert.ok(saved.idempotency.records.some(record => record.opId === 'op-drain'))
 })
