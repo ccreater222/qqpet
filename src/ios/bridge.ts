@@ -17,7 +17,12 @@ import { IOSSaveWriter } from './save-writer'
 import { installTextInput } from './text-input'
 import './panels.css'
 import { iosLocalRepositoryStorage } from './local-repository-storage'
-import { createMobileLocalRepositoryBridge, webCryptoAvailable, type MobileLocalRepositoryBridge } from '../mobile/local-repository-bridge'
+import {
+  createMobileLocalRepositoryBridge,
+  resolveMobileLegacyAuthority,
+  webCryptoAvailable,
+  type MobileLocalRepositoryBridge,
+} from '../mobile/local-repository-bridge'
 
 interface Bootstrap {
   save: string | null
@@ -60,7 +65,8 @@ const LOCAL_RUNTIME_V2_FLAG = import.meta.env.VITE_QQPET_LOCAL_RUNTIME_V2 === '1
 let localRuntimeFailure: string | undefined
 let localRuntime: MobileLocalRepositoryBridge | null = null
 let legacyV2DocumentPresent = false
-const legacyAuthorityDisabled = (): boolean => LOCAL_RUNTIME_V2_FLAG || legacyV2DocumentPresent
+let legacyV2PresenceError: string | undefined
+const legacyAuthorityDisabled = (): boolean => LOCAL_RUNTIME_V2_FLAG || legacyV2DocumentPresent || legacyV2PresenceError !== undefined
 const capabilities: NonNullable<QQPetApi['capabilities']> = {
   rotatableScreen: true,
   serverMode: false,
@@ -499,14 +505,26 @@ const ready: Promise<void> = rpc.request<Bootstrap>('bootstrap', { role }).then(
   Object.assign(capabilities, bootstrap.capabilities ?? {})
   // This build deliberately has no daemon; imported desktop preferences cannot enable one.
   capabilities.autoStart = false
-  if (LOCAL_RUNTIME_V2_FLAG === false && gamePage === false && bootstrap.capabilities?.localRuntimeV2Storage === true) {
-    const existing = await rpc.request<string | null>('readLocalStateFile', { name: 'save.v2.json' })
-    if (existing !== null && existing !== undefined) {
-      legacyV2DocumentPresent = true
-      localRuntimeFailure = 'local-v2 document exists; enable the explicit v2 flag'
+  if (LOCAL_RUNTIME_V2_FLAG === false && gamePage === false) {
+    const readCapability = bootstrap.capabilities?.localRuntimeV2Storage === true
+    const readResult = readCapability
+      ? await rpc.request<unknown>('readLocalStateFile', { name: 'save.v2.json' })
+      : undefined
+    const legacyAuthorityProbe = resolveMobileLegacyAuthority({
+      devRuntimeFlag: false,
+      readCapability,
+      readResult,
+      encoding: 'object',
+    })
+    legacyV2DocumentPresent = legacyAuthorityProbe.v2DocumentPresent
+    legacyV2PresenceError = legacyAuthorityProbe.error
+    if (legacyAuthorityProbe.failure !== undefined) localRuntimeFailure = legacyAuthorityProbe.failure
+    if (legacyAuthorityProbe.error !== undefined || legacyAuthorityProbe.v2DocumentPresent) {
       capabilities.localRepositoryV2 = false
       capabilities.localRepositoryV2Reason = localRuntimeFailure
-      throw new Error(localRuntimeFailure)
+        ?? legacyAuthorityProbe.error
+        ?? 'local-v2 presence check failed'
+      throw new Error(capabilities.localRepositoryV2Reason)
     }
   }
   if (LOCAL_RUNTIME_V2_FLAG && gamePage === false) {

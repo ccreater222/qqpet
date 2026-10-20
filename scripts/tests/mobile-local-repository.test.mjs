@@ -23,7 +23,11 @@ const { createAtomicV2Storage } = await import('../../src/shared/local-repositor
 const { androidLocalRepositoryStorage } = await import('../../src/android/local-repository-storage.ts')
 const { harmonyLocalRepositoryStorage } = await import('../../src/harmony/local-repository-storage.ts')
 const { iosLocalRepositoryStorage } = await import('../../src/ios/local-repository-storage.ts')
-const { createMobileLocalRepositoryBridge, mobileLocalRepositoryCapability } = await import('../../src/mobile/local-repository-bridge.ts')
+const {
+  createMobileLocalRepositoryBridge,
+  mobileLocalRepositoryCapability,
+  resolveMobileLegacyAuthority,
+} = await import('../../src/mobile/local-repository-bridge.ts')
 const { validateLocalPetDocumentV2 } = await import('../../src/shared/sync/portable.ts')
 const { validatePersistedRuntimeState } = await import('../../src/shared/pet-runtime/idempotency.ts')
 const { sessionActivityForInterval } = await import('../../src/shared/pet-runtime/coverage.ts')
@@ -483,7 +487,8 @@ test('mobile bundles gate v2 explicitly, hide server mode, and never import serv
     assert.match(source, /serverMode:\s*false/, relative)
     assert.match(source, /localRepositoryV2/, relative)
     assert.match(source, /rendererCapability:\s*true/, relative)
-    assert.match(source, /legacyV2DocumentPresent/, relative)
+    assert.match(source, /resolveMobileLegacyAuthority/, relative)
+    assert.match(source, /legacyAuthorityProbe\.canUseLegacy|legacyAuthorityProbe\.v2DocumentPresent/, relative)
     assert.match(source, /legacyAuthorityDisabled/, relative)
     assert.match(source, /exportPortableBundleJson/, relative)
     assert.match(source, /importPortableBundleJson/, relative)
@@ -1134,4 +1139,66 @@ test('portable import migrates a bare legacy save through the same backup/atomic
   assert.equal(document.idempotency.records[0].opId, 'op-import-bare-save')
   assert.equal(document.bundle.engine.sessionCoverage.filter(interval => interval.disconnectedAtWallMs === undefined).length, 1)
   await host.stop()
+})
+
+test('flag-off legacy routing decodes native v2 presence for Android, Harmony and iOS mocks', async () => {
+  const hosts = [
+    {
+      name: 'android',
+      encoding: 'encoded-json',
+      encode: result => JSON.stringify(result),
+    },
+    {
+      name: 'harmony',
+      encoding: 'encoded-json',
+      encode: result => JSON.stringify(result),
+    },
+    {
+      name: 'ios',
+      encoding: 'object',
+      encode: result => result,
+    },
+  ]
+  for (const host of hosts) {
+    const startup = rawResult => {
+      const gate = resolveMobileLegacyAuthority({
+        devRuntimeFlag: false,
+        readCapability: true,
+        readResult: host.encode(rawResult),
+        encoding: host.encoding,
+      })
+      let legacyWrites = 0
+      if (gate.canUseLegacy) legacyWrites += 1
+      return { gate, legacyWrites }
+    }
+
+    const missing = startup({ status: 'ok', text: null })
+    assert.equal(missing.gate.v2DocumentPresent, false, host.name)
+    assert.equal(missing.gate.legacyDisabled, false, host.name)
+    assert.equal(missing.gate.canUseLegacy, true, host.name)
+    assert.equal(missing.legacyWrites, 1, host.name)
+
+    const present = startup({ status: 'ok', text: '{"format":"qqpet-local-v2"}' })
+    assert.equal(present.gate.v2DocumentPresent, true, host.name)
+    assert.equal(present.gate.legacyDisabled, true, host.name)
+    assert.equal(present.gate.canUseLegacy, false, host.name)
+    assert.match(present.gate.failure, /enable the explicit v2 flag/, host.name)
+    assert.equal(present.legacyWrites, 0, host.name)
+
+    const unreadable = startup({ status: 'error', error: 'EACCES state unreadable' })
+    assert.equal(unreadable.gate.v2DocumentPresent, false, host.name)
+    assert.equal(unreadable.gate.legacyDisabled, true, host.name)
+    assert.equal(unreadable.gate.canUseLegacy, false, host.name)
+    assert.match(unreadable.gate.error, /EACCES state unreadable/, host.name)
+    assert.match(unreadable.gate.failure, /presence check failed/, host.name)
+    assert.equal(unreadable.legacyWrites, 0, host.name)
+
+    const oldShell = resolveMobileLegacyAuthority({
+      devRuntimeFlag: false,
+      readCapability: false,
+      encoding: host.encoding,
+    })
+    assert.equal(oldShell.canUseLegacy, true, host.name)
+    assert.equal(oldShell.legacyDisabled, false, host.name)
+  }
 })

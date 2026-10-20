@@ -13,7 +13,12 @@ import { TRAY_STATES, trayTip } from '../shared/tray'
 import { latestRelease } from '../shared/update'
 import { weather } from '../shared/weather'
 import { harmonyLocalRepositoryStorage } from './local-repository-storage'
-import { createMobileLocalRepositoryBridge, webCryptoAvailable, type MobileLocalRepositoryBridge } from '../mobile/local-repository-bridge'
+import {
+  createMobileLocalRepositoryBridge,
+  resolveMobileLegacyAuthority,
+  webCryptoAvailable,
+  type MobileLocalRepositoryBridge,
+} from '../mobile/local-repository-bridge'
 
 /** The `QQPetNative` JavaScript interface of PetHost. Async calls answer through `__qqpet.resolve(id, value, error)`. */
 interface Native {
@@ -66,10 +71,17 @@ const LOCAL_RUNTIME_V2_FLAG = import.meta.env.VITE_QQPET_LOCAL_RUNTIME_V2 === '1
   || (import.meta.env.DEV && new URLSearchParams(location.search).get('qqpet-local-runtime-v2') === '1')
 let localRuntimeFailure: string | undefined
 let localRuntime: MobileLocalRepositoryBridge | null = null
-const legacyV2DocumentPresent = LOCAL_RUNTIME_V2_FLAG === false
-  && typeof native.readStateFile === 'function'
-  && native.readStateFile('save.v2.json') !== null
-if (legacyV2DocumentPresent) localRuntimeFailure = 'local-v2 document exists; enable the explicit v2 flag'
+const legacyAuthorityProbe = resolveMobileLegacyAuthority({
+  devRuntimeFlag: LOCAL_RUNTIME_V2_FLAG,
+  readCapability: typeof native.readStateFile === 'function',
+  readResult: LOCAL_RUNTIME_V2_FLAG === false && typeof native.readStateFile === 'function'
+    ? native.readStateFile('save.v2.json')
+    : undefined,
+  encoding: 'encoded-json',
+})
+const legacyV2DocumentPresent = legacyAuthorityProbe.v2DocumentPresent
+const legacyV2PresenceError = legacyAuthorityProbe.error
+if (legacyAuthorityProbe.failure !== undefined) localRuntimeFailure = legacyAuthorityProbe.failure
 if (LOCAL_RUNTIME_V2_FLAG) {
   const readStateFile = native.readStateFile?.bind(native)
   const readLegacySave = native.readLegacySave?.bind(native)
@@ -143,14 +155,14 @@ function readSave(): Record<string, any> | null {
   }
 }
 
-let save: SaveData = startSave(LOCAL_RUNTIME_V2_FLAG || legacyV2DocumentPresent ? null : readSave())
+let save: SaveData = startSave(legacyAuthorityProbe.canUseLegacy ? readSave() : null)
 let leaving = false
-const legacyAuthorityDisabled = (): boolean => LOCAL_RUNTIME_V2_FLAG || legacyV2DocumentPresent
+const legacyAuthorityDisabled = (): boolean => legacyAuthorityProbe.legacyDisabled
 const write = (): void => {
   if (legacyAuthorityDisabled()) return
   native.write(FILE, JSON.stringify(save))
 }
-if (legacyAuthorityDisabled() === false) write()
+if (legacyAuthorityProbe.canUseLegacy) write()
 
 let tray: TrayState = 'leave'
 let posted = ''
@@ -265,6 +277,9 @@ const api: QQPetApi = {
     ...(localRuntimeFailure === undefined ? {} : { localRepositoryV2Reason: localRuntimeFailure }),
   },
   async load() {
+    if (legacyV2PresenceError !== undefined) {
+      throw new Error('local runtime v2 unavailable: ' + (localRuntimeFailure ?? legacyV2PresenceError))
+    }
     if (legacyV2DocumentPresent) throw new Error('local runtime v2 unavailable: ' + (localRuntimeFailure ?? 'local-v2 document exists'))
     if (LOCAL_RUNTIME_V2_FLAG) {
       if (localRuntime === null) throw new Error('local runtime v2 unavailable: ' + (localRuntimeFailure ?? 'unknown'))

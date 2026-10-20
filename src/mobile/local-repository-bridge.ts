@@ -1,6 +1,7 @@
 import type { SaveData } from '../shared/save'
 import type { CommandKey, CommandResult, PetCommand } from '../shared/sync/protocol'
 import type { OrderedEvent } from '../shared/pet-runtime/events'
+import { decodeEncodedReadResult, type LocalRepositoryFileReadResult } from '../shared/local-repository/storage'
 import {
   createLocalRepositoryHost,
   localRepositoryHostCapability,
@@ -11,6 +12,81 @@ import {
   type LocalRepositoryHostStorage,
   type LocalRepositoryHostTimerRuntime,
 } from '../shared/local-repository/host'
+
+export type MobileNativeReadEncoding = 'encoded-json' | 'object'
+
+export interface MobileLegacyAuthorityInput {
+  devRuntimeFlag: boolean
+  readCapability: boolean
+  /** Raw return value from the native v2-presence read. */
+  readResult?: unknown
+  encoding: MobileNativeReadEncoding
+}
+
+export interface MobileLegacyAuthorityGate {
+  v2DocumentPresent: boolean
+  canUseLegacy: boolean
+  legacyDisabled: boolean
+  /** Set for a read/error/invalid-native-result path; bridges must fail closed. */
+  error?: string
+  failure?: string
+}
+
+function decodeObjectReadResult(raw: unknown): LocalRepositoryFileReadResult {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { status: 'error', error: 'native read returned an invalid result object' }
+  }
+  const result = raw as Record<string, unknown>
+  if (result.status === 'error' && typeof result.error === 'string') {
+    return { status: 'error', error: result.error }
+  }
+  if (result.status === 'ok' && (result.text === null || typeof result.text === 'string')) {
+    return { status: 'ok', text: result.text }
+  }
+  return { status: 'error', error: 'native read returned an invalid result payload' }
+}
+
+/** Decodes the two native bridge shapes without conflating missing with read failure. */
+export function decodeMobileNativeReadResult(
+  raw: unknown,
+  encoding: MobileNativeReadEncoding,
+): LocalRepositoryFileReadResult {
+  return encoding === 'encoded-json' ? decodeEncodedReadResult(raw) : decodeObjectReadResult(raw)
+}
+
+/**
+ * One bridge-level decision for flag-off legacy coexistence:
+ * - ok+null is truly missing -> legacy is allowed;
+ * - ok+text is an existing v2 document -> legacy is disabled;
+ * - error/invalid native reply -> fail closed and never write legacy state.
+ */
+export function resolveMobileLegacyAuthority(input: MobileLegacyAuthorityInput): MobileLegacyAuthorityGate {
+  if (input.devRuntimeFlag) {
+    return { v2DocumentPresent: false, canUseLegacy: false, legacyDisabled: true }
+  }
+  if (input.readCapability === false) {
+    return { v2DocumentPresent: false, canUseLegacy: true, legacyDisabled: false }
+  }
+  const result = decodeMobileNativeReadResult(input.readResult, input.encoding)
+  if (result.status === 'error') {
+    return {
+      v2DocumentPresent: false,
+      canUseLegacy: false,
+      legacyDisabled: true,
+      error: result.error,
+      failure: 'local-v2 presence check failed: ' + result.error,
+    }
+  }
+  if (result.text === null) {
+    return { v2DocumentPresent: false, canUseLegacy: true, legacyDisabled: false }
+  }
+  return {
+    v2DocumentPresent: true,
+    canUseLegacy: false,
+    legacyDisabled: true,
+    failure: 'local-v2 document exists; enable the explicit v2 flag',
+  }
+}
 
 export interface MobileLocalRepositoryBridgeCapability {
   enabled: true
