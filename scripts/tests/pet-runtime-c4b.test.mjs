@@ -28,6 +28,7 @@ const {
   dailyBoundaryMs,
   reconcileTimeZone,
   executeCommandIdempotent,
+  SerializedIdempotentExecutor,
   C3_COMMAND_TYPES,
   C4A_COMMAND_TYPES,
   C4B_COMMAND_TYPES,
@@ -529,9 +530,10 @@ const expectedCallbackSignatures = {
   'src/renderer/ui/farm.ts|player.callback|farmView': 1,
   'src/renderer/ui/float.ts|player.callback|setdata': 1,
   'src/renderer/ui/fishing.ts|player.callback|PETEventOnReceived': 1,
-  'src/renderer/ui/fishing.ts|pondCommand|': 3,
-  'src/renderer/pet/fishing.ts|pondCommand|': 1,
-  'src/renderer/swf/player.ts|ExternalInterface.addCallback|': 1,
+  'src/renderer/ui/fishing.ts|pondCommand|4': 2,
+  'src/renderer/ui/fishing.ts|pondCommand|head.cmd': 1,
+  'src/renderer/pet/fishing.ts|pondCommand|cmd': 1,
+  'tools/qqfarm/src/com/MyFarm/control/FarmlandControl.as|ExternalInterface.addCallback|farmAll': 1,
 }
 test('full renderer mutation gate classifies every canonical mutation/site to runtime groups', () => {
   const runtimeCommands = new Set([...C3_COMMAND_TYPES, ...C4A_COMMAND_TYPES, ...C4B_COMMAND_TYPES])
@@ -652,26 +654,28 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
     const key = file + '|' + callee + '|' + identity
     actualCallbackSignatures.set(key, (actualCallbackSignatures.get(key) ?? 0) + 1)
   }
+  function collectCallbackSignatures(file, source) {
+    for (const match of source.matchAll(/([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.callback\s*\(\s*['"]([^'"]+)['"]/g)) {
+      addCallbackSignature(file, match[1] + '.callback', match[2])
+    }
+    for (const match of source.matchAll(/ExternalInterface\.addCallback\s*\(\s*['"]([^'"]+)['"]/g)) {
+      addCallbackSignature(file, 'ExternalInterface.addCallback', match[1])
+    }
+    for (const match of source.matchAll(/\bpondCommand\s*\(\s*([^,)]+)/g)) {
+      const identity = match[1].trim().replace(/:.*$/, '')
+      addCallbackSignature(file, 'pondCommand', identity)
+    }
+  }
   function walkCallbackSignatures(directory) {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name)
       if (entry.isDirectory()) walkCallbackSignatures(path)
-      else if (entry.name.endsWith('.ts')) {
-        const source = readFileSync(path, 'utf8')
-        for (const match of source.matchAll(/([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.callback\s*\(\s*['"]([^'"]+)['"]/g)) {
-          addCallbackSignature(path, match[1] + '.callback', match[2])
-        }
-        for (const _match of source.matchAll(/ExternalInterface\.addCallback/g)) {
-          addCallbackSignature(path, 'ExternalInterface.addCallback', '')
-        }
-        for (const _match of source.matchAll(/\bpondCommand\s*\(/g)) {
-          addCallbackSignature(path, 'pondCommand', '')
-        }
-      }
+      else if (entry.name.endsWith('.ts')) collectCallbackSignatures(path, readFileSync(path, 'utf8'))
     }
   }
   walkCallbackSignatures('src/renderer')
   walkCallbackSignatures('src/shared')
+  collectCallbackSignatures('tools/qqfarm/src/com/MyFarm/control/FarmlandControl.as', readFileSync('tools/qqfarm/src/com/MyFarm/control/FarmlandControl.as', 'utf8'))
   const callbackKeys = new Set([...Object.keys(expectedCallbackSignatures), ...actualCallbackSignatures.keys()])
   for (const key of callbackKeys) {
     assert.equal(actualCallbackSignatures.get(key) ?? 0, expectedCallbackSignatures[key] ?? 0, 'unexpected or missing SWF callback signature: ' + key)
@@ -680,12 +684,20 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
     const keys = new Set([...actual.keys(), ...Object.keys(expected)])
     return [...keys].every(key => (actual.get(key) ?? 0) === (expected[key] ?? 0))
   }
-  const simulatedReplacement = {
+  const simulatedCallbackReplacement = {
     ...expectedCallbackSignatures,
     'src/renderer/ui/farm.ts|player.callback|farmAll': 0,
     'src/renderer/ui/farm.ts|player.callback|farmEvil': 1,
   }
-  assert.equal(callbackSignaturesMatch(actualCallbackSignatures, simulatedReplacement), false)
+  assert.equal(callbackSignaturesMatch(actualCallbackSignatures, simulatedCallbackReplacement), false)
+  const simulatedPondReplacement = { ...expectedCallbackSignatures }
+  simulatedPondReplacement['src/renderer/ui/fishing.ts|pondCommand|4'] = 1
+  simulatedPondReplacement['src/renderer/ui/fishing.ts|pondCommand|5'] = 1
+  assert.equal(callbackSignaturesMatch(actualCallbackSignatures, simulatedPondReplacement), false)
+  const simulatedAddCallbackReplacement = { ...expectedCallbackSignatures }
+  simulatedAddCallbackReplacement['tools/qqfarm/src/com/MyFarm/control/FarmlandControl.as|ExternalInterface.addCallback|farmAll'] = 0
+  simulatedAddCallbackReplacement['tools/qqfarm/src/com/MyFarm/control/FarmlandControl.as|ExternalInterface.addCallback|farmEvil'] = 1
+  assert.equal(callbackSignaturesMatch(actualCallbackSignatures, simulatedAddCallbackReplacement), false)
 
   const updateTargets = new Set()
   const setInfoTargets = new Set()
@@ -997,30 +1009,57 @@ test('real scheduler catch-up crosses spring-forward and fall-back 06:00 boundar
 })
 
 
-test('pure opId idempotency wrapper returns stored admin results without reapplying', () => {
-  let cache = {}
+test('pure device-scoped opId idempotency returns stored admin results without reapplying', () => {
+  const petId = 'pet-1'
+  const deviceId = 'device-a'
   const base = baseState()
   const cheatCommand = { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 50 } }
-  const firstCheat = executeCommandIdempotent(base, cheatCommand, context(base, { actorRole: 'owner' }), 'op-cheat-1', cache)
-  cache = firstCheat.cache
+  const firstCheat = executeCommandIdempotent(petId, deviceId, base, cheatCommand, context(base, { actorRole: 'owner' }), 'op-cheat-1')
   assert.equal(firstCheat.duplicate, false)
   assert.equal(firstCheat.outcome.ok, true)
-  assert.equal(firstCheat.outcome.state.save.petInfo.yb, base.save.petInfo.yb + 50)
-  const retryCheat = executeCommandIdempotent(firstCheat.outcome.state, cheatCommand, context(firstCheat.outcome.state, { actorRole: 'owner' }), 'op-cheat-1', cache)
+  assert.equal(firstCheat.commit.state.save.petInfo.yb, base.save.petInfo.yb + 50)
+  const retryCheat = executeCommandIdempotent(petId, deviceId, firstCheat.commit.state, cheatCommand, context(firstCheat.commit.state, { actorRole: 'owner' }), 'op-cheat-1', firstCheat.commit.cache)
   assert.equal(retryCheat.duplicate, true)
   assert.deepEqual(retryCheat.outcome.result, firstCheat.outcome.result)
   assert.equal(retryCheat.outcome.events.length, 0)
-  assert.equal(retryCheat.outcome.state.save.petInfo.yb, firstCheat.outcome.state.save.petInfo.yb)
+  assert.equal(retryCheat.commit.state.save.petInfo.yb, firstCheat.commit.state.save.petInfo.yb)
 
   const goodsCommand = { type: 'admin.grantRandomGoods', payload: { type: 'food', quantity: 2 } }
-  const firstGoods = executeCommandIdempotent(firstCheat.outcome.state, goodsCommand, context(firstCheat.outcome.state, { actorRole: 'owner' }), 'op-goods-1', retryCheat.cache)
-  const retryGoods = executeCommandIdempotent(firstGoods.outcome.state, goodsCommand, context(firstGoods.outcome.state, { actorRole: 'owner' }), 'op-goods-1', firstGoods.cache)
+  const firstGoods = executeCommandIdempotent(petId, deviceId, firstCheat.commit.state, goodsCommand, context(firstCheat.commit.state, { actorRole: 'owner' }), 'op-goods-1', retryCheat.commit.cache)
+  const retryGoods = executeCommandIdempotent(petId, deviceId, firstGoods.commit.state, goodsCommand, context(firstGoods.commit.state, { actorRole: 'owner' }), 'op-goods-1', firstGoods.commit.cache)
   assert.equal(firstGoods.duplicate, false)
   assert.equal(retryGoods.duplicate, true)
   assert.deepEqual(retryGoods.outcome.result, firstGoods.outcome.result)
   assert.equal(retryGoods.outcome.events.length, 0)
-  assert.equal(stableStringify(retryGoods.outcome.state), stableStringify(firstGoods.outcome.state))
-  assert.equal(typeof JSON.parse(JSON.stringify(retryGoods.cache)), 'object')
+  assert.equal(stableStringify(retryGoods.commit.state), stableStringify(firstGoods.commit.state))
+  assert.equal(typeof JSON.parse(JSON.stringify(retryGoods.commit.cache)), 'object')
+
+  const otherDevice = executeCommandIdempotent(petId, 'device-b', firstCheat.commit.state, cheatCommand, context(firstCheat.commit.state, { actorRole: 'owner' }), 'op-cheat-1', retryGoods.commit.cache)
+  assert.equal(otherDevice.duplicate, false)
+  assert.equal(otherDevice.commit.state.save.petInfo.yb, firstCheat.commit.state.save.petInfo.yb + 50)
+  assert.equal(otherDevice.commit.cache.length, retryGoods.commit.cache.length + 1)
+
+  const escapedA = executeCommandIdempotent(petId, deviceId, base, cheatCommand, context(base, { actorRole: 'owner' }), '__proto__')
+  const escapedB = executeCommandIdempotent(petId, deviceId, escapedA.commit.state, cheatCommand, context(escapedA.commit.state, { actorRole: 'owner' }), 'toString', escapedA.commit.cache)
+  assert.equal(escapedA.duplicate, false)
+  assert.equal(escapedB.duplicate, false)
+  assert.equal(escapedB.commit.cache.length, 2)
+  assert.equal(Object.prototype.hasOwnProperty.call(escapedB.commit.cache, '__proto__'), false)
+
+  const rejectedFirst = executeCommandIdempotent(petId, deviceId, base, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 0 } }, context(base, { actorRole: 'owner' }), 'op-rejected')
+  const rejectedRetry = executeCommandIdempotent(petId, deviceId, rejectedFirst.commit.state, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 0 } }, context(rejectedFirst.commit.state, { actorRole: 'owner' }), 'op-rejected', rejectedFirst.commit.cache)
+  assert.equal(rejectedFirst.outcome.ok, false)
+  assert.equal(rejectedRetry.duplicate, true)
+  assert.deepEqual(rejectedRetry.outcome.error, rejectedFirst.outcome.error)
+  assert.equal(stableStringify(rejectedRetry.commit.state), stableStringify(rejectedFirst.commit.state))
+
+  const serialized = new SerializedIdempotentExecutor(petId, deviceId, base)
+  const serializedFirst = serialized.execute(cheatCommand, context(base, { actorRole: 'owner' }), 'op-serialized')
+  const serializedRetry = serialized.execute(cheatCommand, context(serializedFirst.commit.state, { actorRole: 'owner' }), 'op-serialized')
+  assert.equal(serializedFirst.duplicate, false)
+  assert.equal(serializedRetry.duplicate, true)
+  assert.equal(serialized.snapshot().state.save.petInfo.yb, base.save.petInfo.yb + 50)
+  assert.equal(serialized.snapshot().cache.length, 1)
 })
 
 test('false-mode gap search is bounded to the chunk horizon, not the long target', () => {
@@ -1061,4 +1100,26 @@ test('coverage begin at +90s resumes at the exact connectedAtWallMs without cred
   assert.equal(second.frozen, false)
   assert.equal(second.state.gameTimeMs, GAME_TIME_MS + 3 * 60000)
   assert.equal(second.state.save.petInfo.onLineTime, 3)
+})
+
+test('coverage hook can return an exact activeFromWallMs for sub-minute pre-connect resume', () => {
+  const state = baseState()
+  state.lastSchedulerWallMs = WALL_TIME_MS
+  state.gameTimeMs = GAME_TIME_MS
+  state.advanceWhileEmpty = false
+  state.sessionCoverage = []
+  const connectAt = WALL_TIME_MS + 90000
+  const target = WALL_TIME_MS + 5 * 60000
+  const coverageAtWallMs = (fromWallMs, toWallMs) => {
+    if (connectAt >= fromWallMs && connectAt < toWallMs) {
+      return { activeClientCount: 1, sessionActive: true, activeFromWallMs: connectAt }
+    }
+    return { activeClientCount: 0, sessionActive: false }
+  }
+  const first = advanceSchedulerChunk(state, context(state), target, { coverageAtWallMs })
+  assert.equal(first.ticks, 0)
+  assert.equal(first.frozen, true)
+  assert.equal(first.resumeAtWallMs, connectAt)
+  assert.equal(first.state.lastSchedulerWallMs, connectAt)
+  assert.equal(first.state.gameTimeMs, GAME_TIME_MS)
 })

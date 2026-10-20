@@ -9,15 +9,23 @@ export const SCHEDULER_POLL_MS = 1000
 export const GAME_TICK_MS = GAME_MINUTE_MS
 export const CATCHUP_CHUNK_TICKS = 1440
 
+export interface SchedulerCoverageWindow extends SessionActivity {
+  /** Exact wall time of the first active instant inside this minute, when known. */
+  activeFromWallMs?: number
+}
+export interface SchedulerLiveActivity {
+  activeClientCount: number
+  activeFromWallMs?: number
+}
 export interface SchedulerAdvanceOptions {
   /** Defaults to the persisted 1440-minute bounded catch-up chunk. */
   maxChunkTicks?: number
   /** Legacy live-count hint; historical freeze decisions use coverage/per-minute hooks only. */
   liveActiveClientCount?: number
   /** Per-minute live client count hook for mid-catch-up connects/disconnects. */
-  liveActiveClientCountAtWallMs?: (wallMs: number) => number
+  liveActiveClientCountAtWallMs?: (wallMs: number) => number | SchedulerLiveActivity
   /** Per-minute coverage override for hosts that update coverage as catch-up proceeds. */
-  coverageAtWallMs?: (fromWallMs: number, toWallMs: number) => SessionActivity
+  coverageAtWallMs?: (fromWallMs: number, toWallMs: number) => SchedulerCoverageWindow
 }
 
 export interface SchedulerAdvanceOutcome {
@@ -71,11 +79,13 @@ export function advanceSchedulerChunk(
   const horizonWallMs = anchor + ticks * GAME_MINUTE_MS
   const events: DomainEvent[] = []
   let completed = 0
-  const activityAt = (fromWallMs: number, toWallMs: number): SessionActivity =>
+  const activityAt = (fromWallMs: number, toWallMs: number): SchedulerCoverageWindow =>
     options.coverageAtWallMs?.(fromWallMs, toWallMs) ??
     sessionActivityForInterval(candidate.sessionCoverage, fromWallMs, toWallMs)
-  const liveAt = (wallMs: number): number =>
-    options.liveActiveClientCountAtWallMs?.(wallMs) ?? 0
+  const liveActivityAt = (wallMs: number): SchedulerLiveActivity => {
+    const value = options.liveActiveClientCountAtWallMs?.(wallMs) ?? 0
+    return typeof value === 'number' ? { activeClientCount: value } : value
+  }
   const nextActiveWall = (fromWallMs: number): number => {
     if (options.coverageAtWallMs === undefined) {
       let exactStart = horizonWallMs
@@ -89,17 +99,22 @@ export function advanceSchedulerChunk(
     }
     for (let wallMs = fromWallMs; wallMs < horizonWallMs; wallMs += GAME_MINUTE_MS) {
       const activity = activityAt(wallMs, wallMs + GAME_MINUTE_MS)
-      if (activity.activeClientCount > 0 || liveAt(wallMs) > 0) return wallMs
+      const live = liveActivityAt(wallMs)
+      if (activity.activeClientCount > 0 || live.activeClientCount > 0) {
+        const exact = activity.activeFromWallMs ?? live.activeFromWallMs
+        if (exact !== undefined && exact >= fromWallMs && exact < wallMs + GAME_MINUTE_MS) return exact
+        return wallMs
+      }
     }
     return horizonWallMs
   }
   for (let index = 0; index < ticks; index++) {
     const fromWallMs = anchor + index * GAME_MINUTE_MS
     const toWallMs = fromWallMs + GAME_MINUTE_MS
-    const liveAtMinute = liveAt(fromWallMs)
-    nonNegativeInteger(liveAtMinute, 'liveActiveClientCountAtWallMs')
+    const live = liveActivityAt(fromWallMs)
+    nonNegativeInteger(live.activeClientCount, 'liveActiveClientCountAtWallMs')
     const activity = activityAt(fromWallMs, toWallMs)
-    const activeAtMinute = Math.max(activity.activeClientCount, liveAtMinute)
+    const activeAtMinute = Math.max(activity.activeClientCount, live.activeClientCount)
     if (candidate.advanceWhileEmpty === false && activeAtMinute === 0) {
       const resumeAtWallMs = nextActiveWall(fromWallMs)
       candidate.lastSchedulerWallMs = resumeAtWallMs
