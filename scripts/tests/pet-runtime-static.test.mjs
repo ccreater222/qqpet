@@ -4,13 +4,11 @@ import { dirname, join, relative } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { parse } from '@babel/parser'
+import traverseModule from '@babel/traverse'
 
+const traverse = traverseModule.default ?? traverseModule
 const RUNTIME_DIR = fileURLToPath(new URL('../../src/shared/pet-runtime', import.meta.url))
 const WORKSPACE = fileURLToPath(new URL('../../', import.meta.url))
-const SKIP_KEYS = new Set([
-  'loc', 'start', 'end', 'range', 'extra', 'tokens', 'comments', 'errors',
-  'leadingComments', 'trailingComments', 'innerComments',
-])
 
 const AMBIENT_ROOTS = new Map([
   ['window', 'DOM global'],
@@ -22,6 +20,7 @@ const AMBIENT_ROOTS = new Map([
   ['XMLHttpRequest', 'DOM global'],
   ['WebSocket', 'DOM global'],
   ['MutationObserver', 'DOM global'],
+  ['self', 'DOM global'],
   ['fetch', 'network'],
   ['setTimeout', 'timer'],
   ['setInterval', 'timer'],
@@ -32,76 +31,66 @@ const AMBIENT_ROOTS = new Map([
   ['process', 'Node global'],
   ['Buffer', 'Node global'],
   ['require', 'Node global'],
+  ['global', 'Node global'],
   ['__dirname', 'Node global'],
   ['__filename', 'Node global'],
   ['ipcRenderer', 'Electron'],
   ['ipcMain', 'Electron'],
   ['crypto', 'crypto global'],
   ['performance', 'performance.now'],
+  ['eval', 'eval'],
+  ['Function', 'Function'],
+])
+const DYNAMIC_AMBIENT_ROOTS = new Set(['globalThis', 'Math', 'Date', ...AMBIENT_ROOTS.keys()])
+const TS_VALUE_WRAPPERS = new Set([
+  'TSAsExpression',
+  'TSTypeAssertion',
+  'TSNonNullExpression',
+  'TSSatisfiesExpression',
+  'TSInstantiationExpression',
 ])
 
-function walk(node, visit, parent = null, parentKey = '') {
-  if (node === null || typeof node !== 'object') return
-  if (Array.isArray(node)) {
-    for (const child of node) walk(child, visit, parent, parentKey)
-    return
-  }
-  if (typeof node.type !== 'string') return
-  visit(node, parent, parentKey)
-  for (const [key, value] of Object.entries(node)) {
-    if (SKIP_KEYS.has(key)) continue
-    if (value === null || typeof value !== 'object') continue
-    if (Array.isArray(value)) {
-      for (const child of value) walk(child, visit, node, key)
-    } else {
-      walk(value, visit, node, key)
-    }
-  }
-}
-
-function propertyName(member) {
-  if (member.computed === false && member.property.type === 'Identifier') return member.property.name
-  if (member.property.type === 'StringLiteral' || member.property.type === 'NumericLiteral') {
-    return String(member.property.value)
-  }
+function staticPropertyName(property, computed) {
+  if (computed === false && property.type === 'Identifier') return property.name
+  if (property.type === 'StringLiteral' || property.type === 'NumericLiteral') return String(property.value)
   return null
 }
 
-function expressionChain(node) {
-  if (node === null || typeof node !== 'object') return null
-  if (node.type === 'Identifier') return [node.name]
-  if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
-    const base = expressionChain(node.object)
-    const property = propertyName(node)
-    if (base === null || property === null) return null
-    return [...base, property]
-  }
-  if (node.type === 'ParenthesizedExpression' || node.type === 'TSAsExpression' ||
-      node.type === 'TSTypeAssertion' || node.type === 'TSNonNullExpression' ||
-      node.type === 'ChainExpression') {
-    return expressionChain(node.expression)
-  }
-  return null
-}
-
-function normalizeChain(chain, aliases) {
-  let current = chain.slice()
-  for (let round = 0; round < 16; round++) {
-    if (current.length > 1 && current[0] === 'globalThis') {
-      current = current.slice(1)
-      continue
-    }
-    const target = aliases.get(current[0])
-    if (target === undefined) break
-    current = target.split('.').concat(current.slice(1))
-  }
+function normalizeSegments(segments) {
+  let current = segments.slice()
+  while (current.length > 1 && current[0] === 'globalThis') current = current.slice(1)
   return current
 }
 
-function canonicalPath(node, aliases) {
-  const chain = expressionChain(node)
-  if (chain === null) return null
-  return normalizeChain(chain, aliases).join('.')
+function localSegment(binding) {
+  return '@local:' + binding.scope.uid + ':' + binding.identifier.start
+}
+
+function pathSegments(node, scope, aliases) {
+  if (node === null || node === undefined) return null
+  if (node.type === 'Identifier') {
+    const binding = scope.getBinding(node.name)
+    if (binding === undefined) return [node.name]
+    const target = aliases.get(binding)
+    if (target === undefined) return [localSegment(binding)]
+    return normalizeSegments(target.split('.'))
+  }
+  if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+    const base = pathSegments(node.object, scope, aliases)
+    const property = staticPropertyName(node.property, node.computed)
+    if (base === null || property === null) return null
+    return normalizeSegments([...base, property])
+  }
+  if (node.type === 'ParenthesizedExpression' || node.type === 'ChainExpression' ||
+      TS_VALUE_WRAPPERS.has(node.type)) {
+    return pathSegments(node.expression, scope, aliases)
+  }
+  return null
+}
+
+function pathString(node, scope, aliases) {
+  const segments = pathSegments(node, scope, aliases)
+  return segments === null ? null : segments.join('.')
 }
 
 function ambientViolation(path) {
@@ -109,75 +98,103 @@ function ambientViolation(path) {
   if (path === 'Math.random' || path.startsWith('Math.random.')) return 'Math.random'
   if (path === 'Date.now' || path.startsWith('Date.now.')) return 'Date.now'
   if (path === 'performance.now' || path.startsWith('performance.now.')) return 'performance.now'
-  const root = path.split('.')[0]
-  return AMBIENT_ROOTS.get(root) ?? null
+  return AMBIENT_ROOTS.get(path.split('.')[0]) ?? null
 }
 
-function setAlias(aliases, local, target) {
-  if (target === null || aliases.get(local) === target) return false
-  aliases.set(local, target)
+function isAmbientBase(segments) {
+  if (segments === null || segments.length === 0) return false
+  const path = segments.join('.')
+  return DYNAMIC_AMBIENT_ROOTS.has(path) || ambientViolation(path) !== null
+}
+
+function assignAlias(aliases, binding, segments) {
+  if (binding === undefined) return false
+  const target = normalizeSegments(segments).join('.')
+  if (aliases.get(binding) === target) return false
+  aliases.set(binding, target)
   return true
 }
 
-function boundIdentifier(node) {
-  if (node === null || typeof node !== 'object') return null
-  if (node.type === 'Identifier') return node.name
-  if (node.type === 'AssignmentPattern') return boundIdentifier(node.left)
-  return null
-}
-
-function bindingPropertyName(node) {
-  if (node.computed === false && node.key.type === 'Identifier') return node.key.name
-  if (node.key.type === 'StringLiteral' || node.key.type === 'NumericLiteral') return String(node.key.value)
-  return null
+function bindPattern(patternPath, baseSegments, aliases, dynamicViolations) {
+  if (patternPath.node === null || patternPath.node === undefined) return false
+  if (patternPath.isAssignmentPattern()) {
+    return bindPattern(patternPath.get('left'), baseSegments, aliases, dynamicViolations)
+  }
+  if (patternPath.isIdentifier()) {
+    const binding = patternPath.scope.getBinding(patternPath.node.name)
+    return assignAlias(aliases, binding, baseSegments)
+  }
+  if (patternPath.isObjectPattern()) {
+    let changed = false
+    for (const propertyPath of patternPath.get('properties')) {
+      if (propertyPath.isObjectProperty() === false) continue
+      const key = staticPropertyName(propertyPath.node.key, propertyPath.node.computed)
+      if (key === null) {
+        if (isAmbientBase(baseSegments)) dynamicViolations.add('dynamic ambient access')
+        continue
+      }
+      const childBase = normalizeSegments([...baseSegments, key])
+      changed = bindPattern(propertyPath.get('value'), childBase, aliases, dynamicViolations) || changed
+    }
+    return changed
+  }
+  if (patternPath.isArrayPattern()) {
+    let changed = false
+    const elements = patternPath.get('elements')
+    for (let index = 0; index < elements.length; index++) {
+      const element = elements[index]
+      if (element.node === null || element.node === undefined) continue
+      changed = bindPattern(element, [...baseSegments, String(index)], aliases, dynamicViolations) || changed
+    }
+    return changed
+  }
+  return false
 }
 
 function collectAliases(fileNode) {
   const aliases = new Map()
+  const dynamicViolations = new Set()
   for (let round = 0; round < 20; round++) {
     let changed = false
-    walk(fileNode, node => {
-      if (node.type === 'VariableDeclarator' && node.init !== null) {
-        if (node.id.type === 'Identifier') {
-          changed = setAlias(aliases, node.id.name, canonicalPath(node.init, aliases)) || changed
-        } else if (node.id.type === 'ObjectPattern') {
-          const base = canonicalPath(node.init, aliases)
-          if (base === null) return
-          for (const property of node.id.properties) {
-            if (property.type !== 'ObjectProperty') continue
-            const key = bindingPropertyName(property)
-            const local = boundIdentifier(property.value)
-            if (key === null || local === null) continue
-            const target = normalizeChain(base.split('.').concat(key), aliases).join('.')
-            changed = setAlias(aliases, local, target) || changed
-          }
+    traverse(fileNode, {
+      VariableDeclarator(path) {
+        if (path.node.init === null) return
+        const initPath = path.get('init')
+        const base = pathSegments(initPath.node, initPath.scope, aliases)
+        if (base === null) return
+        const idPath = path.get('id')
+        if (idPath.isIdentifier()) {
+          changed = assignAlias(aliases, idPath.scope.getBinding(idPath.node.name), base) || changed
+        } else if (idPath.isObjectPattern() || idPath.isArrayPattern()) {
+          changed = bindPattern(idPath, base, aliases, dynamicViolations) || changed
         }
-      }
-      if (node.type === 'AssignmentExpression' && node.operator === '=' && node.left.type === 'Identifier') {
-        changed = setAlias(aliases, node.left.name, canonicalPath(node.right, aliases)) || changed
-      }
+      },
+      AssignmentExpression(path) {
+        if (path.node.operator !== '=') return
+        const rightPath = path.get('right')
+        const base = pathSegments(rightPath.node, rightPath.scope, aliases)
+        if (base === null) return
+        const leftPath = path.get('left')
+        if (leftPath.isIdentifier()) {
+          changed = assignAlias(aliases, leftPath.scope.getBinding(leftPath.node.name), base) || changed
+        } else if (leftPath.isObjectPattern() || leftPath.isArrayPattern()) {
+          changed = bindPattern(leftPath, base, aliases, dynamicViolations) || changed
+        }
+      },
     })
     if (changed === false) break
   }
-  return aliases
+  return { aliases, dynamicViolations }
 }
 
-function isReferenceIdentifier(node, parent, parentKey) {
-  if (parent === null) return true
-  if (parent.type === 'MemberExpression' || parent.type === 'OptionalMemberExpression') {
-    return parent.property === node && parent.computed === false ? false : true
+function isTypePosition(path) {
+  let current = path.parentPath
+  while (current !== null) {
+    const type = current.node?.type
+    if (typeof type === 'string' && type.startsWith('TS') && TS_VALUE_WRAPPERS.has(type) === false) return true
+    current = current.parentPath
   }
-  if (parent.type === 'ObjectProperty' || parent.type === 'ObjectMethod') {
-    return parent.key === node && parent.computed === false ? false : true
-  }
-  if (parent.type === 'VariableDeclarator') return parent.id === node ? false : true
-  if (parent.type === 'FunctionDeclaration' || parent.type === 'FunctionExpression' || parent.type === 'ClassDeclaration') {
-    return parent.id === node ? false : true
-  }
-  if (parent.type === 'ImportSpecifier' || parent.type === 'ImportDefaultSpecifier' ||
-      parent.type === 'ImportNamespaceSpecifier' || parent.type === 'LabeledStatement' ||
-      parent.type === 'BreakStatement' || parent.type === 'ContinueStatement') return false
-  return parentKey.length > 0
+  return false
 }
 
 function importSpecifier(value) {
@@ -193,8 +210,9 @@ function inspectSource(source, fileName = 'fixture.ts') {
   } catch (error) {
     throw new Error(fileName + ': failed to parse TypeScript AST: ' + error.message)
   }
-  const aliases = collectAliases(fileNode)
-  const forbidden = new Set()
+
+  const { aliases, dynamicViolations } = collectAliases(fileNode)
+  const forbidden = new Set(dynamicViolations)
   const badImports = new Set()
 
   const checkImport = specifier => {
@@ -204,34 +222,77 @@ function inspectSource(source, fileName = 'fixture.ts') {
     if (outsideRuntime || rendererImport) badImports.add(specifier)
   }
 
-  walk(fileNode, (node, parent, parentKey) => {
-    if (node.type === 'ImportDeclaration' || node.type === 'ExportNamedDeclaration' || node.type === 'ExportAllDeclaration') {
-      checkImport(importSpecifier(node.source?.value))
-    } else if (node.type === 'TSImportEqualsDeclaration' && node.moduleReference.type === 'TSExternalModuleReference') {
-      checkImport(importSpecifier(node.moduleReference.expression?.value))
-    } else if (node.type === 'ImportExpression') {
-      checkImport(importSpecifier(node.source?.value))
-    } else if (node.type === 'CallExpression' || node.type === 'OptionalCallExpression') {
-      if (node.callee.type === 'Import') {
-        checkImport(importSpecifier(node.arguments[0]?.value))
-      } else {
-        const path = canonicalPath(node.callee, aliases)
-        if (path === 'Date') forbidden.add('Date()')
-        const violation = ambientViolation(path)
-        if (violation !== null) forbidden.add(violation)
-      }
-    } else if (node.type === 'NewExpression') {
-      const path = canonicalPath(node.callee, aliases)
-      if (path === 'Date' && node.arguments.length === 0) forbidden.add('new Date()')
-      const violation = ambientViolation(path)
-      if (violation !== null) forbidden.add(violation)
-    } else if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
-      const violation = ambientViolation(canonicalPath(node, aliases))
-      if (violation !== null) forbidden.add(violation)
-    } else if (node.type === 'Identifier' && isReferenceIdentifier(node, parent, parentKey)) {
-      const violation = ambientViolation(canonicalPath(node, aliases))
+  const inspectMember = path => {
+    const objectSegments = pathSegments(path.node.object, path.scope, aliases)
+    const property = staticPropertyName(path.node.property, path.node.computed)
+    if (path.node.computed === true && property === null && isAmbientBase(objectSegments)) {
+      forbidden.add('dynamic ambient access')
+    }
+    if (objectSegments !== null && property !== null) {
+      const violation = ambientViolation(normalizeSegments([...objectSegments, property]).join('.'))
       if (violation !== null) forbidden.add(violation)
     }
+  }
+
+  const inspectCall = path => {
+    const target = pathString(path.node.callee, path.scope, aliases)
+    if (target === 'Date') forbidden.add('Date()')
+    const violation = ambientViolation(target)
+    if (violation !== null) forbidden.add(violation)
+  }
+
+  traverse(fileNode, {
+    ImportDeclaration(path) {
+      checkImport(importSpecifier(path.node.source.value))
+    },
+    ExportNamedDeclaration(path) {
+      checkImport(importSpecifier(path.node.source?.value))
+    },
+    ExportAllDeclaration(path) {
+      checkImport(importSpecifier(path.node.source?.value))
+    },
+    TSImportEqualsDeclaration(path) {
+      if (path.node.moduleReference.type === 'TSExternalModuleReference') {
+        checkImport(importSpecifier(path.node.moduleReference.expression?.value))
+      }
+    },
+    ImportExpression(path) {
+      const sourcePath = path.get('source')
+      if (sourcePath.isStringLiteral()) checkImport(sourcePath.node.value)
+      else forbidden.add('non-literal dynamic import')
+    },
+    CallExpression(path) {
+      if (path.node.callee.type === 'Import') {
+        const argument = path.node.arguments[0]
+        if (path.node.arguments.length !== 1 || argument?.type !== 'StringLiteral') {
+          forbidden.add('non-literal dynamic import')
+        } else {
+          checkImport(argument.value)
+        }
+        return
+      }
+      inspectCall(path)
+    },
+    OptionalCallExpression(path) {
+      inspectCall(path)
+    },
+    NewExpression(path) {
+      const target = pathString(path.node.callee, path.scope, aliases)
+      if (target === 'Date' && path.node.arguments.length === 0) forbidden.add('new Date()')
+      const violation = ambientViolation(target)
+      if (violation !== null) forbidden.add(violation)
+    },
+    MemberExpression(path) {
+      inspectMember(path)
+    },
+    OptionalMemberExpression(path) {
+      inspectMember(path)
+    },
+    Identifier(path) {
+      if (path.isReferencedIdentifier() === false || isTypePosition(path)) return
+      const violation = ambientViolation(pathString(path.node, path.scope, aliases))
+      if (violation !== null) forbidden.add(violation)
+    },
   })
 
   for (const target of aliases.values()) {
@@ -277,16 +338,22 @@ test('pet runtime AST guard scans every TypeScript file recursively', () => {
   }
 })
 
-test('AST guard catches aliases, direct Date calls and computed access', () => {
+test('AST guard catches aliases, nested destructuring, computed access and dynamic import', () => {
   const aliasCases = [
     ['const { random } = Math; random()', 'Math.random'],
     ['const { random: r } = Math; r()', 'Math.random'],
     ['const random = Math.random; random()', 'Math.random'],
     ['const M = Math; const r = M.random; r()', 'Math.random'],
+    ['const { Math: { random } } = globalThis; random()', 'Math.random'],
+    ['let random; ({ Math: { random } } = globalThis); random()', 'Math.random'],
     ["const { Date: D } = globalThis; new D()", 'new Date()'],
     ['const D = globalThis.Date; new D()', 'new Date()'],
     ['const { now } = Date; now()', 'Date.now'],
     ["const { setTimeout: later } = globalThis; later(work, 1)", 'timer'],
+    ['const F = Function; new F()', 'Function'],
+    ['const { Function: F } = globalThis; F()', 'Function'],
+    ['const e = eval; e(code)', 'eval'],
+    ['const { eval: e } = globalThis; e(code)', 'eval'],
   ]
   for (const [source, expected] of aliasCases) {
     assert.ok(inspectSource(source).forbidden.includes(expected), source)
@@ -294,16 +361,51 @@ test('AST guard catches aliases, direct Date calls and computed access', () => {
   assert.ok(inspectSource('Date()').forbidden.includes('Date()'))
   assert.ok(inspectSource('new globalThis.Date()').forbidden.includes('new Date()'))
   assert.ok(inspectSource("Math['random']()").forbidden.includes('Math.random'))
+  assert.ok(inspectSource("Math['ran' + 'dom']()").forbidden.includes('dynamic ambient access'))
+  assert.ok(inspectSource("globalThis['fet' + 'ch'](url)").forbidden.includes('dynamic ambient access'))
+  assert.ok(inspectSource("const M = Math; M['ran' + 'dom']()").forbidden.includes('dynamic ambient access'))
+  assert.ok(inspectSource("const g = globalThis; g['fet' + 'ch'](url)").forbidden.includes('dynamic ambient access'))
+  assert.ok(inspectSource("const { [key]: value } = Math").forbidden.includes('dynamic ambient access'))
+  assert.ok(inspectSource("const { Math: { [key]: value } } = globalThis").forbidden.includes('dynamic ambient access'))
   assert.ok(inspectSource('globalThis.Date.now()').forbidden.includes('Date.now'))
   assert.ok(inspectSource('const root = document.body').forbidden.includes('DOM global'))
   assert.ok(inspectSource('void fetch(url)').forbidden.includes('network'))
   assert.ok(inspectSource('const pid = process.pid').forbidden.includes('Node global'))
+  assert.ok(inspectSource('eval(source)').forbidden.includes('eval'))
+  assert.ok(inspectSource('Function(source)').forbidden.includes('Function'))
+  assert.ok(inspectSource('new Function(source)').forbidden.includes('Function'))
+  assert.ok(inspectSource('import(modulePath)').forbidden.includes('non-literal dynamic import'))
+  assert.ok(inspectSource('import(`./${name}`)').forbidden.includes('non-literal dynamic import'))
   assert.ok(inspectSource("import { ipcMain } from 'electron'").badImports.includes('electron'))
   assert.deepEqual(inspectSource("import fs from 'node:fs'").badImports, ['node:fs'])
   assert.deepEqual(inspectSource("import path from 'path'").badImports, ['path'])
   assert.deepEqual(inspectSource("import { x } from './x'").badImports, [])
+  assert.deepEqual(inspectSource("import('./x')").badImports, [])
+  assert.deepEqual(inspectSource("import('./x')").forbidden, [])
   assert.deepEqual(inspectSource("import('node:fs')").badImports, ['node:fs'])
   assert.deepEqual(inspectSource("import { x } from '../../renderer/pet/store'").badImports, ['../../renderer/pet/store'])
+})
+
+test('AST guard resolves lexical bindings without ambient false positives', () => {
+  const safeSources = [
+    'const fetch = () => 1; fetch()',
+    'function run(fetch) { return fetch() }',
+    'function run(Math) { return Math.random() }',
+    'function run(Date) { return new Date() }',
+    'function run(Function) { return new Function() }',
+    'function outer() { const M = Math }\nfunction inner() { const M = { random: () => 1 }; return M.random() }',
+    'const M = { random: () => 1 }; M.random()',
+    'function run(Math) { return Math["ran" + "dom"]() }',
+    'const local = {}; local["fet" + "ch"]()',
+    'const object = {}; object["fetch"]()',
+    'const root: Function = () => 1; root()',
+  ]
+  for (const source of safeSources) {
+    assert.deepEqual(inspectSource(source).forbidden, [], source)
+  }
+  assert.ok(inspectSource('function outer() { const fetch = globalThis.fetch }\nfunction inner(fetch) { return fetch() }').forbidden.includes('network'))
+  assert.ok(inspectSource('function inner(fetch) { return fetch() } fetch()').forbidden.includes('network'))
+  assert.ok(inspectSource('const local = {}; local.fetch()').forbidden.includes('network') === false)
 })
 
 test('AST guard ignores comment and string markers but keeps explicit clock inputs legal', () => {
