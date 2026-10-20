@@ -8,6 +8,7 @@ import traverseModule from '@babel/traverse'
 
 const traverse = traverseModule.default ?? traverseModule
 const RUNTIME_DIR = fileURLToPath(new URL('../../src/shared/pet-runtime', import.meta.url))
+const SYNC_DIR = fileURLToPath(new URL('../../src/shared/sync', import.meta.url))
 const WORKSPACE = fileURLToPath(new URL('../../', import.meta.url))
 
 const AMBIENT_ROOTS = new Map([
@@ -316,9 +317,10 @@ function collectTypeScriptFiles(root) {
   return files
 }
 
-test('pet runtime AST guard scans every TypeScript file recursively', () => {
-  const files = collectTypeScriptFiles(RUNTIME_DIR)
-  assert.ok(files.length >= 10, 'expected the complete C1 runtime module set')
+test('shared runtime and sync AST guard scans every TypeScript file recursively', () => {
+  const files = [...collectTypeScriptFiles(RUNTIME_DIR), ...collectTypeScriptFiles(SYNC_DIR)]
+  assert.ok(files.length >= 15, 'expected the complete runtime and sync module set')
+  assert.ok(files.some(file => file.includes('/src/shared/sync/')), 'sync modules must be guarded too')
   for (const file of files) {
     const violations = inspectSource(readFileSync(file, 'utf8'), relative(WORKSPACE, file))
     assert.deepEqual(violations.forbidden, [], relative(WORKSPACE, file) + ' uses ambient behavior')

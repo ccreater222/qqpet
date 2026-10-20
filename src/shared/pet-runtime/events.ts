@@ -1,5 +1,48 @@
 import type { JsonObject } from './types'
 
+/** Stable semantic event identifiers from the C2 MVP catalog. */
+export const DOMAIN_EVENT_TYPES = [
+  'pet.statsChanged',
+  'pet.levelChanged',
+  'pet.illnessChanged',
+  'pet.died',
+  'inventory.changed',
+  'item.consumed',
+  'reward.granted',
+  'activity.started',
+  'activity.completed',
+  'task.progress',
+  'task.claimed',
+  'mail.arrived',
+  'mail.claimed',
+  'signin.changed',
+  'vip.changed',
+  'game.sessionStarted',
+  'game.sessionSettled',
+  'island.errandChanged',
+  'island.combatSettled',
+  'island.rewardGranted',
+  'farm.changed',
+  'fishing.changed',
+  'system.snapshotBoundary',
+  'system.catchUpCompleted',
+] as const
+
+export type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number]
+
+/** A domain event ordered by the committing host for wire/projection delivery. */
+export interface OrderedEvent<
+  TType extends string = string,
+  TPayload extends JsonObject = JsonObject,
+> {
+  eventSeq: number
+  revision: number
+  commandSeq?: number
+  gameTimeMs: number
+  type: TType
+  payload: TPayload
+}
+
 /** A deterministic domain event before a host assigns its global sequence. */
 export interface DomainEvent<
   TType extends string = string,
@@ -40,5 +83,25 @@ export function assertOrderedEvents(events: readonly OrderedDomainEvent[]): void
       throw new Error('ordered events must have strictly increasing positive eventSeq values')
     }
     previous = event.eventSeq
+  }
+}
+
+/** Asserts that wire events are strictly ordered and carry non-negative revisions. */
+export function assertOrderedEventStream(events: readonly OrderedEvent[]): void {
+  let previousEventSeq = 0
+  let previousRevision = -1
+  for (const event of events) {
+    if (Number.isSafeInteger(event.eventSeq) === false || event.eventSeq <= previousEventSeq) {
+      throw new Error('ordered events must have strictly increasing positive eventSeq values')
+    }
+    if (Number.isSafeInteger(event.revision) === false || event.revision < 0 || event.revision < previousRevision) {
+      throw new Error('ordered events must have non-decreasing non-negative revisions')
+    }
+    if (event.commandSeq !== undefined && (Number.isSafeInteger(event.commandSeq) === false || event.commandSeq < 0)) {
+      throw new Error('commandSeq must be a non-negative safe integer')
+    }
+    if (Number.isSafeInteger(event.gameTimeMs) === false) throw new Error('event gameTimeMs must be a safe integer')
+    previousEventSeq = event.eventSeq
+    previousRevision = event.revision
   }
 }

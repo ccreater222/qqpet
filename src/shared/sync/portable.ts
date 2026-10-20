@@ -1,0 +1,615 @@
+import { cloneRngState } from '../pet-runtime/rng'
+import { assertJsonSafe, stableStringify } from '../pet-runtime/serialization'
+import { assertTimeZone, isDayKey } from '../pet-runtime/time'
+import { RUNTIME_SCHEMA_VERSION } from '../pet-runtime/types'
+import type {
+  CalendarInput,
+  CoverageEndProvenance,
+  CoverageReopen,
+  CoverageSurvivor,
+  EngineState,
+  EnvironmentInputs,
+  GameSessionPayload,
+  GameSessionState,
+  ScheduledJob,
+  SessionCoverageInterval,
+  WeatherDayRecord,
+} from '../pet-runtime/types'
+import type { DeviceLocalOverlay, SharedSaveData } from './data-boundary'
+import {
+  assertDeviceLocalOverlay,
+  assertNoNeverUpload,
+  assertSharedSaveData,
+} from './data-boundary'
+import {
+  assertOnlyKeys,
+  assertRequiredKeys,
+  assertSchemaVersion,
+  failSchema,
+  isEnum,
+  isNonEmptyString,
+  isNonNegativeInteger,
+  requireJsonObject,
+  requireNonNegativeInteger,
+  requireRecord,
+  requireSafeInteger,
+  type SchemaError,
+} from './schema'
+
+export const PORTABLE_BUNDLE_FORMAT = 'qqpet-portable-v1' as const
+export const PORTABLE_BUNDLE_SCHEMA_VERSION = 1 as const
+export const LOCAL_DOCUMENT_FORMAT = 'qqpet-local-v2' as const
+export const LOCAL_DOCUMENT_SCHEMA_VERSION = 1 as const
+export const REMOTE_PROJECTION_CACHE_FORMAT = 'qqpet-server-projection-v2' as const
+export const REMOTE_PROJECTION_CACHE_SCHEMA_VERSION = 1 as const
+
+export interface AuthorityStamp {
+  owner: 'local' | 'server'
+  /** Stable lineage UUID; changes only on operator restore/reset rollback. */
+  authorityId: string
+  epoch: number
+  restoreGeneration: number
+  revision: number
+  eventSeq: number
+  handoffId: string
+  detachedAtWallMs: number
+}
+
+export interface WireAuthority {
+  owner: 'local' | 'server'
+  authorityId: string
+  restoreGeneration: number
+  epoch: number
+  state: 'active' | 'archived' | 'reset'
+}
+
+export interface PortablePetBundleV1 {
+  format: typeof PORTABLE_BUNDLE_FORMAT
+  schemaVersion: typeof PORTABLE_BUNDLE_SCHEMA_VERSION
+  exportedAtWallMs: number
+  authority: AuthorityStamp
+  /** Present for local-origin bundles; provenance/rebinding only, never auth authority. */
+  originLocalDeviceId?: string
+  shared: SharedSaveData
+  engine: EngineState
+}
+
+export interface LocalPersistedRuntimeIdentity {
+  /** New UUID on every process start; never reused across restart. */
+  appInstanceId: string
+  startedAtWallMs: number
+}
+
+export interface LocalRuntimeIdentity extends LocalPersistedRuntimeIdentity {
+  /** Derived from LocalPetDocumentV2.device.localDeviceId; never serialized independently. */
+  readonly localDeviceId: string
+}
+
+export interface LocalPetDocumentV2 {
+  format: typeof LOCAL_DOCUMENT_FORMAT
+  schemaVersion: typeof LOCAL_DOCUMENT_SCHEMA_VERSION
+  revision: number
+  eventSeq: number
+  authority: {
+    state: 'active' | 'handoff_pending' | 'archived'
+    stamp: AuthorityStamp
+  }
+  bundle: PortablePetBundleV1
+  runtime: LocalPersistedRuntimeIdentity
+  device: DeviceLocalOverlay
+}
+
+export interface RemoteProjectionCacheV2 {
+  format: typeof REMOTE_PROJECTION_CACHE_FORMAT
+  schemaVersion: typeof REMOTE_PROJECTION_CACHE_SCHEMA_VERSION
+  petId: string
+  deviceId: string
+  revision: number
+  eventSeq: number
+  gameTimeMs: number
+  timeZone: string
+  advanceWhileEmpty: boolean
+  authority: WireAuthority
+  shared: SharedSaveData
+  device: DeviceLocalOverlay
+}
+
+export const AUTHORITY_STAMP_KEYS = [
+  'owner', 'authorityId', 'epoch', 'restoreGeneration', 'revision', 'eventSeq', 'handoffId', 'detachedAtWallMs',
+] as const
+export const WIRE_AUTHORITY_KEYS = ['owner', 'authorityId', 'restoreGeneration', 'epoch', 'state'] as const
+export const ENGINE_STATE_KEYS = [
+  'schemaVersion', 'save', 'gameTimeMs', 'lastSchedulerWallMs', 'timeZone', 'weatherLocation',
+  'advanceWhileEmpty', 'rng', 'scheduledJobs', 'nextScheduledJobId', 'gameSessions',
+  'sessionCoverage', 'coverageReopen', 'lastProcessedDayBoundaryKey', 'nextDailyBoundaryMs',
+  'importClamped', 'clockSkippedMs', 'environment',
+] as const
+
+const COVERAGE_END_PROVENANCE = [
+  'disconnect', 'shutdown', 'suspend', 'crash_repaired', 'pet_reset', 'import_replaced',
+  'authority_handoff', 'graceful', 'socket_closed', 'app_shutdown',
+] as const
+const SCHEDULED_JOB_TYPES = ['work', 'study', 'travel', 'game-session', 'farm', 'fishing', 'mail', 'other'] as const
+const JOB_STATUSES = ['pending', 'completed', 'cancelled'] as const
+const SESSION_STATUSES = ['active', 'settled', 'abandoned', 'expired'] as const
+const WEATHER_PROVENANCE = ['live', 'cache', 'fallback', 'imported'] as const
+
+function assertNonEmptyString(value: unknown, path: string): asserts value is string {
+  if (isNonEmptyString(value) === false) failSchema('invalid_schema', path, 'expected a non-empty string')
+}
+
+function assertOptionalString(value: unknown, path: string): void {
+  if (value !== undefined && typeof value !== 'string') failSchema('invalid_schema', path, 'expected a string')
+}
+
+function assertOptionalNonNegativeInteger(value: unknown, path: string): void {
+  if (value !== undefined && isNonNegativeInteger(value) === false) {
+    failSchema('invalid_schema', path, 'expected a non-negative safe integer')
+  }
+}
+
+function assertCoverageProvenance(value: unknown, path: string): asserts value is CoverageEndProvenance {
+  if (isEnum(value, COVERAGE_END_PROVENANCE) === false) failSchema('invalid_schema', path, 'invalid coverage end provenance')
+}
+
+export function assertAuthorityStamp(value: unknown, path = '$.authority'): asserts value is AuthorityStamp {
+  requireRecord(value, path)
+  assertRequiredKeys(value, AUTHORITY_STAMP_KEYS, path)
+  assertOnlyKeys(value, AUTHORITY_STAMP_KEYS, path)
+  if (isEnum(value.owner, ['local', 'server'] as const) === false) failSchema('invalid_schema', path + '.owner', 'invalid owner')
+  assertNonEmptyString(value.authorityId, path + '.authorityId')
+  assertNonEmptyString(value.handoffId, path + '.handoffId')
+  requireNonNegativeInteger(value.epoch, path + '.epoch')
+  requireNonNegativeInteger(value.restoreGeneration, path + '.restoreGeneration')
+  requireNonNegativeInteger(value.revision, path + '.revision')
+  requireNonNegativeInteger(value.eventSeq, path + '.eventSeq')
+  requireNonNegativeInteger(value.detachedAtWallMs, path + '.detachedAtWallMs')
+}
+
+export function validateAuthorityStamp(value: unknown): value is AuthorityStamp {
+  try {
+    assertAuthorityStamp(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function assertWireAuthority(value: unknown, path = '$.authority'): asserts value is WireAuthority {
+  requireRecord(value, path)
+  assertRequiredKeys(value, WIRE_AUTHORITY_KEYS, path)
+  assertOnlyKeys(value, WIRE_AUTHORITY_KEYS, path)
+  if (isEnum(value.owner, ['local', 'server'] as const) === false) failSchema('invalid_schema', path + '.owner', 'invalid owner')
+  assertNonEmptyString(value.authorityId, path + '.authorityId')
+  requireNonNegativeInteger(value.restoreGeneration, path + '.restoreGeneration')
+  requireNonNegativeInteger(value.epoch, path + '.epoch')
+  if (isEnum(value.state, ['active', 'archived', 'reset'] as const) === false) {
+    failSchema('invalid_schema', path + '.state', 'invalid authority state')
+  }
+}
+
+export function validateWireAuthority(value: unknown): value is WireAuthority {
+  try {
+    assertWireAuthority(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function assertRng(value: unknown, path: string): void {
+  requireRecord(value, path)
+  assertRequiredKeys(value, ['algorithm', 'seedHex', 'stateHex', 'draws'], path)
+  assertOnlyKeys(value, ['algorithm', 'seedHex', 'stateHex', 'draws'], path)
+  try {
+    cloneRngState(value as never)
+  } catch {
+    failSchema('invalid_schema', path, 'invalid RNG state')
+  }
+}
+
+function assertScheduledJob(value: unknown, path: string): asserts value is ScheduledJob {
+  requireRecord(value, path)
+  assertRequiredKeys(value, ['id', 'type', 'dueAtGameMs', 'payload', 'status'], path)
+  assertOnlyKeys(value, ['id', 'type', 'dueAtGameMs', 'payload', 'status'], path)
+  requireNonNegativeInteger(value.id, path + '.id')
+  if (isEnum(value.type, SCHEDULED_JOB_TYPES) === false) failSchema('invalid_schema', path + '.type', 'invalid job type')
+  requireSafeInteger(value.dueAtGameMs, path + '.dueAtGameMs')
+  requireJsonObject(value.payload, path + '.payload')
+  if (isEnum(value.status, JOB_STATUSES) === false) failSchema('invalid_schema', path + '.status', 'invalid job status')
+}
+
+function assertExamQuestion(value: unknown, path: string): void {
+  requireRecord(value, path)
+  assertRequiredKeys(value, ['questionId', 'prompt', 'options', 'answerIndex'], path)
+  assertOnlyKeys(value, ['questionId', 'prompt', 'options', 'answerIndex'], path)
+  assertNonEmptyString(value.questionId, path + '.questionId')
+  if (typeof value.prompt !== 'string') failSchema('invalid_schema', path + '.prompt', 'expected a string')
+  if (Array.isArray(value.options) === false || value.options.some(option => typeof option !== 'string')) {
+    failSchema('invalid_schema', path + '.options', 'expected string options')
+  }
+  requireNonNegativeInteger(value.answerIndex, path + '.answerIndex')
+  if ((value.answerIndex as number) >= (value.options as string[]).length) {
+    failSchema('invalid_schema', path + '.answerIndex', 'answerIndex is outside the options')
+  }
+}
+
+export function assertGameSessionPayload(value: unknown, path = '$.payload'): asserts value is GameSessionPayload {
+  requireRecord(value, path)
+  if (value.kind === 'game') {
+    assertOnlyKeys(value, ['kind', 'gameId', 'gameKind', 'presentationSeed'], path)
+    assertRequiredKeys(value, ['kind', 'gameId', 'gameKind', 'presentationSeed'], path)
+    assertNonEmptyString(value.gameId, path + '.gameId')
+    if (isEnum(value.gameKind, ['small', 'flash'] as const) === false) failSchema('invalid_schema', path + '.gameKind', 'invalid game kind')
+    assertNonEmptyString(value.presentationSeed, path + '.presentationSeed')
+    return
+  }
+  if (value.kind === 'diudiule') {
+    assertOnlyKeys(value, ['kind'], path)
+    return
+  }
+  if (value.kind === 'exam') {
+    assertOnlyKeys(value, ['kind', 'subject', 'questions', 'examMetadata'], path)
+    assertRequiredKeys(value, ['kind', 'subject', 'questions', 'examMetadata'], path)
+    assertNonEmptyString(value.subject, path + '.subject')
+    if (Array.isArray(value.questions) === false || value.questions.length === 0) {
+      failSchema('invalid_schema', path + '.questions', 'expected a non-empty question list')
+    }
+    value.questions.forEach((question, index) => assertExamQuestion(question, path + '.questions[' + index + ']'))
+    requireRecord(value.examMetadata, path + '.examMetadata')
+    assertOnlyKeys(value.examMetadata, ['lesson', 'school'], path + '.examMetadata')
+    requireNonNegativeInteger(value.examMetadata.lesson, path + '.examMetadata.lesson')
+    if (typeof value.examMetadata.school !== 'string') failSchema('invalid_schema', path + '.examMetadata.school', 'expected a string')
+    return
+  }
+  if (value.kind === 'island_quiz') {
+    assertOnlyKeys(value, ['kind', 'quizKind', 'recordId', 'prompt', 'options', 'answerIndex', 'metadata'], path)
+    assertRequiredKeys(value, ['kind', 'quizKind', 'recordId', 'prompt', 'options', 'answerIndex', 'metadata'], path)
+    assertNonEmptyString(value.quizKind, path + '.quizKind')
+    assertNonEmptyString(value.recordId, path + '.recordId')
+    if (typeof value.prompt !== 'string') failSchema('invalid_schema', path + '.prompt', 'expected a string')
+    if (Array.isArray(value.options) === false || value.options.some(option => typeof option !== 'string')) {
+      failSchema('invalid_schema', path + '.options', 'expected string options')
+    }
+    requireNonNegativeInteger(value.answerIndex, path + '.answerIndex')
+    if ((value.answerIndex as number) >= (value.options as string[]).length) {
+      failSchema('invalid_schema', path + '.answerIndex', 'answerIndex is outside the options')
+    }
+    requireJsonObject(value.metadata, path + '.metadata')
+    return
+  }
+  failSchema('invalid_schema', path + '.kind', 'unknown game session kind')
+}
+
+function assertGameSession(value: unknown, path: string): asserts value is GameSessionState {
+  requireRecord(value, path)
+  assertRequiredKeys(value, ['sessionToken', 'actorDeviceId', 'payload', 'startedAtGameMs', 'expiresAtGameMs', 'status'], path)
+  assertOnlyKeys(value, [
+    'sessionToken', 'actorDeviceId', 'payload', 'startedAtGameMs', 'expiresAtGameMs',
+    'status', 'settledCommandSeq', 'rewardKey', 'cancelReason',
+  ], path)
+  assertNonEmptyString(value.sessionToken, path + '.sessionToken')
+  assertNonEmptyString(value.actorDeviceId, path + '.actorDeviceId')
+  assertGameSessionPayload(value.payload, path + '.payload')
+  requireSafeInteger(value.startedAtGameMs, path + '.startedAtGameMs')
+  requireSafeInteger(value.expiresAtGameMs, path + '.expiresAtGameMs')
+  if ((value.expiresAtGameMs as number) < (value.startedAtGameMs as number)) {
+    failSchema('invalid_schema', path + '.expiresAtGameMs', 'session expiry must not precede its start')
+  }
+  if (isEnum(value.status, SESSION_STATUSES) === false) failSchema('invalid_schema', path + '.status', 'invalid session status')
+  assertOptionalNonNegativeInteger(value.settledCommandSeq, path + '.settledCommandSeq')
+  assertOptionalString(value.rewardKey, path + '.rewardKey')
+  assertOptionalString(value.cancelReason, path + '.cancelReason')
+}
+
+function assertCoverageInterval(value: unknown, path: string): asserts value is SessionCoverageInterval {
+  requireRecord(value, path)
+  assertRequiredKeys(value, ['coverageId', 'deviceId', 'connectedAtWallMs', 'lastHeartbeatWallMs'], path)
+  assertOnlyKeys(value, ['coverageId', 'deviceId', 'connectedAtWallMs', 'disconnectedAtWallMs', 'lastHeartbeatWallMs', 'closeReason'], path)
+  assertNonEmptyString(value.coverageId, path + '.coverageId')
+  assertNonEmptyString(value.deviceId, path + '.deviceId')
+  requireNonNegativeInteger(value.connectedAtWallMs, path + '.connectedAtWallMs')
+  assertOptionalNonNegativeInteger(value.disconnectedAtWallMs, path + '.disconnectedAtWallMs')
+  requireNonNegativeInteger(value.lastHeartbeatWallMs, path + '.lastHeartbeatWallMs')
+  if (value.closeReason !== undefined) assertCoverageProvenance(value.closeReason, path + '.closeReason')
+}
+
+function assertCoverageSurvivor(value: unknown, path: string): asserts value is CoverageSurvivor {
+  requireRecord(value, path)
+  if (value.kind === 'server_connection') {
+    assertRequiredKeys(value, ['kind', 'connectionId', 'deviceId', 'lastHeartbeatWallMs', 'eligible'], path)
+    assertOnlyKeys(value, [
+      'kind', 'connectionId', 'deviceId', 'authenticatedSessionId', 'lastHeartbeatWallMs',
+      'eligible', 'activeEndWallMs', 'activeEndProvenance',
+    ], path)
+    assertNonEmptyString(value.connectionId, path + '.connectionId')
+    assertNonEmptyString(value.deviceId, path + '.deviceId')
+    assertOptionalString(value.authenticatedSessionId, path + '.authenticatedSessionId')
+  } else if (value.kind === 'local_app') {
+    assertRequiredKeys(value, ['kind', 'appInstanceId', 'localDeviceId', 'lastHeartbeatWallMs', 'eligible'], path)
+    assertOnlyKeys(value, [
+      'kind', 'appInstanceId', 'localDeviceId', 'lastHeartbeatWallMs',
+      'eligible', 'activeEndWallMs', 'activeEndProvenance',
+    ], path)
+    assertNonEmptyString(value.appInstanceId, path + '.appInstanceId')
+    assertNonEmptyString(value.localDeviceId, path + '.localDeviceId')
+  } else {
+    failSchema('invalid_schema', path + '.kind', 'unknown coverage survivor kind')
+  }
+  requireNonNegativeInteger(value.lastHeartbeatWallMs, path + '.lastHeartbeatWallMs')
+  if (typeof value.eligible !== 'boolean') failSchema('invalid_schema', path + '.eligible', 'expected a boolean')
+  assertOptionalNonNegativeInteger(value.activeEndWallMs, path + '.activeEndWallMs')
+  if (value.activeEndProvenance !== undefined) {
+    assertCoverageProvenance(value.activeEndProvenance, path + '.activeEndProvenance')
+  }
+}
+
+function assertCoverageReopen(value: unknown, path: string): asserts value is CoverageReopen {
+  requireRecord(value, path)
+  assertRequiredKeys(value, ['operationId', 'commitWallMs', 'survivors', 'state'], path)
+  assertOnlyKeys(value, ['operationId', 'commitWallMs', 'survivors', 'state', 'suspendedAtWallMs'], path)
+  assertNonEmptyString(value.operationId, path + '.operationId')
+  requireNonNegativeInteger(value.commitWallMs, path + '.commitWallMs')
+  if (Array.isArray(value.survivors) === false) failSchema('invalid_schema', path + '.survivors', 'expected survivors')
+  value.survivors.forEach((survivor, index) => assertCoverageSurvivor(survivor, path + '.survivors[' + index + ']'))
+  if (isEnum(value.state, ['pending', 'suspended'] as const) === false) failSchema('invalid_schema', path + '.state', 'invalid reopen state')
+  assertOptionalNonNegativeInteger(value.suspendedAtWallMs, path + '.suspendedAtWallMs')
+}
+
+function assertWeatherDay(value: unknown, path: string): asserts value is WeatherDayRecord {
+  requireRecord(value, path)
+  assertRequiredKeys(value, ['dayKey', 'condition', 'conditionCode', 'minC', 'maxC', 'tomorrowMax', 'hours', 'provenance', 'fetchedAtMs'], path)
+  assertOnlyKeys(value, [
+    'dayKey', 'condition', 'conditionCode', 'minC', 'maxC', 'tomorrowMax',
+    'hours', 'provenance', 'fetchedAtMs', 'sourceLabel',
+  ], path)
+  if (isDayKey(value.dayKey as string) === false) failSchema('invalid_schema', path + '.dayKey', 'invalid day key')
+  if (typeof value.condition !== 'string') failSchema('invalid_schema', path + '.condition', 'expected a string')
+  requireSafeInteger(value.conditionCode, path + '.conditionCode')
+  for (const key of ['minC', 'maxC', 'tomorrowMax'] as const) {
+    if (typeof value[key] !== 'number' || Number.isFinite(value[key] as number) === false) {
+      failSchema('invalid_schema', path + '.' + key, 'expected a finite number')
+    }
+  }
+  if (Array.isArray(value.hours) === false) failSchema('invalid_schema', path + '.hours', 'expected hours')
+  value.hours.forEach((hour, index) => {
+    const hourPath = path + '.hours[' + index + ']'
+    requireRecord(hour, hourPath)
+    assertRequiredKeys(hour, ['hour', 'code', 'wind'], hourPath)
+    assertOnlyKeys(hour, ['hour', 'code', 'wind'], hourPath)
+    requireNonNegativeInteger(hour.hour, hourPath + '.hour')
+    if ((hour.hour as number) > 23) failSchema('invalid_schema', hourPath + '.hour', 'hour must be between 0 and 23')
+    requireSafeInteger(hour.code, hourPath + '.code')
+    if (typeof hour.wind !== 'number' || Number.isFinite(hour.wind) === false || hour.wind < 0) {
+      failSchema('invalid_schema', hourPath + '.wind', 'expected a non-negative finite number')
+    }
+  })
+  if (isEnum(value.provenance, WEATHER_PROVENANCE) === false) failSchema('invalid_schema', path + '.provenance', 'invalid weather provenance')
+  requireNonNegativeInteger(value.fetchedAtMs, path + '.fetchedAtMs')
+  assertOptionalString(value.sourceLabel, path + '.sourceLabel')
+}
+
+function assertCalendarDay(value: unknown, path: string): asserts value is CalendarInput {
+  requireRecord(value, path)
+  assertRequiredKeys(value, ['date', 'lunar', 'term', 'holiday'], path)
+  assertOnlyKeys(value, ['date', 'lunar', 'term', 'holiday'], path)
+  if (isDayKey(value.date as string) === false) failSchema('invalid_schema', path + '.date', 'invalid day key')
+  if (typeof value.lunar !== 'string') failSchema('invalid_schema', path + '.lunar', 'expected a string')
+  if (value.term !== null && typeof value.term !== 'string') failSchema('invalid_schema', path + '.term', 'expected a string or null')
+  if (value.holiday !== null) {
+    requireRecord(value.holiday, path + '.holiday')
+    assertRequiredKeys(value.holiday, ['name', 'off'], path + '.holiday')
+    assertOnlyKeys(value.holiday, ['name', 'off'], path + '.holiday')
+    if (typeof value.holiday.name !== 'string') failSchema('invalid_schema', path + '.holiday.name', 'expected a string')
+    if (typeof value.holiday.off !== 'boolean') failSchema('invalid_schema', path + '.holiday.off', 'expected a boolean')
+  }
+}
+
+function assertEnvironment(value: unknown, path: string): asserts value is EnvironmentInputs {
+  requireRecord(value, path)
+  assertRequiredKeys(value, ['weatherByDay'], path)
+  assertOnlyKeys(value, ['calendarByDay', 'weatherByDay'], path)
+  requireRecord(value.weatherByDay, path + '.weatherByDay')
+  for (const [dayKey, record] of Object.entries(value.weatherByDay)) {
+    const recordPath = path + '.weatherByDay.' + dayKey
+    assertWeatherDay(record, recordPath)
+    if (record.dayKey !== dayKey) failSchema('invalid_schema', recordPath + '.dayKey', 'weather day key does not match its map key')
+  }
+  if (value.calendarByDay !== undefined) {
+    requireRecord(value.calendarByDay, path + '.calendarByDay')
+    for (const [dayKey, record] of Object.entries(value.calendarByDay)) {
+      const recordPath = path + '.calendarByDay.' + dayKey
+      assertCalendarDay(record, recordPath)
+      if (record.date !== dayKey) failSchema('invalid_schema', recordPath + '.date', 'calendar day key does not match its map key')
+    }
+  }
+}
+
+export function assertEngineState(value: unknown): asserts value is EngineState {
+  try {
+    assertJsonSafe(value)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'engine state is not JSON-safe'
+    failSchema('invalid_schema', '$.engine', message)
+  }
+  requireRecord(value, '$.engine')
+  assertRequiredKeys(value, ENGINE_STATE_KEYS, '$.engine')
+  assertOnlyKeys(value, ENGINE_STATE_KEYS, '$.engine')
+  assertNoNeverUpload(value, '$.engine')
+  assertSchemaVersion(value.schemaVersion, RUNTIME_SCHEMA_VERSION, '$.engine.schemaVersion', 'runtime')
+  assertSharedSaveData(value.save)
+  requireNonNegativeInteger(value.gameTimeMs, '$.engine.gameTimeMs')
+  requireSafeInteger(value.lastSchedulerWallMs, '$.engine.lastSchedulerWallMs')
+  assertNonEmptyString(value.timeZone, '$.engine.timeZone')
+  try {
+    assertTimeZone(value.timeZone)
+  } catch {
+    failSchema('invalid_schema', '$.engine.timeZone', 'invalid IANA timezone')
+  }
+  if (typeof value.weatherLocation !== 'string') failSchema('invalid_schema', '$.engine.weatherLocation', 'expected a string')
+  if (typeof value.advanceWhileEmpty !== 'boolean') failSchema('invalid_schema', '$.engine.advanceWhileEmpty', 'expected a boolean')
+  assertRng(value.rng, '$.engine.rng')
+  if (Array.isArray(value.scheduledJobs) === false) failSchema('invalid_schema', '$.engine.scheduledJobs', 'expected jobs')
+  value.scheduledJobs.forEach((job, index) => assertScheduledJob(job, '$.engine.scheduledJobs[' + index + ']'))
+  requireNonNegativeInteger(value.nextScheduledJobId, '$.engine.nextScheduledJobId')
+  if (Array.isArray(value.gameSessions) === false) failSchema('invalid_schema', '$.engine.gameSessions', 'expected sessions')
+  value.gameSessions.forEach((session, index) => assertGameSession(session, '$.engine.gameSessions[' + index + ']'))
+  if (Array.isArray(value.sessionCoverage) === false) failSchema('invalid_schema', '$.engine.sessionCoverage', 'expected coverage intervals')
+  value.sessionCoverage.forEach((interval, index) => assertCoverageInterval(interval, '$.engine.sessionCoverage[' + index + ']'))
+  if (value.coverageReopen !== undefined) assertCoverageReopen(value.coverageReopen, '$.engine.coverageReopen')
+  if (isDayKey(value.lastProcessedDayBoundaryKey as string) === false) {
+    failSchema('invalid_schema', '$.engine.lastProcessedDayBoundaryKey', 'invalid day key')
+  }
+  requireNonNegativeInteger(value.nextDailyBoundaryMs, '$.engine.nextDailyBoundaryMs')
+  if (typeof value.importClamped !== 'boolean') failSchema('invalid_schema', '$.engine.importClamped', 'expected a boolean')
+  requireSafeInteger(value.clockSkippedMs, '$.engine.clockSkippedMs')
+  assertEnvironment(value.environment, '$.engine.environment')
+}
+
+export function validateEngineState(value: unknown): value is EngineState {
+  try {
+    assertEngineState(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function assertPortablePetBundle(value: unknown): asserts value is PortablePetBundleV1 {
+  requireRecord(value, '$.bundle')
+  if (value.schemaVersion !== PORTABLE_BUNDLE_SCHEMA_VERSION) {
+    assertSchemaVersion(value.schemaVersion, PORTABLE_BUNDLE_SCHEMA_VERSION, '$.bundle.schemaVersion', 'portable bundle')
+  }
+  if (value.format !== PORTABLE_BUNDLE_FORMAT) {
+    failSchema('unsupported_format', '$.bundle.format', 'expected ' + PORTABLE_BUNDLE_FORMAT)
+  }
+  try {
+    assertJsonSafe(value)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'portable bundle is not JSON-safe'
+    failSchema('invalid_schema', '$.bundle', message)
+  }
+  assertRequiredKeys(value, ['format', 'schemaVersion', 'exportedAtWallMs', 'authority', 'shared', 'engine'], '$.bundle')
+  assertOnlyKeys(value, ['format', 'schemaVersion', 'exportedAtWallMs', 'authority', 'originLocalDeviceId', 'shared', 'engine'], '$.bundle')
+  requireNonNegativeInteger(value.exportedAtWallMs, '$.bundle.exportedAtWallMs')
+  assertAuthorityStamp(value.authority, '$.bundle.authority')
+  if (value.originLocalDeviceId !== undefined) assertNonEmptyString(value.originLocalDeviceId, '$.bundle.originLocalDeviceId')
+  assertSharedSaveData(value.shared)
+  assertEngineState(value.engine)
+  if (stableStringify(value.shared) !== stableStringify(value.engine.save)) {
+    failSchema('invalid_schema', '$.bundle', 'bundle shared snapshot does not match engine.save')
+  }
+}
+
+export function validatePortablePetBundle(value: unknown): value is PortablePetBundleV1 {
+  try {
+    assertPortablePetBundle(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function migratePortablePetBundle(value: unknown): PortablePetBundleV1 {
+  requireRecord(value, '$.bundle')
+  assertSchemaVersion(value.schemaVersion, PORTABLE_BUNDLE_SCHEMA_VERSION, '$.bundle.schemaVersion', 'portable bundle')
+  assertPortablePetBundle(value)
+  return value as PortablePetBundleV1
+}
+
+export function serializePortablePetBundle(bundle: PortablePetBundleV1): string {
+  assertPortablePetBundle(bundle)
+  return stableStringify(bundle)
+}
+
+export function deserializePortablePetBundle(serialized: string): PortablePetBundleV1 {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(serialized)
+  } catch {
+    failSchema('invalid_schema', '$.bundle', 'portable bundle is not valid JSON')
+  }
+  try {
+    assertJsonSafe(parsed)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'portable bundle is not JSON-safe'
+    failSchema('invalid_schema', '$.bundle', message)
+  }
+  return migratePortablePetBundle(parsed)
+}
+
+export function assertLocalPetDocumentV2(value: unknown): asserts value is LocalPetDocumentV2 {
+  requireRecord(value, '$.local')
+  assertSchemaVersion(value.schemaVersion, LOCAL_DOCUMENT_SCHEMA_VERSION, '$.local.schemaVersion', 'local document')
+  if (value.format !== LOCAL_DOCUMENT_FORMAT) failSchema('unsupported_format', '$.local.format', 'expected ' + LOCAL_DOCUMENT_FORMAT)
+  assertRequiredKeys(value, ['format', 'schemaVersion', 'revision', 'eventSeq', 'authority', 'bundle', 'runtime', 'device'], '$.local')
+  assertOnlyKeys(value, ['format', 'schemaVersion', 'revision', 'eventSeq', 'authority', 'bundle', 'runtime', 'device'], '$.local')
+  requireNonNegativeInteger(value.revision, '$.local.revision')
+  requireNonNegativeInteger(value.eventSeq, '$.local.eventSeq')
+  requireRecord(value.authority, '$.local.authority')
+  assertRequiredKeys(value.authority, ['state', 'stamp'], '$.local.authority')
+  assertOnlyKeys(value.authority, ['state', 'stamp'], '$.local.authority')
+  if (isEnum(value.authority.state, ['active', 'handoff_pending', 'archived'] as const) === false) {
+    failSchema('invalid_schema', '$.local.authority.state', 'invalid local authority state')
+  }
+  assertAuthorityStamp(value.authority.stamp, '$.local.authority.stamp')
+  assertPortablePetBundle(value.bundle)
+  if (value.revision !== value.bundle.authority.revision || value.eventSeq !== value.bundle.authority.eventSeq) {
+    failSchema('invalid_schema', '$.local', 'local revision/eventSeq must match the bundle authority stamp')
+  }
+  requireRecord(value.runtime, '$.local.runtime')
+  assertRequiredKeys(value.runtime, ['appInstanceId', 'startedAtWallMs'], '$.local.runtime')
+  assertOnlyKeys(value.runtime, ['appInstanceId', 'startedAtWallMs'], '$.local.runtime')
+  assertNonEmptyString(value.runtime.appInstanceId, '$.local.runtime.appInstanceId')
+  requireNonNegativeInteger(value.runtime.startedAtWallMs, '$.local.runtime.startedAtWallMs')
+  assertDeviceLocalOverlay(value.device)
+  if (value.bundle.originLocalDeviceId !== undefined && value.device.localDeviceId !== value.bundle.originLocalDeviceId) {
+    failSchema('invalid_schema', '$.local.device.localDeviceId', 'localDeviceId must match local-origin bundle provenance when present')
+  }
+}
+
+export function validateLocalPetDocumentV2(value: unknown): value is LocalPetDocumentV2 {
+  try {
+    assertLocalPetDocumentV2(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function assertRemoteProjectionCacheV2(value: unknown): asserts value is RemoteProjectionCacheV2 {
+  requireRecord(value, '$.cache')
+  assertSchemaVersion(value.schemaVersion, REMOTE_PROJECTION_CACHE_SCHEMA_VERSION, '$.cache.schemaVersion', 'remote projection cache')
+  if (value.format !== REMOTE_PROJECTION_CACHE_FORMAT) {
+    failSchema('unsupported_format', '$.cache.format', 'expected ' + REMOTE_PROJECTION_CACHE_FORMAT)
+  }
+  assertRequiredKeys(value, [
+    'format', 'schemaVersion', 'petId', 'deviceId', 'revision', 'eventSeq', 'gameTimeMs',
+    'timeZone', 'advanceWhileEmpty', 'authority', 'shared', 'device',
+  ], '$.cache')
+  assertOnlyKeys(value, [
+    'format', 'schemaVersion', 'petId', 'deviceId', 'revision', 'eventSeq', 'gameTimeMs',
+    'timeZone', 'advanceWhileEmpty', 'authority', 'shared', 'device',
+  ], '$.cache')
+  assertNonEmptyString(value.petId, '$.cache.petId')
+  assertNonEmptyString(value.deviceId, '$.cache.deviceId')
+  requireNonNegativeInteger(value.revision, '$.cache.revision')
+  requireNonNegativeInteger(value.eventSeq, '$.cache.eventSeq')
+  requireNonNegativeInteger(value.gameTimeMs, '$.cache.gameTimeMs')
+  assertNonEmptyString(value.timeZone, '$.cache.timeZone')
+  if (typeof value.advanceWhileEmpty !== 'boolean') failSchema('invalid_schema', '$.cache.advanceWhileEmpty', 'expected a boolean')
+  assertWireAuthority(value.authority, '$.cache.authority')
+  assertSharedSaveData(value.shared)
+  assertDeviceLocalOverlay(value.device)
+}
+
+export function validateRemoteProjectionCacheV2(value: unknown): value is RemoteProjectionCacheV2 {
+  try {
+    assertRemoteProjectionCacheV2(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export type { SchemaError }
