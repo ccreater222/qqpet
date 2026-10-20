@@ -1,13 +1,31 @@
 import { resolveWeatherForDay } from './environment'
-import { cloneRngState, createRngState, randIntInclusive, randomUnit, shuffle } from './rng'
+import {
+  chance as rngChance,
+  cloneRngState,
+  createRngState,
+  loot as rngLoot,
+  nextRngWord as rngNextWord,
+  pickOne as rngPickOne,
+  randIntInclusive as rngRandIntInclusive,
+  randomIndex as rngRandomIndex,
+  randomUnit as rngRandomUnit,
+  shuffle as rngShuffle,
+  weightedIndex as rngWeightedIndex,
+} from './rng'
 import { cloneJsonState } from './serialization'
 import { addFixedTicks, assertEpochMs, assertTimeZone, dayKeyAt, type RuntimeClock } from './time'
 import type { EnvironmentInputs, RngState, WeatherDayRecord } from './types'
 
 export interface CharacterizationRng {
+  nextRngWord(): number
   randomUnit(): number
   randIntInclusive(min: number, max: number): number
+  randomIndex(count: number): number | null
+  pickOne<T>(items: readonly T[]): T | null
   shuffle<T>(items: readonly T[]): T[]
+  weightedIndex(weights: readonly number[]): number
+  loot<T>(pools: readonly (readonly T[])[], weights?: readonly number[]): T
+  chance(probability: number): boolean
   snapshot(): RngState
 }
 
@@ -87,18 +105,48 @@ export function replayCharacterization<T>(
 
   const clock: RuntimeClock = { nowMs: () => wallTimeMs }
   const rng: CharacterizationRng = {
+    nextRngWord: (): number => {
+      const step = rngNextWord(rngState)
+      rngState = step.state
+      return step.value
+    },
     randomUnit: (): number => {
-      const step = randomUnit(rngState)
+      const step = rngRandomUnit(rngState)
       rngState = step.state
       return step.value
     },
     randIntInclusive: (min: number, max: number): number => {
-      const step = randIntInclusive(rngState, min, max)
+      const step = rngRandIntInclusive(rngState, min, max)
+      rngState = step.state
+      return step.value
+    },
+    randomIndex: (count: number): number | null => {
+      const step = rngRandomIndex(rngState, count)
+      rngState = step.state
+      return step.value
+    },
+    pickOne: <T>(items: readonly T[]): T | null => {
+      const step = rngPickOne(rngState, items)
       rngState = step.state
       return step.value
     },
     shuffle: <T>(items: readonly T[]): T[] => {
-      const step = shuffle(rngState, items)
+      const step = rngShuffle(rngState, items)
+      rngState = step.state
+      return step.value
+    },
+    weightedIndex: (weights: readonly number[]): number => {
+      const step = rngWeightedIndex(rngState, weights)
+      rngState = step.state
+      return step.value
+    },
+    loot: <T>(pools: readonly (readonly T[])[], weights?: readonly number[]): T => {
+      const step = rngLoot(rngState, pools, weights)
+      rngState = step.state
+      return step.value
+    },
+    chance: (probability: number): boolean => {
+      const step = rngChance(rngState, probability)
       rngState = step.state
       return step.value
     },

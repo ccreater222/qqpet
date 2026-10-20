@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import test from 'node:test'
 import { RUNTIME_SCHEMA_VERSION } from '../../src/shared/pet-runtime/types.ts'
 import { levelOf as rendererLevelOf, stageOf as rendererStageOf } from '../../src/renderer/pet/level.ts'
+import { createLegacyGoodApplyAdapter, createLegacyStoreAdapter } from './pet-runtime-legacy-adapters.mjs'
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -28,7 +30,9 @@ const {
   createRngState,
   loot,
   nextRngWord,
+  pickOne,
   randIntInclusive,
+  randomIndex,
   randomUnit,
   shuffle,
   weightedIndex,
@@ -47,6 +51,7 @@ const {
   growthDelta,
   growthPerMinute,
   luck,
+  sumTimedGoodGroupBonuses,
 } = await import('../../src/shared/pet-runtime/stats.ts')
 const {
   FIXED_TICK_MS,
@@ -63,6 +68,11 @@ const {
   wholeFixedTicksBetween,
   zonedTimeToEpochMs,
 } = await import('../../src/shared/pet-runtime/time.ts')
+
+const LEGACY_STORE = createLegacyStoreAdapter()
+const LEGACY_APPLY = createLegacyGoodApplyAdapter()
+const GOODS = JSON.parse(readFileSync(new URL('../../src/renderer/pet/data/goods.json', import.meta.url), 'utf8'))
+const legacyGoodOf = (type, id) => GOODS[type]?.['_' + id]
 
 const SEED = '000102030405060708090a0b0c0d0e0f'
 const OTHER_SEED = 'ffeeddccbbaa99887766554433221100'
@@ -109,6 +119,41 @@ test('xoshiro128** state evolution, rounded integers and collection helpers are 
   })
   assert.equal(weightedIndex(initial, [0.02, 0.25, 0.75]).value, 2)
   assert.equal(loot(initial, [['a1', 'a2', 'a3'], ['b1', 'b2'], ['c1', 'c2', 'c3', 'c4']], [0.02, 0.25, 0.75]).value, 'c1')
+  const boundarySeed = '000000000002d82e0000000000000000'
+  const boundaryInitial = createRngState(boundarySeed)
+  const boundaryUnit = randomUnit(boundaryInitial).value
+  assert.ok(boundaryUnit >= 0.25 && boundaryUnit < 1 / 3)
+  assert.equal(randIntInclusive(boundaryInitial, 0, 2).value, 1)
+  assert.equal(randomIndex(boundaryInitial, 3).value, 0)
+  assert.equal(pickOne(boundaryInitial, ['a', 'b', 'c']).value, 'a')
+  assert.deepEqual(shuffle(boundaryInitial, ['a', 'b', 'c']).value, ['b', 'c', 'a'])
+  assert.equal(loot(boundaryInitial, [['a'], ['b'], ['c']]).value, 'a')
+  assert.equal(randomIndex(boundaryInitial, 0).value, null)
+  assert.deepEqual(randomIndex(boundaryInitial, 0).state, boundaryInitial)
+
+  for (const count of [1, 2, 3, 4, 7, 8, 10]) {
+    let unitState = initial
+    let indexState = initial
+    for (let draw = 0; draw < 64; draw++) {
+      const unit = randomUnit(unitState)
+      const index = randomIndex(indexState, count)
+      assert.equal(index.value, Math.floor(unit.value * count))
+      assert.equal(index.state.stateHex, unit.state.stateHex)
+      unitState = unit.state
+      indexState = index.state
+    }
+  }
+
+  let uniformState = initial
+  const counts = [0, 0, 0]
+  for (let draw = 0; draw < 12_000; draw++) {
+    const step = randomIndex(uniformState, 3)
+    assert.ok(step.value !== null)
+    counts[step.value]++
+    uniformState = step.state
+  }
+  assert.ok(counts.every(count => count > 3500 && count < 4500), 'three-way index counts were not uniform: ' + counts.join(','))
+
   assert.equal(chance(initial, 0.5).value, true)
   assert.throws(() => createRngState('0'.repeat(32)), /all-zero/)
   assert.throws(() => createRngState('xyz'), /32 hexadecimal/)
@@ -142,82 +187,85 @@ test('level, stage and cap selectors match the current renderer behavior', () =>
   assert.equal(stageOf(16), 'Adult')
 })
 
-function legacyGrowthPerMinute(input) {
-  if (input.mood <= 0) return 10 / 60
-  const rate = input.mood >= 800 ? 1 : input.mood >= 500 ? 0.9 : input.mood >= 200 ? 0.7 : 0.5
-  let perHour = 80 * rate + (input.pinkDiamond ? 10 : 0) + input.timedGoodGroupBonus
-  if (input.sweetHeartOverTime) perHour *= 1.1
-  return perHour / 60
+function timedGoodEntry(type) {
+  const good = Object.values(GOODS[type]).find(entry => (entry.group ?? 0) > 0 && entry.useTimeing)
+  if (good === undefined) throw new Error('no grouped timed good for ' + type)
+  return { id: good.id, left: good.useTimeing }
 }
 
-function legacyFatigue(input) {
-  const mood = input.mood / input.moodMax
-  const clean = input.clean / input.cleanMax
-  const hunger = input.hunger / input.hungerMax
-  let value =
-    (input.health === 5 ? 0 : 2) +
-    (mood < 0.2 ? 3 : mood < 0.5 ? 2 : 0) +
-    (clean < 0.2 ? 2 : clean < 0.5 ? 1 : 0) +
-    (hunger < 0.2 ? 2 : hunger < 0.5 ? 1 : 0)
-  if (value === 0) return 0
-  if (input.busy) value += 2
-  const relief = input.level < 10
-    ? (input.strong > 500 ? 2 : 0)
-    : (input.strong > 50000 ? 4 : input.strong > 5000 ? 2 : 0)
-  return Math.max(0, value - relief)
+const ACTIVE_TIMED_GOODS = {
+  food: timedGoodEntry('food'),
+  clean: timedGoodEntry('clean'),
+  toy: timedGoodEntry('toy'),
+  background: timedGoodEntry('background'),
 }
+const BACKGROUND_ONLY = { food: null, clean: null, toy: null, background: ACTIVE_TIMED_GOODS.background }
+const EMPTY_TIMED_GOODS = { food: null, clean: null, toy: null, background: null }
+const ACTIVE_TIMED_BONUS = sumTimedGoodGroupBonuses(ACTIVE_TIMED_GOODS, (type, id) => legacyGoodOf(type, id)?.group)
+const BACKGROUND_ONLY_BONUS = sumTimedGoodGroupBonuses(BACKGROUND_ONLY, (type, id) => legacyGoodOf(type, id)?.group)
 
-function legacyLuck(input) {
-  let value = 1 + (input.pinkDiamond ? input.PDiamondLevel * 2 : 0) + (input.sweetHeart ? 2 : 0)
-  value += [500, 5000, 50000].filter(threshold => input.charm > threshold).length
-  value += [800, 8000, 80000].filter(threshold => input.intel > threshold).length
-  return Math.min(Math.max(0, value - (input.fatigue >> 1)), 20)
-}
+test('stat math matches executable legacy renderer adapters including real timed-good groups', () => {
+  assert.ok(ACTIVE_TIMED_BONUS > 0)
+  assert.equal(ACTIVE_TIMED_BONUS, Object.entries(ACTIVE_TIMED_GOODS).reduce((sum, [type, good]) =>
+    sum + (legacyGoodOf(type, good.id)?.group ?? 0), 0))
+  assert.equal(BACKGROUND_ONLY_BONUS, legacyGoodOf('background', ACTIVE_TIMED_GOODS.background.id)?.group)
 
-function legacyApplyGoodStats(current, caps, effect, extraMood) {
-  const result = { ...current }
-  if (effect.hunger) result.hunger = Math.min(result.hunger + effect.hunger, caps.hungerMax)
-  if (effect.clean) result.clean = Math.min(result.clean + effect.clean, caps.cleanMax)
-  const mood = (effect.mood ?? 0) + extraMood
-  if (mood) result.mood = Math.min(result.mood + mood, caps.moodMax)
-  if (effect.intel) result.intel += effect.intel
-  if (effect.charm) result.charm += effect.charm
-  if (effect.strong) result.strong += effect.strong
-  return result
-}
-
-test('stat math matches the legacy selectors and good application rules', () => {
+  const timedVariants = [
+    { selfGoodUseOption: EMPTY_TIMED_GOODS, bonus: 0 },
+    { selfGoodUseOption: BACKGROUND_ONLY, bonus: BACKGROUND_ONLY_BONUS },
+    { selfGoodUseOption: ACTIVE_TIMED_GOODS, bonus: ACTIVE_TIMED_BONUS },
+  ]
   for (const mood of [-10, 0, 1, 199, 200, 499, 500, 799, 800, 1000]) {
     for (const pinkDiamond of [false, true]) {
       for (const sweetHeartOverTime of [false, true]) {
-        for (const timedGoodGroupBonus of [0, 15]) {
-          const input = { mood, pinkDiamond, sweetHeartOverTime, timedGoodGroupBonus }
-          assert.equal(growthPerMinute(input), legacyGrowthPerMinute(input))
+        for (const variant of timedVariants) {
+          const info = { mood, pinkDiamond, sweetHeartOverTime }
+          const actual = LEGACY_STORE.growthPerMinute({
+            info,
+            save: { selfGoodUseOption: variant.selfGoodUseOption },
+            goodOf: legacyGoodOf,
+          })
+          assert.equal(growthPerMinute({ ...info, timedGoodGroupBonus: variant.bonus }), actual)
         }
       }
     }
   }
+
   for (const health of [0, 4, 5]) {
     for (const mood of [0, 100, 400, 900]) {
       for (const clean of [50, 300, 900]) {
         for (const hunger of [50, 300, 900]) {
           for (const busy of [false, true]) {
+            const level = health === 5 ? 20 : 5
+            const strong = health === 5 ? 6000 : 600
+            const info = { health, mood, clean, hunger, strong }
+            const save = { petComputedlInfo: { level, moodMax: 1000, cleanMax: 1100, hungerMax: 1100 } }
             const input = {
               health, mood, moodMax: 1000, clean, cleanMax: 1100, hunger, hungerMax: 1100,
-              busy, strong: health === 5 ? 6000 : 600, level: health === 5 ? 20 : 5,
+              busy, strong, level,
             }
-            assert.equal(fatigue(input), legacyFatigue(input))
+            assert.equal(fatigue(input), LEGACY_STORE.fatigue({ info, save, busy }))
           }
         }
       }
     }
   }
+
   for (const pinkDiamond of [false, true]) {
     for (const sweetHeart of [false, true]) {
       for (const charm of [0, 501, 5001, 50001]) {
         for (const intel of [0, 801, 8001, 80001]) {
-          const input = { pinkDiamond, PDiamondLevel: 6, sweetHeart, charm, intel, fatigue: 9 }
-          assert.equal(luck(input), legacyLuck(input))
+          const info = {
+            health: 5, mood: 900, clean: 900, hunger: 900, strong: 6000,
+            pinkDiamond, PDiamondLevel: 6, sweetHeart, charm, intel,
+          }
+          const save = { petComputedlInfo: { level: 20, moodMax: 1000, cleanMax: 1100, hungerMax: 1100 } }
+          const sharedFatigue = fatigue({
+            health: 5, mood: 900, moodMax: 1000, clean: 900, cleanMax: 1100,
+            hunger: 900, hungerMax: 1100, busy: false, strong: 6000, level: 20,
+          })
+          const expected = luck({ pinkDiamond, PDiamondLevel: 6, sweetHeart, charm, intel, fatigue: sharedFatigue })
+          assert.equal(expected, LEGACY_STORE.luck({ info, save, busy: false }))
         }
       }
     }
@@ -226,8 +274,8 @@ test('stat math matches the legacy selectors and good application rules', () => 
   const current = { hunger: 1000, clean: 1050, mood: 950, intel: 10, charm: 20, strong: 30 }
   const caps = { hungerMax: 1100, cleanMax: 1100, moodMax: 1000 }
   const effect = { hunger: 300, clean: 200, mood: 100, intel: 5, charm: 7, strong: 11 }
-  assert.deepEqual(applyGoodStats(current, caps, effect, 20), legacyApplyGoodStats(current, caps, effect, 20))
-  assert.deepEqual(applyGoodStats(current, caps, {}, 20), legacyApplyGoodStats(current, caps, {}, 20))
+  assert.deepEqual(applyGoodStats(current, caps, effect, 20), LEGACY_APPLY.apply(current, caps, effect, 20))
+  assert.deepEqual(applyGoodStats(current, caps, {}, 20), LEGACY_APPLY.apply(current, caps, {}, 20))
   assert.equal(growthDelta(1.234567891, 0.5), Number((1.234567891 * 0.5).toFixed(8)))
   assert.equal(decayStat(10, 3, 4), 0)
   assert.equal(decayStat(100, 2.5, 4), 90)
@@ -319,8 +367,54 @@ test('runtime-state serialization is canonical, lossless and schema checked', ()
   copy.a.alpha.push(4)
   assert.deepEqual(state.a.alpha, [3, 2, 1])
 
+  assert.equal(stableStringify(state), stableStringify(state))
+  assert.equal(codec.encode(state), codec.encode(state))
+
+  let getterReads = 0
+  const accessor = {}
+  Object.defineProperty(accessor, 'value', {
+    enumerable: true,
+    get() {
+      getterReads++
+      return 1
+    },
+  })
+  assert.throws(() => stableStringify(accessor), /accessors/)
+  assert.throws(() => stableStringify({ nested: accessor }), /accessors/)
+  assert.equal(getterReads, 0)
+
+  const nonEnumerable = { visible: 1 }
+  Object.defineProperty(nonEnumerable, 'hidden', { value: 2, enumerable: false })
+  assert.throws(() => stableStringify(nonEnumerable), /enumerable/)
+
+  const extraArrayProperty = [1, 2]
+  extraArrayProperty.extra = 3
+  assert.throws(() => stableStringify(extraArrayProperty), /extra non-index array property/)
+
+  const nonEnumerableIndex = [1, 2]
+  Object.defineProperty(nonEnumerableIndex, '0', { value: 1, enumerable: false, writable: true, configurable: true })
+  assert.throws(() => stableStringify(nonEnumerableIndex), /enumerable/)
+
+  let indexGetterReads = 0
+  const accessorIndex = [1]
+  Object.defineProperty(accessorIndex, '0', {
+    enumerable: true,
+    get() {
+      indexGetterReads++
+      return 1
+    },
+  })
+  assert.throws(() => stableStringify(accessorIndex), /accessors/)
+  assert.equal(indexGetterReads, 0)
+
+  const symbolValue = { visible: 1 }
+  Object.defineProperty(symbolValue, Symbol('hidden'), { value: 2, enumerable: true })
+  assert.throws(() => stableStringify(symbolValue), /symbol/)
+
   assert.throws(() => stableStringify({ value: Number.NaN }), /finite/)
   assert.throws(() => stableStringify({ value: undefined }), /JSON-safe/)
+  assert.throws(() => stableStringify({ value: () => 1 }), /JSON-safe/)
+  assert.throws(() => stableStringify({ toJSON: () => 1 }), /JSON-safe/)
   assert.throws(() => stableStringify(new Date(0)), /plain JSON object/)
   assert.throws(() => stableStringify({ value: -0 }), /negative zero/)
   const cyclic = {}
@@ -420,4 +514,77 @@ test('characterization harness replays injected time and RNG byte-for-byte', () 
   const different = replayCharacterization({ ...options, seedHex: OTHER_SEED }, makeSteps())
   assert.notEqual(different.frames[0].output.roll, first.frames[0].output.roll)
   assert.notDeepEqual(different.frames[1].output.shuffled, first.frames[1].output.shuffled)
+})
+
+test('characterization RNG adapter exposes the full stateful surface', () => {
+  const pools = [['a1', 'a2', 'a3'], ['b1', 'b2'], ['c1', 'c2', 'c3', 'c4']]
+  const weights = [0.02, 0.25, 0.75]
+  let direct = createRngState(SEED)
+  const expected = {}
+  const word = nextRngWord(direct)
+  direct = word.state
+  expected.word = word.value
+  const unit = randomUnit(direct)
+  direct = unit.state
+  expected.unit = unit.value
+  const integer = randIntInclusive(direct, 5, 9)
+  direct = integer.state
+  expected.integer = integer.value
+  const index = randomIndex(direct, 3)
+  direct = index.state
+  expected.index = index.value
+  const picked = pickOne(direct, ['x', 'y', 'z'])
+  direct = picked.state
+  expected.picked = picked.value
+  const shuffled = shuffle(direct, ['a', 'b', 'c', 'd'])
+  direct = shuffled.state
+  expected.shuffled = shuffled.value
+  const weighted = weightedIndex(direct, weights)
+  direct = weighted.state
+  expected.weighted = weighted.value
+  const looted = loot(direct, pools, weights)
+  direct = looted.state
+  expected.looted = looted.value
+  const chanced = chance(direct, 0.5)
+  direct = chanced.state
+  expected.chanced = chanced.value
+
+  assert.equal(direct.draws, 12)
+  const steps = [{
+    id: 'all-rng-methods',
+    run: context => {
+      const initialSnapshot = context.rng.snapshot()
+      const values = {
+        word: context.rng.nextRngWord(),
+        unit: context.rng.randomUnit(),
+        integer: context.rng.randIntInclusive(5, 9),
+        index: context.rng.randomIndex(3),
+        picked: context.rng.pickOne(['x', 'y', 'z']),
+        shuffled: context.rng.shuffle(['a', 'b', 'c', 'd']),
+        weighted: context.rng.weightedIndex(weights),
+        looted: context.rng.loot(pools, weights),
+        chanced: context.rng.chance(0.5),
+      }
+      return { initialSnapshot, values, finalSnapshot: context.rng.snapshot() }
+    },
+  }]
+  const run = replayCharacterization({
+    seedHex: SEED,
+    initialWallMs: Date.UTC(2026, 9, 19, 21, 59, 0),
+    initialGameTimeMs: Date.UTC(2026, 9, 19, 21, 59, 0),
+    timeZone: 'Asia/Shanghai',
+    environment: { weatherByDay: {} },
+  }, steps)
+  const output = run.frames[0].output
+  assert.deepEqual(output.initialSnapshot, createRngState(SEED))
+  assert.deepEqual(output.values, expected)
+  assert.deepEqual(output.finalSnapshot, direct)
+  assert.deepEqual(run.frames[0].rngAfter, direct)
+  assert.deepEqual(replayCharacterization({
+    seedHex: SEED,
+    initialWallMs: Date.UTC(2026, 9, 19, 21, 59, 0),
+    initialGameTimeMs: Date.UTC(2026, 9, 19, 21, 59, 0),
+    timeZone: 'Asia/Shanghai',
+    environment: { weatherByDay: {} },
+  }, steps), run)
 })

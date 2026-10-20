@@ -102,13 +102,18 @@ export function randIntInclusive(state: RngState, min: number, max: number): Rng
   return { state: step.state, value: Math.round(step.value * (max - min) + min) }
 }
 
-/** Uniform index in [0, count), or null for an empty input. */
+/**
+ * Uniform index in [0, count), or null for an empty input. This deliberately
+ * uses floor(unit * count), not the rounded legacy integer distribution:
+ * rounding biases a 3-way choice to 1/4, 1/2, 1/4 and contaminates every
+ * collection helper built on this selector.
+ */
 export function randomIndex(state: RngState, count: number): RngStep<number | null> {
   requireSafeInteger(count, 'count')
   if (count < 0) fail('count must not be negative')
   if (count === 0) return { state: cloneRngState(state), value: null }
-  const step = randIntInclusive(state, 0, count - 1)
-  return { state: step.state, value: step.value }
+  const step = randomUnit(state)
+  return { state: step.state, value: Math.floor(step.value * count) }
 }
 
 export function pickOne<T>(state: RngState, items: readonly T[]): RngStep<T | null> {
@@ -121,11 +126,13 @@ export function shuffle<T>(state: RngState, items: readonly T[]): RngStep<T[]> {
   const value = items.slice()
   let rng = cloneRngState(state)
   for (let index = value.length - 1; index > 0; index--) {
-    const step = randIntInclusive(rng, 0, index)
+    const step = randomIndex(rng, index + 1)
+    const selected = step.value
+    if (selected === null) fail('shuffle index unexpectedly empty')
     rng = step.state
     const swap = value[index]
-    value[index] = value[step.value]
-    value[step.value] = swap
+    value[index] = value[selected]
+    value[selected] = swap
   }
   return { state: rng, value }
 }

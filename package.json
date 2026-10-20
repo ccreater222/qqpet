@@ -25,6 +25,7 @@
     "harmony": "npm run typecheck && npm run build:harmony-web && node scripts/pack-harmony.mjs && cd harmony && ./hvigorw assembleHap -p product=default -p buildMode=debug"
   },
   "devDependencies": {
+    "@babel/parser": "^7.29.9",
     "@electron/asar": "^4.3.1",
     "@ruffle-rs/ruffle": "0.6.0",
     "@types/node": "^24.9.0",

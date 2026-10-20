@@ -147,3 +147,22 @@ export function clampHealth(health: number): number {
   if (health > 5) return 5
   return health
 }
+
+/**
+ * Sums timed-good growth bonuses from a save-shaped active-good map. The
+ * runtime receives the host content resolver so this stays DOM- and
+ * content-table-free while matching the renderer's current accumulation.
+ */
+export function sumTimedGoodGroupBonuses<T extends object>(
+  selfGoodUseOption: T,
+  resolveGroup: (type: string, id: string) => number | undefined,
+): number {
+  let total = 0
+  for (const [type, entry] of Object.entries(selfGoodUseOption)) {
+    if (entry === null || typeof entry !== 'object') continue
+    const id = (entry as { id?: unknown }).id
+    if (typeof id !== 'string') continue
+    total += resolveGroup(type, id) ?? 0
+  }
+  return total
+}
