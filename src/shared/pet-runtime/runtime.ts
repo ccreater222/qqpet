@@ -53,6 +53,37 @@ import {
   startDiudiuleSession,
   startGameSession,
 } from './sessions'
+import {
+  socialCompleteLanVisit,
+  islandAcceptLetter,
+  islandArriveScene,
+  islandChat,
+  islandClaimGrowthReward,
+  islandClaimTreasure,
+  islandDeliverLetter,
+  islandFightMonster,
+  islandGiftNpc,
+  islandPlayGame,
+  islandRefreshNews,
+  islandTalkNpc,
+  islandTurnInErrand,
+  islandVisitSpot,
+} from './island-runtime'
+import {
+  fishingBuy,
+  fishingFeed,
+  fishingHarvest,
+  fishingHarvestAll,
+  fishingSpeedUp,
+} from './fishing-runtime'
+import {
+  farmBuySeed,
+  farmCare,
+  farmClear,
+  farmHarvest,
+  farmPlant,
+  farmSellProduce,
+} from './farm-runtime'
 import { advanceMinute as advanceMinuteBatch, advanceRuntimeMinutes } from './tick'
 
 /** Commands implemented by the C3 groups A-D plus actor-bound session slice. */
@@ -68,6 +99,25 @@ export const C3_COMMAND_TYPES = [
   'game.startSession', 'game.reward', 'diudiule.startSession', 'diudiule.reward',
   'game.abandonSession', 'island.startQuiz', 'island.answerQuiz',
 ] as const satisfies readonly CommandKey[]
+
+/** Group E: deterministic games/social/album/island command surface. */
+export const GROUP_E_COMMAND_TYPES = [
+  'game.startSession', 'game.reward', 'game.abandonSession',
+  'diudiule.startSession', 'diudiule.reward',
+  'social.completeLanVisit',
+  'island.arriveScene', 'island.acceptLetter', 'island.deliverLetter', 'island.turnInErrand',
+  'island.startQuiz', 'island.answerQuiz', 'island.fightMonster', 'island.claimGrowthReward',
+  'island.claimTreasure', 'island.giftNpc', 'island.talkNpc', 'island.visitSpot',
+  'island.chat', 'island.playGame', 'island.refreshNews',
+] as const satisfies readonly CommandKey[]
+
+/** Group F: deterministic fishing/farm command surface. */
+export const GROUP_F_COMMAND_TYPES = [
+  'fishing.buy', 'fishing.feed', 'fishing.harvest', 'fishing.harvestAll', 'fishing.speedUp',
+  'farm.plant', 'farm.harvest', 'farm.care', 'farm.clear', 'farm.buySeed', 'farm.sellProduce',
+] as const satisfies readonly CommandKey[]
+
+export const C4A_COMMAND_TYPES = [...GROUP_E_COMMAND_TYPES, ...GROUP_F_COMMAND_TYPES] as const satisfies readonly CommandKey[]
 
 function toOutcome(state: EngineState, events: DomainEvent[], result: JsonValue | undefined, nowMs: number): RuntimeOutcome {
   recomputePetComputed(state.save)
@@ -92,7 +142,7 @@ function executeHandler(
 }
 
 function unsupportedCommand(commandType: string): never {
-  reject('not_available', 'command is outside the C3 runtime slice: ' + commandType)
+  reject('not_available', 'command is outside the C3/C4a runtime slice: ' + commandType)
 }
 
 export function executeCommand(
@@ -153,6 +203,31 @@ export function executeCommand(
       case 'game.abandonSession': return executeHandler(state, ctx, context => abandonSession(context.state, command.payload as never, context.ctx))
       case 'island.startQuiz': return executeHandler(state, ctx, context => islandQuizStart(context, command.payload as never))
       case 'island.answerQuiz': return executeHandler(state, ctx, context => islandQuizAnswer(context, command.payload as never))
+      case 'social.completeLanVisit': return executeHandler(state, ctx, context => socialCompleteLanVisit(context, command.payload as never))
+      case 'island.arriveScene': return executeHandler(state, ctx, context => islandArriveScene(context, command.payload as never))
+      case 'island.acceptLetter': return executeHandler(state, ctx, context => islandAcceptLetter(context, command.payload as never))
+      case 'island.deliverLetter': return executeHandler(state, ctx, context => islandDeliverLetter(context, command.payload as never))
+      case 'island.turnInErrand': return executeHandler(state, ctx, context => islandTurnInErrand(context, command.payload as never))
+      case 'island.fightMonster': return executeHandler(state, ctx, context => islandFightMonster(context, command.payload as never))
+      case 'island.claimGrowthReward': return executeHandler(state, ctx, context => islandClaimGrowthReward(context))
+      case 'island.claimTreasure': return executeHandler(state, ctx, context => islandClaimTreasure(context))
+      case 'island.giftNpc': return executeHandler(state, ctx, context => islandGiftNpc(context, command.payload as never))
+      case 'island.talkNpc': return executeHandler(state, ctx, context => islandTalkNpc(context, command.payload as never))
+      case 'island.visitSpot': return executeHandler(state, ctx, context => islandVisitSpot(context, command.payload as never))
+      case 'island.chat': return executeHandler(state, ctx, context => islandChat(context, command.payload as never))
+      case 'island.playGame': return executeHandler(state, ctx, context => islandPlayGame(context, command.payload as never))
+      case 'island.refreshNews': return executeHandler(state, ctx, context => islandRefreshNews(context, command.payload as never))
+      case 'fishing.buy': return executeHandler(state, ctx, context => fishingBuy(context, command.payload as never))
+      case 'fishing.feed': return executeHandler(state, ctx, context => fishingFeed(context, command.payload as never))
+      case 'fishing.harvest': return executeHandler(state, ctx, context => fishingHarvest(context, command.payload as never))
+      case 'fishing.harvestAll': return executeHandler(state, ctx, context => fishingHarvestAll(context))
+      case 'fishing.speedUp': return executeHandler(state, ctx, context => fishingSpeedUp(context))
+      case 'farm.plant': return executeHandler(state, ctx, context => farmPlant(context, command.payload as never))
+      case 'farm.harvest': return executeHandler(state, ctx, context => farmHarvest(context, command.payload as never))
+      case 'farm.care': return executeHandler(state, ctx, context => farmCare(context, command.payload as never))
+      case 'farm.clear': return executeHandler(state, ctx, context => farmClear(context, command.payload as never))
+      case 'farm.buySeed': return executeHandler(state, ctx, context => farmBuySeed(context, command.payload as never))
+      case 'farm.sellProduce': return executeHandler(state, ctx, context => farmSellProduce(context, command.payload as never))
       default:
         return unsupportedCommand(command.type)
     }

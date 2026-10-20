@@ -1,5 +1,6 @@
 import type { SharedSaveData } from '../sync/data-boundary'
-import { PHOTOS, TRAVEL_PROVINCES, type RuntimeGood } from './content/index'
+import { TRAVEL_PROVINCES, type RuntimeGood } from './content/index'
+import { appendTravelPhoto, isBuddyPhoto, type TravelShot } from './album'
 import { domainEvent, type DomainEvent } from './events'
 import {
   addTaskCount,
@@ -42,41 +43,16 @@ export function travelEarlyRoll(save: SharedSaveData, rng: RuntimeRng): boolean 
   return rng.randIntInclusive(0, threshold) <= 10
 }
 
-export interface TravelShot { id: string; city: string; d: number }
+export type { TravelShot } from './album'
 
-function readShots(save: SharedSaveData): TravelShot[] {
-  const raw = save.saveJsonData.album
-  if (raw === undefined) return []
-  try {
-    const parsed = JSON.parse(raw) as unknown
-    return Array.isArray(parsed) ? parsed as TravelShot[] : []
-  } catch {
-    return []
-  }
-}
-
-function isBuddy(photoId: string): boolean {
-  return PHOTOS.some(photo => photo.id === photoId && photo.b)
-}
-
-/** Canonical travel photo: one unused photo, preferring the rolled buddy/province grouping. */
+/** Canonical travel photo wrapper over the shared album reducer. */
 export function takeTravelPhoto(
   save: SharedSaveData,
   city: string,
   gameTimeMs: number,
   rng: RuntimeRng,
 ): TravelShot | null {
-  const taken = new Set(readShots(save).map(shot => shot.id))
-  const left = PHOTOS.filter(photo => taken.has(photo.id) === false)
-  const buddy = rng.chance(0.4)
-  const pool = [buddy, buddy === false].flatMap(kind =>
-    [city, ''].map(place => left.filter(photo => photo.b === kind && photo.p === place)),
-  ).find(entries => entries.length > 0)
-  if (pool === undefined) return null
-  const photo = pool[rng.randIntInclusive(0, pool.length - 1)]
-  const shot: TravelShot = { id: photo.id, city, d: Math.floor(gameTimeMs / 1000) }
-  writeSharedBlob(save, 'album', [...readShots(save), shot])
-  return shot
+  return appendTravelPhoto(save, city, gameTimeMs, rng)
 }
 
 /** Canonical travel postcard mail, linked to the photo by album id. */
@@ -85,7 +61,7 @@ export function mailTravelPhoto(save: SharedSaveData, shot: TravelShot, gameTime
   const slot = mailSlot(mails, gameTimeMs)
   mails[String(slot)] = {
     d: slot,
-    l: isBuddy(shot.id) ? '在' + shot.city + '遇到了旅游搭子！' : '来自' + shot.city + '的明信片',
+    l: isBuddyPhoto(shot.id) ? '在' + shot.city + '遇到了旅游搭子！' : '来自' + shot.city + '的明信片',
     p: shot.id,
     m: '[host]，照片我收进「旅游-相簿」啦，随时可以翻看哦~',
     glb: [],
@@ -150,7 +126,7 @@ export function applyTravelCompletion(
   events.push(domainEvent('activity.completed', payload))
   if (souvenirs.length > 0) events.push(domainEvent('reward.granted', { source: 'travel-souvenir', destination: province.name, count: souvenirs.length, inventoryTotal: inventoryTotal(save) }))
   if (shot !== null && mailId !== null) {
-    events.push(domainEvent('mail.arrived', { mailId, title: isBuddy(shot.id) ? '在' + shot.city + '遇到了旅游搭子！' : '来自' + shot.city + '的明信片' }))
+    events.push(domainEvent('mail.arrived', { mailId, title: isBuddyPhoto(shot.id) ? '在' + shot.city + '遇到了旅游搭子！' : '来自' + shot.city + '的明信片' }))
   }
   return events
 }

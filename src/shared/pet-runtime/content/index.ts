@@ -10,6 +10,9 @@ import TRAVEL from './travel.json' with { type: 'json' }
 import EXAM from './exam.json' with { type: 'json' }
 import TASK_TABLES from './tasks.json' with { type: 'json' }
 import ALBUM from './album.json' with { type: 'json' }
+import FRIES_TABLE from './fries.json' with { type: 'json' }
+import FARM from './farm.json' with { type: 'json' }
+import ISLAND_TABLE from './island.json' with { type: 'json' }
 
 export type GoodType = keyof SelfGoodDatas
 export type TimedType = keyof SelfGoodUseOption
@@ -157,3 +160,66 @@ export interface StaticTaskTemplate {
 /** Exact static task tables and daily-kind metadata mirrored from renderer tasks.ts. */
 export const DAILY_TASK_TEMPLATES: DailyTaskTemplate[] = TASK_TABLES.kinds as unknown as DailyTaskTemplate[]
 export const STATIC_TASKS: Record<'ddw' | 'growth' | 'travel', StaticTaskTemplate[]> = TASK_TABLES.tasks as unknown as Record<'ddw' | 'growth' | 'travel', StaticTaskTemplate[]>
+
+
+export interface FryDefinition {
+  fryid: number
+  avator: number
+  flag: number
+  name: string
+  level: number
+  price_yb: number
+  quantity: number
+  interval: number
+  sell_price: number
+}
+
+export interface FarmCropDefinition {
+  seed: string
+  name: string
+  crop: string
+  time: number
+  experience: number
+  yield: number
+  price: number
+}
+
+export interface FarmSeedDefinition {
+  seed: string
+  name: string
+  price: number
+  rank: number
+  maturation: number
+  experience: number
+  yield: number
+  cropPrice: number
+  type: string
+}
+
+export interface FarmFertilizerDefinition { item: string; name: string; duration: number }
+
+export interface IslandFolkDefinition { key: string; scene: number; about: string }
+export interface IslandMonsterDefinition { name: string; scene: number; about: string }
+export interface IslandSpotDefinition { name: string }
+export interface IslandContent {
+  places: Record<string, string>
+  folk: Record<string, IslandFolkDefinition>
+  senders: string[]
+  letters: number
+  pieces: number
+  tier: number
+  facts: [string, string][]
+  errands: [string, string, string, string][]
+  monsters: Record<string, IslandMonsterDefinition>
+  tactics: Record<string, 'strong' | 'intel' | 'charm'>
+  spots: Record<string, IslandSpotDefinition>
+  plays: Record<string, string>
+  chores: Record<string, number>
+  gifts: Record<string, string>
+}
+
+export const FRIES = FRIES_TABLE as unknown as FryDefinition[]
+export const FARM_CROPS = (FARM as unknown as { crops: FarmCropDefinition[] }).crops
+export const FARM_SEEDS = (FARM as unknown as { seeds: FarmSeedDefinition[] }).seeds
+export const FARM_FERTILIZERS = (FARM as unknown as { fertilizers: FarmFertilizerDefinition[] }).fertilizers
+export const ISLAND = ISLAND_TABLE as unknown as IslandContent
