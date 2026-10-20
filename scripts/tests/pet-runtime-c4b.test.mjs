@@ -27,6 +27,7 @@ const {
   dayKeyAt,
   dailyBoundaryMs,
   reconcileTimeZone,
+  executeCommandIdempotent,
   C3_COMMAND_TYPES,
   C4A_COMMAND_TYPES,
   C4B_COMMAND_TYPES,
@@ -522,15 +523,16 @@ const expectedMutationSiteCounts = {
     'src/shared/pet-runtime/travel.ts|writeMails|': 1,
 }
 
-const expectedCallbackSiteCounts = new Map([
-  ['src/renderer/pet/fishing.ts', 1],
-  ['src/renderer/swf/player.ts', 1],
-  ['src/renderer/ui/farm.ts', 2],
-  ['src/renderer/ui/fishing.ts', 4],
-  ['src/renderer/ui/float.ts', 1],
-  ['src/renderer/ui/talk.ts', 2],
-])
-
+const expectedCallbackSignatures = {
+  'src/renderer/ui/talk.ts|player.callback|speak': 2,
+  'src/renderer/ui/farm.ts|player.callback|farmAll': 1,
+  'src/renderer/ui/farm.ts|player.callback|farmView': 1,
+  'src/renderer/ui/float.ts|player.callback|setdata': 1,
+  'src/renderer/ui/fishing.ts|player.callback|PETEventOnReceived': 1,
+  'src/renderer/ui/fishing.ts|pondCommand|': 3,
+  'src/renderer/pet/fishing.ts|pondCommand|': 1,
+  'src/renderer/swf/player.ts|ExternalInterface.addCallback|': 1,
+}
 test('full renderer mutation gate classifies every canonical mutation/site to runtime groups', () => {
   const runtimeCommands = new Set([...C3_COMMAND_TYPES, ...C4A_COMMAND_TYPES, ...C4B_COMMAND_TYPES])
   const mapping = {
@@ -645,29 +647,45 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
     assert.equal(actualSiteCounts.get(key) ?? 0, expectedMutationSiteCounts[key] ?? 0, 'unexpected or missing mutation call site: ' + key)
   }
 
-  const callbackPattern = new RegExp(String.raw`\.callback\s*\(|ExternalInterface\.addCallback|pondCommand\s*\(`, 'g')
-  const actualCallbackCounts = new Map()
-  function walkCallbackCounts(directory) {
+  const actualCallbackSignatures = new Map()
+  function addCallbackSignature(file, callee, identity) {
+    const key = file + '|' + callee + '|' + identity
+    actualCallbackSignatures.set(key, (actualCallbackSignatures.get(key) ?? 0) + 1)
+  }
+  function walkCallbackSignatures(directory) {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name)
-      if (entry.isDirectory()) walkCallbackCounts(path)
+      if (entry.isDirectory()) walkCallbackSignatures(path)
       else if (entry.name.endsWith('.ts')) {
-        const count = [...readFileSync(path, 'utf8').matchAll(callbackPattern)].length
-        if (count > 0) actualCallbackCounts.set(path, count)
+        const source = readFileSync(path, 'utf8')
+        for (const match of source.matchAll(/([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.callback\s*\(\s*['"]([^'"]+)['"]/g)) {
+          addCallbackSignature(path, match[1] + '.callback', match[2])
+        }
+        for (const _match of source.matchAll(/ExternalInterface\.addCallback/g)) {
+          addCallbackSignature(path, 'ExternalInterface.addCallback', '')
+        }
+        for (const _match of source.matchAll(/\bpondCommand\s*\(/g)) {
+          addCallbackSignature(path, 'pondCommand', '')
+        }
       }
     }
   }
-  walkCallbackCounts('src/renderer')
-  walkCallbackCounts('src/shared')
-  const callbackKeys = new Set([...expectedCallbackSiteCounts.keys(), ...actualCallbackCounts.keys()])
+  walkCallbackSignatures('src/renderer')
+  walkCallbackSignatures('src/shared')
+  const callbackKeys = new Set([...Object.keys(expectedCallbackSignatures), ...actualCallbackSignatures.keys()])
   for (const key of callbackKeys) {
-    assert.equal(actualCallbackCounts.get(key) ?? 0, expectedCallbackSiteCounts.get(key) ?? 0, 'unexpected or missing SWF callback mutation site: ' + key)
+    assert.equal(actualCallbackSignatures.get(key) ?? 0, expectedCallbackSignatures[key] ?? 0, 'unexpected or missing SWF callback signature: ' + key)
   }
-  const simulatedExtraCallback = new Map(expectedCallbackSiteCounts)
-  simulatedExtraCallback.set('src/renderer/ui/farm.ts', (simulatedExtraCallback.get('src/renderer/ui/farm.ts') ?? 0) + 1)
-  const callbackMismatch = [...new Set([...simulatedExtraCallback.keys(), ...actualCallbackCounts.keys()])]
-    .some(key => (simulatedExtraCallback.get(key) ?? 0) !== (actualCallbackCounts.get(key) ?? 0))
-  assert.equal(callbackMismatch, true)
+  function callbackSignaturesMatch(actual, expected) {
+    const keys = new Set([...actual.keys(), ...Object.keys(expected)])
+    return [...keys].every(key => (actual.get(key) ?? 0) === (expected[key] ?? 0))
+  }
+  const simulatedReplacement = {
+    ...expectedCallbackSignatures,
+    'src/renderer/ui/farm.ts|player.callback|farmAll': 0,
+    'src/renderer/ui/farm.ts|player.callback|farmEvil': 1,
+  }
+  assert.equal(callbackSignaturesMatch(actualCallbackSignatures, simulatedReplacement), false)
 
   const updateTargets = new Set()
   const setInfoTargets = new Set()
@@ -976,4 +994,71 @@ test('real scheduler catch-up crosses spring-forward and fall-back 06:00 boundar
     assert.ok(result.state.nextDailyBoundaryMs > boundary)
     assert.equal(result.state.scheduledJobs.some(job => job.type === 'daily'), false)
   }
+})
+
+
+test('pure opId idempotency wrapper returns stored admin results without reapplying', () => {
+  let cache = {}
+  const base = baseState()
+  const cheatCommand = { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 50 } }
+  const firstCheat = executeCommandIdempotent(base, cheatCommand, context(base, { actorRole: 'owner' }), 'op-cheat-1', cache)
+  cache = firstCheat.cache
+  assert.equal(firstCheat.duplicate, false)
+  assert.equal(firstCheat.outcome.ok, true)
+  assert.equal(firstCheat.outcome.state.save.petInfo.yb, base.save.petInfo.yb + 50)
+  const retryCheat = executeCommandIdempotent(firstCheat.outcome.state, cheatCommand, context(firstCheat.outcome.state, { actorRole: 'owner' }), 'op-cheat-1', cache)
+  assert.equal(retryCheat.duplicate, true)
+  assert.deepEqual(retryCheat.outcome.result, firstCheat.outcome.result)
+  assert.equal(retryCheat.outcome.events.length, 0)
+  assert.equal(retryCheat.outcome.state.save.petInfo.yb, firstCheat.outcome.state.save.petInfo.yb)
+
+  const goodsCommand = { type: 'admin.grantRandomGoods', payload: { type: 'food', quantity: 2 } }
+  const firstGoods = executeCommandIdempotent(firstCheat.outcome.state, goodsCommand, context(firstCheat.outcome.state, { actorRole: 'owner' }), 'op-goods-1', retryCheat.cache)
+  const retryGoods = executeCommandIdempotent(firstGoods.outcome.state, goodsCommand, context(firstGoods.outcome.state, { actorRole: 'owner' }), 'op-goods-1', firstGoods.cache)
+  assert.equal(firstGoods.duplicate, false)
+  assert.equal(retryGoods.duplicate, true)
+  assert.deepEqual(retryGoods.outcome.result, firstGoods.outcome.result)
+  assert.equal(retryGoods.outcome.events.length, 0)
+  assert.equal(stableStringify(retryGoods.outcome.state), stableStringify(firstGoods.outcome.state))
+  assert.equal(typeof JSON.parse(JSON.stringify(retryGoods.cache)), 'object')
+})
+
+test('false-mode gap search is bounded to the chunk horizon, not the long target', () => {
+  const state = baseState()
+  state.lastSchedulerWallMs = WALL_TIME_MS
+  state.gameTimeMs = GAME_TIME_MS
+  state.advanceWhileEmpty = false
+  state.sessionCoverage = []
+  const target = WALL_TIME_MS + 100_000 * 60000
+  const result = advanceSchedulerChunk(state, context(state), target, { maxChunkTicks: 5 })
+  assert.equal(result.ticks, 0)
+  assert.equal(result.frozen, true)
+  assert.equal(result.resumeAtWallMs, WALL_TIME_MS + 5 * 60000)
+  assert.equal(result.state.lastSchedulerWallMs, WALL_TIME_MS + 5 * 60000)
+  assert.equal(result.state.gameTimeMs, GAME_TIME_MS)
+})
+
+test('coverage begin at +90s resumes at the exact connectedAtWallMs without crediting the partial minute', () => {
+  const state = baseState()
+  state.lastSchedulerWallMs = WALL_TIME_MS
+  state.gameTimeMs = GAME_TIME_MS
+  state.advanceWhileEmpty = false
+  const connectAt = WALL_TIME_MS + 90000
+  const target = WALL_TIME_MS + 5 * 60000
+  state.sessionCoverage = [{
+    coverageId: 'exact-start', deviceId: LOCAL_DEVICE_ID,
+    connectedAtWallMs: connectAt,
+    lastHeartbeatWallMs: target,
+  }]
+  const first = advanceSchedulerChunk(state, context(state, { activeClientCount: 0 }), target)
+  assert.equal(first.ticks, 0)
+  assert.equal(first.frozen, true)
+  assert.equal(first.resumeAtWallMs, connectAt)
+  assert.equal(first.state.lastSchedulerWallMs, connectAt)
+  assert.equal(first.state.gameTimeMs, GAME_TIME_MS)
+  const second = advanceSchedulerChunk(first.state, context(first.state, { activeClientCount: 0 }), target)
+  assert.equal(second.ticks, 3)
+  assert.equal(second.frozen, false)
+  assert.equal(second.state.gameTimeMs, GAME_TIME_MS + 3 * 60000)
+  assert.equal(second.state.save.petInfo.onLineTime, 3)
 })

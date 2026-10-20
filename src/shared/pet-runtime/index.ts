@@ -10,6 +10,7 @@ export * from './time'
 export * from './types'
 export * from './runtime'
 export * from './scheduler'
+export * from './idempotency'
 export * from './runtime-types'
 export {
   rebindSessionActor,
