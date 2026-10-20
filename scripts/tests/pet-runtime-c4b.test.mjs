@@ -25,6 +25,7 @@ const {
   stableStringify,
   RUNTIME_SCHEMA_VERSION,
   dayKeyAt,
+  dailyBoundaryMs,
   reconcileTimeZone,
   C3_COMMAND_TYPES,
   C4A_COMMAND_TYPES,
@@ -382,6 +383,145 @@ test('scheduled farm and fishing jobs tick canonical world state in due/id order
 })
 
 
+const expectedMutationSiteCounts = {
+'src/renderer/main.ts|setInfo|lastX': 6,
+    'src/renderer/main.ts|setInfo|lastY': 6,
+    'src/renderer/main.ts|update|settings': 1,
+    'src/renderer/pet/activity.ts|setActivity|': 2,
+    'src/renderer/pet/activity.ts|update|saveJsonData': 2,
+    'src/renderer/pet/album.ts|update|saveJsonData': 1,
+    'src/renderer/pet/fishing.ts|earnYb|': 2,
+    'src/renderer/pet/fishing.ts|setInfo|yb': 2,
+    'src/renderer/pet/fishing.ts|store|': 7,
+    'src/renderer/pet/fishing.ts|update|gameSaveDatas': 2,
+    'src/renderer/pet/fishing.ts|update|saveJsonData': 1,
+    'src/renderer/pet/goods.ts|addGood|': 2,
+    'src/renderer/pet/goods.ts|startTimed|': 1,
+    'src/renderer/pet/goods.ts|takeGood|': 1,
+    'src/renderer/pet/goods.ts|update|illustrated': 1,
+    'src/renderer/pet/goods.ts|update|selfGoodDatas': 1,
+    'src/renderer/pet/goods.ts|update|selfGoodUseOption': 2,
+    'src/renderer/pet/items.ts|addGood|': 2,
+    'src/renderer/pet/items.ts|addInfo|charm': 1,
+    'src/renderer/pet/items.ts|addInfo|intel': 1,
+    'src/renderer/pet/items.ts|addInfo|strong': 1,
+    'src/renderer/pet/items.ts|give|': 1,
+    'src/renderer/pet/items.ts|setInfo|': 1,
+    'src/renderer/pet/items.ts|setInfo|clean': 1,
+    'src/renderer/pet/items.ts|setInfo|health': 2,
+    'src/renderer/pet/items.ts|setInfo|hunger': 1,
+    'src/renderer/pet/items.ts|setInfo|mood': 1,
+    'src/renderer/pet/items.ts|setInfo|yb': 1,
+    'src/renderer/pet/items.ts|startTimed|': 2,
+    'src/renderer/pet/items.ts|takeGood|': 3,
+    'src/renderer/pet/jobs.ts|addGood|': 1,
+    'src/renderer/pet/jobs.ts|earnYb|': 1,
+    'src/renderer/pet/jobs.ts|setInfo|mood': 1,
+    'src/renderer/pet/jobs.ts|update|activeOption': 1,
+    'src/renderer/pet/jobs.ts|update|gameSaveDatas': 1,
+    'src/renderer/pet/jobs.ts|update|studyInfo': 1,
+    'src/renderer/pet/mail.ts|update|saveJsonData': 1,
+    'src/renderer/pet/mail.ts|writeMails|': 2,
+    'src/renderer/pet/pet.ts|addInfo|growth': 2,
+    'src/renderer/pet/pet.ts|addInfo|onLineTime': 1,
+    'src/renderer/pet/pet.ts|addInfo|onlineDataTime': 1,
+    'src/renderer/pet/pet.ts|setActivity|ill': 3,
+    'src/renderer/pet/pet.ts|setInfo|clean': 1,
+    'src/renderer/pet/pet.ts|setInfo|health': 6,
+    'src/renderer/pet/pet.ts|setInfo|hunger': 1,
+    'src/renderer/pet/pet.ts|setInfo|lastX': 2,
+    'src/renderer/pet/pet.ts|setInfo|mood': 2,
+    'src/renderer/pet/pet.ts|setInfo|onlineDataTime': 1,
+    'src/renderer/pet/pet.ts|update|isBury': 1,
+    'src/renderer/pet/pet.ts|update|nowTimeLine': 1,
+    'src/renderer/pet/signin.ts|give|': 4,
+    'src/renderer/pet/signin.ts|store|': 6,
+    'src/renderer/pet/signin.ts|update|saveJsonData': 1,
+    'src/renderer/pet/store.ts|setActivity|ill': 1,
+    'src/renderer/pet/store.ts|setInfo|': 1,
+    'src/renderer/pet/store.ts|setInfo|lastX': 2,
+    'src/renderer/pet/store.ts|setInfo|yb': 1,
+    'src/renderer/pet/store.ts|update|activeOption': 1,
+    'src/renderer/pet/store.ts|update|petComputedlInfo': 1,
+    'src/renderer/pet/store.ts|update|petInfo': 2,
+    'src/renderer/pet/store.ts|update|settings': 1,
+    'src/renderer/pet/tasks.ts|give|': 1,
+    'src/renderer/pet/tasks.ts|store|': 5,
+    'src/renderer/pet/tasks.ts|update|saveJsonData': 1,
+    'src/renderer/pet/vip.ts|setInfo|PDgrowth': 1,
+    'src/renderer/pet/vip.ts|setInfo|PDgrowthValue': 1,
+    'src/renderer/pet/vip.ts|setInfo|PDgrowthValue_next': 1,
+    'src/renderer/pet/vip.ts|setInfo|PDiamondBeginDate': 4,
+    'src/renderer/pet/vip.ts|setInfo|PDiamondExpirationDate': 4,
+    'src/renderer/pet/vip.ts|setInfo|PDiamondLevel': 1,
+    'src/renderer/pet/vip.ts|setInfo|PDiamondYear': 2,
+    'src/renderer/pet/vip.ts|setInfo|pinkDiamond': 1,
+    'src/renderer/pet/vip.ts|setInfo|sweetHeart': 2,
+    'src/renderer/pet/vip.ts|setInfo|sweetHeartOverTime': 2,
+    'src/renderer/pet/weather.ts|update|saveJsonData': 1,
+    'src/renderer/swf/sol.ts|writeSol|': 1,
+    'src/renderer/ui/adopt.ts|setInfo|sex': 1,
+    'src/renderer/ui/adopt.ts|update|havePet': 1,
+    'src/renderer/ui/chat.ts|addInfo|': 1,
+    'src/renderer/ui/chat.ts|setInfo|': 1,
+    'src/renderer/ui/chat.ts|update|settings': 3,
+    'src/renderer/ui/community.ts|saveSpot|': 3,
+    'src/renderer/ui/community.ts|update|saveJsonData': 1,
+    'src/renderer/ui/diudiule.ts|earnYb|': 1,
+    'src/renderer/ui/diudiule.ts|setInfo|lastX': 2,
+    'src/renderer/ui/diudiule.ts|setInfo|lastY': 2,
+    'src/renderer/ui/diudiule.ts|setInfo|mood': 1,
+    'src/renderer/ui/email.ts|give|': 1,
+    'src/renderer/ui/email.ts|writeMails|': 1,
+    'src/renderer/ui/face.ts|setInfo|mood': 1,
+    'src/renderer/ui/face.ts|update|gameSaveDatas': 1,
+    'src/renderer/ui/face.ts|update|settings': 1,
+    'src/renderer/ui/farm.ts|setInfo|yb': 1,
+    'src/renderer/ui/farm.ts|update|saveJsonData': 4,
+    'src/renderer/ui/farm.ts|writeSol|': 1,
+    'src/renderer/ui/games.ts|addInfo|growth': 1,
+    'src/renderer/ui/games.ts|earnYb|': 1,
+    'src/renderer/ui/games.ts|setInfo|mood': 1,
+    'src/renderer/ui/island.ts|give|': 6,
+    'src/renderer/ui/island.ts|store|': 16,
+    'src/renderer/ui/island.ts|takeGood|': 3,
+    'src/renderer/ui/island.ts|update|saveJsonData': 1,
+    'src/renderer/ui/menu.ts|update|settings': 1,
+    'src/renderer/ui/petinfo.ts|setInfo|': 1,
+    'src/renderer/ui/setup.ts|addInfo|growth': 1,
+    'src/renderer/ui/setup.ts|addInfo|yb': 1,
+    'src/renderer/ui/setup.ts|give|': 1,
+    'src/renderer/ui/setup.ts|setInfo|health': 1,
+    'src/renderer/ui/setup.ts|setInfo|lastX': 1,
+    'src/renderer/ui/setup.ts|setInfo|lastY': 1,
+    'src/renderer/ui/setup.ts|update|settings': 34,
+    'src/renderer/ui/smallgame.ts|earnYb|': 1,
+    'src/renderer/ui/smallgame.ts|setInfo|mood': 1,
+    'src/renderer/ui/state.ts|setInfo|sweetHeart': 1,
+    'src/renderer/ui/travel.ts|update|gameSaveDatas': 1,
+    'src/renderer/ui/update.ts|update|settings': 1,
+    'src/renderer/ui/visit.ts|setInfo|mood': 2,
+    'src/shared/pet-runtime/farm-runtime.ts|earnYb|': 1,
+    'src/shared/pet-runtime/fishing-runtime.ts|earnYb|': 2,
+    'src/shared/pet-runtime/handlers-b.ts|addGood|': 1,
+    'src/shared/pet-runtime/handlers-b.ts|startTimedGood|': 1,
+    'src/shared/pet-runtime/handlers-b.ts|takeGood|': 4,
+    'src/shared/pet-runtime/handlers-d.ts|writeMails|': 4,
+    'src/shared/pet-runtime/handlers-server.ts|addGood|': 1,
+    'src/shared/pet-runtime/island-runtime.ts|earnYb|': 1,
+    'src/shared/pet-runtime/island-runtime.ts|takeGood|': 2,
+    'src/shared/pet-runtime/runtime-helpers.ts|addGood|': 2,
+    'src/shared/pet-runtime/runtime-helpers.ts|earnYb|': 1,
+    'src/shared/pet-runtime/runtime-helpers.ts|startTimedGood|': 1,
+    'src/shared/pet-runtime/runtime-helpers.ts|takeGood|': 1,
+    'src/shared/pet-runtime/runtime-helpers.ts|writeMails|': 1,
+    'src/shared/pet-runtime/self-care.ts|startTimedGood|': 1,
+    'src/shared/pet-runtime/self-care.ts|takeGood|': 1,
+    'src/shared/pet-runtime/tick.ts|earnYb|': 1,
+    'src/shared/pet-runtime/tick.ts|writeMails|': 1,
+    'src/shared/pet-runtime/travel.ts|writeMails|': 1,
+}
+
 test('full renderer mutation gate classifies every canonical mutation/site to runtime groups', () => {
   const runtimeCommands = new Set([...C3_COMMAND_TYPES, ...C4A_COMMAND_TYPES, ...C4B_COMMAND_TYPES])
   const mapping = {
@@ -399,7 +539,7 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
     'src/renderer/pet/vip.ts': ['vip.buyPinkDiamond', 'vip.clearPinkDiamond', 'vip.buySweetheart', 'vip.setSweetheart'],
     'src/renderer/pet/weather.ts': ['server.setWeatherCity'],
     'src/renderer/ui/adopt.ts': ['pet.adopt'],
-    'src/renderer/ui/chat.ts': ['admin.grantCheat'],
+    'src/renderer/ui/chat.ts': ['admin.grantCheat', 'settings.setShared'],
     'src/renderer/ui/diudiule.ts': ['diudiule.startSession', 'diudiule.reward'],
     'src/renderer/ui/email.ts': ['mail.claim', 'mail.claimAll', 'mail.delete', 'mail.deleteAll'],
     'src/renderer/ui/face.ts': ['pet.pokeFace', 'pet.cheer'],
@@ -444,6 +584,8 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
     'src/renderer/ui/setup.ts|give|': ['admin.grantRandomGoods'],
     'src/renderer/ui/chat.ts|addInfo|': ['admin.grantCheat'],
     'src/renderer/ui/chat.ts|setInfo|': ['admin.grantCheat'],
+    'src/renderer/ui/chat.ts|update|settings': ['settings.setShared'],
+    'src/renderer/ui/setup.ts|update|settings': ['settings.setShared', 'server.setWeatherCity'],
     'src/renderer/ui/state.ts|setInfo|sweetHeart': ['vip.setSweetheart'],
     'src/renderer/pet/mail.ts|writeMails|': ['mail.claim', 'mail.claimAll', 'mail.delete', 'mail.deleteAll'],
     'src/renderer/ui/email.ts|writeMails|': ['mail.claim', 'mail.claimAll', 'mail.delete', 'mail.deleteAll'],
@@ -472,6 +614,27 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
   )
   assert.deepEqual(unmapped, [], 'renderer mutation files without a command/runtime classification')
   assert.equal(flagged.length > 0, true)
+
+  const actualSiteCounts = new Map()
+  function walkSiteCounts(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) walkSiteCounts(path)
+      else if (entry.name.endsWith('.ts')) {
+        const source = readFileSync(path, 'utf8')
+        for (const match of source.matchAll(/\b(update|setInfo|setActivity|addInfo|earnYb|takeGood|give|addGood|startTimedGood|startTimed|writeMails|saveSpot|writeSol|store)\s*\(\s*(?:['"]([^'"]+)['"])?/g)) {
+          const key = path + '|' + match[1] + '|' + (match[2] ?? '')
+          actualSiteCounts.set(key, (actualSiteCounts.get(key) ?? 0) + 1)
+        }
+      }
+    }
+  }
+  walkSiteCounts('src/renderer')
+  walkSiteCounts('src/shared')
+  const allSiteKeys = new Set([...Object.keys(expectedMutationSiteCounts), ...actualSiteCounts.keys()])
+  for (const key of allSiteKeys) {
+    assert.equal(actualSiteCounts.get(key) ?? 0, expectedMutationSiteCounts[key] ?? 0, 'unexpected or missing mutation call site: ' + key)
+  }
 
   const updateTargets = new Set()
   const setInfoTargets = new Set()
@@ -590,24 +753,50 @@ test('advanceWhileEmpty=false stops at the first mid-chunk coverage gap without 
   state.lastSchedulerWallMs = WALL_TIME_MS
   state.gameTimeMs = GAME_TIME_MS
   state.advanceWhileEmpty = false
-  state.sessionCoverage = []
+  const firstMinute = WALL_TIME_MS + 60000
+  state.sessionCoverage = [{
+    coverageId: 'covered-then-gap', deviceId: LOCAL_DEVICE_ID,
+    connectedAtWallMs: WALL_TIME_MS - 60000,
+    disconnectedAtWallMs: firstMinute,
+    lastHeartbeatWallMs: firstMinute,
+  }]
   state.scheduledJobs = [{ id: 1, type: 'other', dueAtGameMs: GAME_TIME_MS + 120000, payload: {}, status: 'pending' }]
   state.nextScheduledJobId = 2
-  const firstMinute = WALL_TIME_MS + 60000
   const target = WALL_TIME_MS + 3 * 60000
-  const result = advanceSchedulerChunk(state, context(state, { activeClientCount: 1 }), target, {
-    liveActiveClientCountAtWallMs: wallMs => wallMs < firstMinute ? 1 : 0,
-    coverageAtWallMs: (fromWallMs, toWallMs) => ({
-      activeClientCount: fromWallMs < firstMinute && toWallMs > WALL_TIME_MS ? 1 : 0,
-      sessionActive: fromWallMs < firstMinute && toWallMs > WALL_TIME_MS,
-    }),
-  })
+  const result = advanceSchedulerChunk(state, context(state, { activeClientCount: 1 }), target)
   assert.equal(result.ticks, 1)
   assert.equal(result.frozen, true)
   assert.equal(result.state.gameTimeMs, GAME_TIME_MS + 60000)
-  assert.equal(result.state.lastSchedulerWallMs, firstMinute)
+  assert.equal(result.state.lastSchedulerWallMs, target)
+  assert.equal(result.resumeAtWallMs, target)
   assert.equal(result.state.scheduledJobs[0].status, 'pending')
   assert.equal(result.events.some(event => event.type === 'pet.statsChanged'), true)
+})
+
+test('advanceWhileEmpty=false pre-connect gap freezes without game-time advancement and resumes at coverage start', () => {
+  const state = baseState()
+  state.lastSchedulerWallMs = WALL_TIME_MS
+  state.gameTimeMs = GAME_TIME_MS
+  state.advanceWhileEmpty = false
+  const connectAt = WALL_TIME_MS + 2 * 60000
+  const target = WALL_TIME_MS + 3 * 60000
+  state.sessionCoverage = [{
+    coverageId: 'pre-connect', deviceId: LOCAL_DEVICE_ID,
+    connectedAtWallMs: connectAt,
+    lastHeartbeatWallMs: target,
+  }]
+  const first = advanceSchedulerChunk(state, context(state, { activeClientCount: 0 }), target)
+  assert.equal(first.ticks, 0)
+  assert.equal(first.frozen, true)
+  assert.equal(first.resumeAtWallMs, connectAt)
+  assert.equal(first.state.lastSchedulerWallMs, connectAt)
+  assert.equal(first.state.gameTimeMs, GAME_TIME_MS)
+  const second = advanceSchedulerChunk(first.state, context(first.state, { activeClientCount: 1 }), target)
+  assert.equal(second.ticks, 1)
+  assert.equal(second.frozen, false)
+  assert.equal(second.state.gameTimeMs, GAME_TIME_MS + 60000)
+  assert.equal(second.state.lastSchedulerWallMs, target)
+  assert.equal(second.state.save.petInfo.onLineTime, 1)
 })
 
 test('per-minute coverage hook credits only post-connect minutes', () => {
@@ -663,6 +852,9 @@ test('weather city changes invalidate current/future weather cache but keep past
   assert.equal(Object.prototype.hasOwnProperty.call(changed.state.environment.weatherByDay, '2026-10-19'), true)
   assert.equal(Object.prototype.hasOwnProperty.call(changed.state.environment.weatherByDay, '2026-10-20'), false)
   assert.equal(Object.prototype.hasOwnProperty.call(changed.state.environment.weatherByDay, '2026-10-21'), false)
+  const repeated = ok(changed.state, 'server.setWeatherCity', { city: 'Beijing' }, { actorRole: 'owner' })
+  assert.equal(stableStringify(repeated.state), stableStringify(changed.state))
+  rejected(repeated.state, 'server.setWeatherCity', { city: '' }, { actorRole: 'owner' }, 'invalid_payload')
 })
 
 test('server/admin commands enforce owner authority and repeated settings stay canonical', () => {
@@ -680,4 +872,41 @@ test('server/admin commands enforce owner authority and repeated settings stay c
   const zoneTwice = ok(zoneOnce.state, 'server.setTimeZone', { timeZone: 'Asia/Shanghai' }, { actorRole: 'owner' })
   assert.equal(stableStringify(zoneOnce.state), stableStringify(zoneTwice.state))
   rejected(zoneTwice.state, 'settings.setShared', { key: 'difficulty', value: 'invalid' }, {}, 'invalid_payload')
+  const undying = ok(zoneTwice.state, 'settings.setShared', { key: 'undying', value: true })
+  const undyingTwice = ok(undying.state, 'settings.setShared', { key: 'undying', value: true })
+  assert.equal(undyingTwice.state.save.settings.undying, true)
+  assert.equal(stableStringify(undying.state), stableStringify(undyingTwice.state))
+  rejected(zoneTwice.state, 'admin.grantRandomGoods', { type: 'food', quantity: 1001 }, { actorRole: 'owner' }, 'invalid_payload')
+  rejected(zoneTwice.state, 'admin.grantRandomGoods', { type: 'unknown', quantity: 1 }, { actorRole: 'owner' }, 'not_available')
+  const beforeCheat = zoneTwice.state.save.petInfo.yb
+  const cheat = ok(zoneTwice.state, 'admin.grantCheat', { stat: 'yb', amount: 50 }, { actorRole: 'owner' })
+  assert.equal(cheat.state.save.petInfo.yb, beforeCheat + 50)
+  const random = ok(cheat.state, 'admin.grantRandomGoods', { type: 'food', quantity: 2 }, { actorRole: 'owner' })
+  assert.equal(random.result.goods.length, 2)
+  const noop = ok(cheat.state, 'admin.grantCheat', { stat: 'yb', amount: 0 }, { actorRole: 'owner' })
+  assert.equal(noop.state.save.petInfo.yb, cheat.state.save.petInfo.yb)
+})
+
+
+test('real scheduler catch-up crosses spring-forward and fall-back 06:00 boundaries exactly once', () => {
+  for (const [zone, dayKey] of [['America/New_York', '2026-03-08'], ['America/New_York', '2026-11-01']]) {
+    const boundary = dailyBoundaryMs(dayKey, zone)
+    const state = baseState()
+    state.timeZone = zone
+    state.gameTimeMs = boundary - 60000
+    state.nextDailyBoundaryMs = boundary
+    state.lastProcessedDayBoundaryKey = dayKeyAt(boundary - 60000, zone)
+    state.lastSchedulerWallMs = WALL_TIME_MS
+    state.advanceWhileEmpty = true
+    state.sessionCoverage = []
+    state.save.saveJsonData.task = '{}'
+    state.save.saveJsonData.signin = JSON.stringify({ collectionList: {}, getGrowth: null, onlineGiftNum: 3, isOnlineLastTime: 2, getBirthDayGift: true })
+    const result = advanceSchedulerChunk(state, context(state), WALL_TIME_MS + 60000)
+    assert.equal(result.ticks, 1)
+    const expectedKey = dayKeyAt(boundary, zone)
+    assert.equal(result.state.lastProcessedDayBoundaryKey, expectedKey)
+    assert.equal(blob(result.state, 'task').dailyDay, boundary / 1000)
+    assert.ok(result.state.nextDailyBoundaryMs > boundary)
+    assert.equal(result.state.scheduledJobs.some(job => job.type === 'daily'), false)
+  }
 })

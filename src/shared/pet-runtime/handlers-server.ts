@@ -6,6 +6,8 @@ import { addGood, reject, recomputePetComputed } from './runtime-helpers'
 import { dayKeyAt, reconcileTimeZone } from './time'
 import type { JsonObject, JsonValue } from './types'
 
+const MAX_ADMIN_RANDOM_GOODS = 1000
+
 function json<T>(value: T): JsonValue {
   return value as unknown as JsonValue
 }
@@ -92,6 +94,7 @@ export function adminGrantCheat(context: HandlerContext, payload: CommandPayload
 }
 
 export function adminGrantRandomGoods(context: HandlerContext, payload: CommandPayloadMap['admin.grantRandomGoods']): HandlerResult {
+  if (payload.quantity > MAX_ADMIN_RANDOM_GOODS) reject('invalid_payload', 'admin random goods quantity exceeds the safe maximum')
   const type = payload.type as GoodType
   const pool = allGoods(type)
   if (pool.length === 0) reject('not_available', 'unknown admin good type')

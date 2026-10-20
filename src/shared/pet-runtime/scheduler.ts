@@ -12,7 +12,7 @@ export const CATCHUP_CHUNK_TICKS = 1440
 export interface SchedulerAdvanceOptions {
   /** Defaults to the persisted 1440-minute bounded catch-up chunk. */
   maxChunkTicks?: number
-  /** Actual live authenticated clients; defaults to ctx.activeClientCount. */
+  /** Legacy live-count hint; historical freeze decisions use coverage/per-minute hooks only. */
   liveActiveClientCount?: number
   /** Per-minute live client count hook for mid-catch-up connects/disconnects. */
   liveActiveClientCountAtWallMs?: (wallMs: number) => number
@@ -28,6 +28,7 @@ export interface SchedulerAdvanceOutcome {
   targetWallMs: number
   catchingUp: boolean
   frozen: boolean
+  resumeAtWallMs: number
 }
 
 function nonNegativeInteger(value: unknown, name: string): number {
@@ -52,8 +53,6 @@ export function advanceSchedulerChunk(
   if (Number.isSafeInteger(maxChunkTicks) === false || maxChunkTicks <= 0) {
     reject('invalid_payload', 'maxChunkTicks must be a positive safe integer')
   }
-  const liveClients = options.liveActiveClientCount ?? ctx.activeClientCount
-  nonNegativeInteger(liveClients, 'liveActiveClientCount')
   nonNegativeInteger(state.lastSchedulerWallMs, 'lastSchedulerWallMs')
   nonNegativeInteger(state.gameTimeMs, 'gameTimeMs')
 
@@ -63,15 +62,7 @@ export function advanceSchedulerChunk(
     candidate.lastSchedulerWallMs = targetWallMs
     return {
       ok: true, state: candidate, events: [], ticks: 0,
-      targetWallMs, catchingUp: false, frozen: false,
-    }
-  }
-
-  if (candidate.advanceWhileEmpty === false && liveClients === 0 && options.liveActiveClientCountAtWallMs === undefined) {
-    candidate.lastSchedulerWallMs = targetWallMs
-    return {
-      ok: true, state: candidate, events: [], ticks: 0,
-      targetWallMs, catchingUp: false, frozen: true,
+      targetWallMs, catchingUp: false, frozen: false, resumeAtWallMs: targetWallMs,
     }
   }
 
@@ -79,18 +70,30 @@ export function advanceSchedulerChunk(
   const ticks = Math.min(due, maxChunkTicks)
   const events: DomainEvent[] = []
   let completed = 0
+  const activityAt = (fromWallMs: number, toWallMs: number): SessionActivity =>
+    options.coverageAtWallMs?.(fromWallMs, toWallMs) ??
+    sessionActivityForInterval(candidate.sessionCoverage, fromWallMs, toWallMs)
+  const nextCoverageStart = (fromWallMs: number): number => {
+    if (options.coverageAtWallMs !== undefined) return targetWallMs
+    let resume = targetWallMs
+    for (const interval of candidate.sessionCoverage) {
+      if (interval.disconnectedAtWallMs !== undefined && interval.disconnectedAtWallMs <= fromWallMs) continue
+      if (interval.connectedAtWallMs > fromWallMs && interval.connectedAtWallMs < resume) resume = interval.connectedAtWallMs
+    }
+    return Math.min(resume, targetWallMs)
+  }
   for (let index = 0; index < ticks; index++) {
     const fromWallMs = anchor + index * GAME_MINUTE_MS
     const toWallMs = fromWallMs + GAME_MINUTE_MS
-    const liveAtMinute = options.liveActiveClientCountAtWallMs?.(fromWallMs) ?? liveClients
+    const liveAtMinute = options.liveActiveClientCountAtWallMs?.(fromWallMs) ?? 0
     nonNegativeInteger(liveAtMinute, 'liveActiveClientCountAtWallMs')
-    const activity = options.coverageAtWallMs?.(fromWallMs, toWallMs) ??
-      sessionActivityForInterval(candidate.sessionCoverage, fromWallMs, toWallMs)
+    const activity = activityAt(fromWallMs, toWallMs)
     if (candidate.advanceWhileEmpty === false && liveAtMinute === 0 && activity.activeClientCount === 0) {
-      candidate.lastSchedulerWallMs = fromWallMs
+      const resumeAtWallMs = nextCoverageStart(fromWallMs)
+      candidate.lastSchedulerWallMs = resumeAtWallMs
       return {
         ok: true, state: candidate, events, ticks: completed,
-        targetWallMs, catchingUp: false, frozen: true,
+        targetWallMs, catchingUp: false, frozen: true, resumeAtWallMs,
       }
     }
     const tickCtx: RuntimeContext = {
@@ -112,6 +115,7 @@ export function advanceSchedulerChunk(
     targetWallMs,
     catchingUp: completed < due,
     frozen: false,
+    resumeAtWallMs: candidate.lastSchedulerWallMs,
   }
 }
 
