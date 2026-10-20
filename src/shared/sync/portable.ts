@@ -15,6 +15,7 @@ import type {
   SessionCoverageInterval,
   WeatherDayRecord,
 } from '../pet-runtime/types'
+import type { OpIdCache } from '../pet-runtime/idempotency'
 import type { SaveData } from '../save'
 import type { DeviceLocalOverlay, SharedSaveData } from './data-boundary'
 import {
@@ -104,6 +105,8 @@ export interface LocalPetDocumentV2 {
   bundle: PortablePetBundleV1
   runtime: LocalPersistedRuntimeIdentity
   device: DeviceLocalOverlay
+  /** Host-level opId cache committed atomically with the local document. */
+  idempotency?: OpIdCache
 }
 
 export interface RemoteProjectionCacheV2 {
@@ -697,6 +700,11 @@ export function migrateLegacyLocalPetDocumentV2(value: unknown): LocalPetDocumen
   requireRecord(value, '$.local')
   requireRecord(value.device, '$.local.device')
   assertNonEmptyString(value.device.localDeviceId, '$.local.device.localDeviceId')
+  if (value.idempotency !== undefined) {
+    requireRecord(value.idempotency, '$.local.idempotency')
+    if (value.idempotency.schemaVersion !== 2) failSchema('unsupported_schema_version', '$.local.idempotency.schemaVersion', 'expected idempotency schema version 2')
+    if (Array.isArray(value.idempotency.records) === false) failSchema('invalid_schema', '$.local.idempotency.records', 'expected array')
+  }
   requireRecord(value.runtime, '$.local.runtime')
   const runtime: Record<string, unknown> = { ...value.runtime }
   if (Object.prototype.hasOwnProperty.call(runtime, 'localDeviceId')) {
@@ -772,7 +780,7 @@ export function assertLocalPetDocumentV2(value: unknown): asserts value is Local
   assertSchemaVersion(value.schemaVersion, LOCAL_DOCUMENT_SCHEMA_VERSION, '$.local.schemaVersion', 'local document')
   if (value.format !== LOCAL_DOCUMENT_FORMAT) failSchema('unsupported_format', '$.local.format', 'expected ' + LOCAL_DOCUMENT_FORMAT)
   assertRequiredKeys(value, ['format', 'schemaVersion', 'revision', 'eventSeq', 'authority', 'bundle', 'runtime', 'device'], '$.local')
-  assertOnlyKeys(value, ['format', 'schemaVersion', 'revision', 'eventSeq', 'authority', 'bundle', 'runtime', 'device'], '$.local')
+  assertOnlyKeys(value, ['format', 'schemaVersion', 'revision', 'eventSeq', 'authority', 'bundle', 'runtime', 'device', 'idempotency'], '$.local')
   requireNonNegativeInteger(value.revision, '$.local.revision')
   requireNonNegativeInteger(value.eventSeq, '$.local.eventSeq')
   requireRecord(value.authority, '$.local.authority')
@@ -788,6 +796,11 @@ export function assertLocalPetDocumentV2(value: unknown): asserts value is Local
   }
   if (value.revision !== value.bundle.authority.revision || value.eventSeq !== value.bundle.authority.eventSeq) {
     failSchema('invalid_schema', '$.local', 'local revision/eventSeq must match the bundle authority stamp')
+  }
+  if (value.idempotency !== undefined) {
+    requireRecord(value.idempotency, '$.local.idempotency')
+    if (value.idempotency.schemaVersion !== 2) failSchema('unsupported_schema_version', '$.local.idempotency.schemaVersion', 'expected idempotency schema version 2')
+    if (Array.isArray(value.idempotency.records) === false) failSchema('invalid_schema', '$.local.idempotency.records', 'expected array')
   }
   requireRecord(value.runtime, '$.local.runtime')
   assertRequiredKeys(value.runtime, ['appInstanceId', 'startedAtWallMs'], '$.local.runtime')
