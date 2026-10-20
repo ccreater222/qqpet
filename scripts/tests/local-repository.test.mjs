@@ -14,7 +14,7 @@ registerHooks({
   },
 })
 
-const { LocalRepository, localRepositoryEnabled, localRepositoryCapability, startLocalRepositoryIfEnabled, registerLocalRepositoryLifecycle } = await import('../../src/main/local-repository.ts')
+const { LocalRepository, createLocalRepository, localRepositoryEnabled, localRepositoryCapability, startLocalRepositoryIfEnabled, registerLocalRepositoryLifecycle } = await import('../../src/main/local-repository.ts')
 const { validateLocalPetDocumentV2 } = await import('../../src/shared/sync/portable.ts')
 const { createSyncFixtures, SEED, WALL_TIME_MS, LOCAL_DEVICE_ID } = await import('./sync-fixtures.mjs')
 const { validateOpIdCache } = await import('../../src/shared/pet-runtime/idempotency.ts')
@@ -25,6 +25,11 @@ function tempDir() {
 }
 function writeJson(file, value) {
   writeFileSync(file, JSON.stringify(value, null, 2))
+}
+const ACTIVATION_ENV = { QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }
+const ACTIVATION = { authorityState: 'local-v2-active', rendererCapability: true, env: ACTIVATION_ENV }
+function makeRepo(options) {
+  return createLocalRepository(options, ACTIVATION)
 }
 function repoOptions(dir, nowRef, overrides = {}) {
   let id = 0
@@ -46,7 +51,7 @@ test('local repository migrates bare save to atomic v2 document and supports ide
   const legacy = join(dir, 'legacy.json')
   writeJson(legacy, fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(dir, clock))
+  const repo = makeRepo(repoOptions(dir, clock))
   const projection = await repo.load()
   assert.ok(projection)
   assert.equal(repo.getStatus().mode, 'local')
@@ -83,7 +88,7 @@ test('scheduler catch-up honors advanceWhileEmpty true and false across restart'
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const trueRepo = new LocalRepository(repoOptions(dir, clock, { advanceWhileEmpty: true, maxChunkTicks: 1440 }))
+  const trueRepo = makeRepo(repoOptions(dir, clock, { advanceWhileEmpty: true, maxChunkTicks: 1440 }))
   const start = await trueRepo.load()
   const gameStart = start.gameTimeMs
   clock.value += 2 * 60000
@@ -96,12 +101,12 @@ test('scheduler catch-up honors advanceWhileEmpty true and false across restart'
   const falseDir = tempDir()
   writeJson(join(falseDir, 'legacy.json'), fixtures.save)
   const falseClock = { value: WALL_TIME_MS }
-  const falseRepo = new LocalRepository(repoOptions(falseDir, falseClock, { advanceWhileEmpty: false, maxChunkTicks: 1440 }))
+  const falseRepo = makeRepo(repoOptions(falseDir, falseClock, { advanceWhileEmpty: false, maxChunkTicks: 1440 }))
   const falseStart = await falseRepo.load()
   const falseGame = falseStart.gameTimeMs
   await falseRepo.stop()
   falseClock.value += 2 * 60000
-  const restarted = new LocalRepository(repoOptions(falseDir, falseClock, { advanceWhileEmpty: false, maxChunkTicks: 1440 }))
+  const restarted = makeRepo(repoOptions(falseDir, falseClock, { advanceWhileEmpty: false, maxChunkTicks: 1440 }))
   const resumed = await restarted.load()
   assert.ok(resumed)
   assert.equal(restarted.getProjection().gameTimeMs, falseGame)
@@ -113,7 +118,7 @@ test('reset and portable import close active coverage and reopen exact local sur
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(dir, clock))
+  const repo = makeRepo(repoOptions(dir, clock))
   await repo.load()
   const before = repo.getDocument().bundle.engine.sessionCoverage
   assert.equal(before.length, 1)
@@ -146,7 +151,7 @@ test('legacy duplicate localDeviceId migrates on match and fails read-only witho
   const matchPath = join(matchDir, 'save.json')
   writeJson(matchPath, matched)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(matchDir, clock))
+  const repo = makeRepo(repoOptions(matchDir, clock))
   assert.ok(await repo.load())
   assert.equal(repo.currentDeviceId, matched.device.localDeviceId)
   assert.equal(repo.getDocument().runtime.localDeviceId, undefined)
@@ -158,7 +163,7 @@ test('legacy duplicate localDeviceId migrates on match and fails read-only witho
   const badPath = join(badDir, 'save.json')
   writeJson(badPath, bad)
   const original = readFileSync(badPath, 'utf8')
-  const badRepo = new LocalRepository(repoOptions(badDir, clock))
+  const badRepo = makeRepo(repoOptions(badDir, clock))
   assert.equal(await badRepo.load(), null)
   assert.equal(badRepo.getStatus().state, 'read_only')
   assert.match(badRepo.getStatus().error, /localDeviceId/)
@@ -169,13 +174,13 @@ test('crash restart repairs coverage and replays the persisted opId without reap
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const first = new LocalRepository(repoOptions(dir, clock))
+  const first = makeRepo(repoOptions(dir, clock))
   await first.load()
   const yb = first.getProjection().shared.petInfo.yb
   await first.command({ type: 'admin.grantCheat', payload: { stat: 'yb', amount: 7 } }, 'op-crash', 'owner')
   const ybAfter = first.getProjection().shared.petInfo.yb
   clock.value += 120000
-  const second = new LocalRepository(repoOptions(dir, clock))
+  const second = makeRepo(repoOptions(dir, clock))
   assert.ok(await second.load())
   assert.equal(second.getProjection().shared.petInfo.yb, ybAfter)
   const cov = second.getDocument().bundle.engine.sessionCoverage
@@ -202,8 +207,8 @@ test('default legacy path stays untouched unless the explicit local repository f
   assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }, false).reason, 'renderer_capability_missing')
   assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }, true, true).reason, 'legacy_authority_active')
   assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }, false, true).canActivate, true)
-  assert.equal(startLocalRepositoryIfEnabled({ ...options, legacyAuthorityActive: true }, { QQPET_LOCAL_REPOSITORY_V2: '1' }), null)
-  const activated = startLocalRepositoryIfEnabled({ ...options, rendererCapability: true }, { QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' })
+  assert.equal(startLocalRepositoryIfEnabled({ ...options, authorityState: 'legacy-active' }, { QQPET_LOCAL_REPOSITORY_V2: '1' }), null)
+  const activated = startLocalRepositoryIfEnabled({ ...options, authorityState: 'local-v2-active', rendererCapability: true }, { QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' })
   assert.ok(activated)
   await activated.stop()
 })
@@ -212,7 +217,7 @@ test('suspend/resume closes exact segment without counting suspended time; malfo
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(dir, clock))
+  const repo = makeRepo(repoOptions(dir, clock))
   await repo.load()
   clock.value += 1000
   const suspended = await await repo.suspend()
@@ -231,7 +236,7 @@ test('suspend/resume closes exact segment without counting suspended time; malfo
   const badDir = tempDir()
   const badPath = join(badDir, 'save.json')
   writeFileSync(badPath, '{not-json')
-  const bad = new LocalRepository(repoOptions(badDir, clock))
+  const bad = makeRepo(repoOptions(badDir, clock))
   assert.equal(await bad.load(), null)
   assert.equal(bad.getStatus().state, 'read_only')
   assert.match(bad.getStatus().error, /not valid JSON/)
@@ -247,7 +252,7 @@ test('lifecycle starts only on ready when flagged; quit flushes and stops', asyn
   assert.equal(registerLocalRepositoryLifecycle(repoOptions(dir, clock), hooks, {}), null)
   assert.equal(ready.length, 0)
   assert.equal(quit.length, 0)
-  const repo = registerLocalRepositoryLifecycle({ ...repoOptions(dir, clock), rendererCapability: true }, hooks, { QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' })
+  const repo = registerLocalRepositoryLifecycle({ ...repoOptions(dir, clock), authorityState: 'local-v2-active', rendererCapability: true }, hooks, { QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' })
   assert.ok(repo)
   assert.equal(existsSync(join(dir, 'save.json')), false)
   await ready[0]()
@@ -260,7 +265,7 @@ test('local command queue serializes concurrent retries and persists one idempot
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(dir, clock))
+  const repo = makeRepo(repoOptions(dir, clock))
   await repo.load()
   const startYb = repo.getProjection().shared.petInfo.yb
   const command = { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 11 } }
@@ -283,7 +288,7 @@ test('authority gating rejects handoff_pending loads before opening coverage or 
   const path = join(dir, 'save.json')
   writeJson(path, doc)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(dir, clock))
+  const repo = makeRepo(repoOptions(dir, clock))
   const projection = await repo.load()
   assert.ok(projection)
   assert.equal(repo.getStatus().readOnly, true)
@@ -300,7 +305,7 @@ test('detach freezes epoch and server-detach import validates authority then rea
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(dir, clock))
+  const repo = makeRepo(repoOptions(dir, clock))
   await repo.load()
   const detached = await repo.exportForDetach(5)
   assert.equal(detached.authority.owner, 'local')
@@ -341,7 +346,7 @@ test('failed import stays read-only and rollbackDetach restores the frozen pre-d
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(dir, clock))
+  const repo = makeRepo(repoOptions(dir, clock))
   await repo.load()
   const activeEpoch = repo.getDocument().authority.stamp.epoch
   const bundle = await repo.exportForDetach(1)
@@ -361,7 +366,7 @@ test('failed persistence leaves command/catch-up state, cache, revision and anch
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
   let failWrite = false
-  const repo = new LocalRepository(repoOptions(dir, clock, {
+  const repo = makeRepo(repoOptions(dir, clock, {
     writeDocument: (file, text) => { if (failWrite) throw new Error('disk full'); writeFileSync(file, text) },
   }))
   await repo.load()
@@ -385,7 +390,7 @@ test('rejected commands persist idempotency without revision and catch-up emits 
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
   let yields = 0
-  const repo = new LocalRepository(repoOptions(dir, clock, { maxChunkTicks: 1, yieldToEventLoop: async () => { yields++ } }))
+  const repo = makeRepo(repoOptions(dir, clock, { maxChunkTicks: 1, yieldToEventLoop: async () => { yields++ } }))
   await repo.load()
   const start = repo.getDocument()
   const rejected = await repo.command({ type: 'admin.grantCheat', payload: { stat: 'yb', amount: 0 } }, 'op-rejected-rev', 'owner')
@@ -407,7 +412,7 @@ test('duplicate reset is idempotent and does not close/reopen again', async () =
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(dir, clock))
+  const repo = makeRepo(repoOptions(dir, clock))
   await repo.load()
   const first = await repo.reset('op-reset-duplicate')
   const coverageAfterFirst = repo.getDocument().bundle.engine.sessionCoverage
@@ -423,7 +428,7 @@ test('suspend closes normal coverage at heartbeat grace and projection callbacks
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
   let callbackProjection
-  const repo = new LocalRepository(repoOptions(dir, clock, { onProjection: value => { callbackProjection = value } }))
+  const repo = makeRepo(repoOptions(dir, clock, { onProjection: value => { callbackProjection = value } }))
   await repo.load()
   const projection = repo.getProjection()
   projection.shared.petInfo.yb = -1
@@ -445,7 +450,7 @@ test('flush and stop drain the serialized queue before final write', async () =>
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(dir, clock))
+  const repo = makeRepo(repoOptions(dir, clock))
   await repo.load()
   const startYb = repo.getProjection().shared.petInfo.yb
   const pending = repo.command({ type: 'admin.grantCheat', payload: { stat: 'yb', amount: 13 } }, 'op-drain', 'owner')
@@ -465,13 +470,13 @@ test('detach rollback snapshot restores active scheduler after restart and clear
   let starts = 0
   let stops = 0
   const startTimer = () => { starts++; return () => { stops++ } }
-  const first = new LocalRepository(repoOptions(dir, clock, { autoScheduler: true, startTimer }))
+  const first = makeRepo(repoOptions(dir, clock, { autoScheduler: true, startTimer }))
   await first.start()
   assert.equal(first.isSchedulerRunning(), true)
   await first.exportForDetach(2)
   assert.equal(first.isSchedulerRunning(), false)
   assert.ok(existsSync(join(dir, 'save.json.pre-detach.json')))
-  const restarted = new LocalRepository(repoOptions(dir, clock, { autoScheduler: true, startTimer }))
+  const restarted = makeRepo(repoOptions(dir, clock, { autoScheduler: true, startTimer }))
   await restarted.start()
   assert.equal(restarted.getStatus().readOnly, true)
   assert.equal(restarted.isSchedulerRunning(), false)
@@ -487,7 +492,7 @@ test('server handoff import rejects missing exact authority fields and stays rea
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(dir, clock))
+  const repo = makeRepo(repoOptions(dir, clock))
   await repo.load()
   const bundle = await repo.exportForDetach(1)
   bundle.authority.owner = 'server'
@@ -505,7 +510,7 @@ test('public setters/suspend are queued candidate mutations with write-failure r
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
   let failWrite = false
-  const repo = new LocalRepository(repoOptions(dir, clock, {
+  const repo = makeRepo(repoOptions(dir, clock, {
     writeDocument: (file, text) => { if (failWrite) throw new Error('write failed'); writeFileSync(file, text) },
   }))
   await repo.load()
@@ -531,7 +536,7 @@ test('recent event history persists across restart and aligns with eventSeq', as
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)
   const clock = { value: WALL_TIME_MS }
-  const repo = new LocalRepository(repoOptions(dir, clock))
+  const repo = makeRepo(repoOptions(dir, clock))
   await repo.load()
   await repo.command({ type: 'admin.grantCheat', payload: { stat: 'yb', amount: 9 } }, 'op-history', 'owner')
   const events = repo.getRecentEvents()
@@ -539,7 +544,7 @@ test('recent event history persists across restart and aligns with eventSeq', as
   const eventSeq = repo.getDocument().eventSeq
   assert.deepEqual(repo.getDocument().eventHistory, events)
   await repo.stop()
-  const restarted = new LocalRepository(repoOptions(dir, clock))
+  const restarted = makeRepo(repoOptions(dir, clock))
   await restarted.load()
   assert.equal(restarted.getDocument().eventSeq, eventSeq)
   assert.deepEqual(restarted.getRecentEvents(), events)
@@ -550,7 +555,7 @@ test('corrupt v2 and legacy JSON are backed up byte-for-byte before rejection', 
   const v2Dir = tempDir()
   const v2Path = join(v2Dir, 'save.json')
   writeFileSync(v2Path, '{broken-v2')
-  const v2Repo = new LocalRepository(repoOptions(v2Dir, { value: WALL_TIME_MS }))
+  const v2Repo = makeRepo(repoOptions(v2Dir, { value: WALL_TIME_MS }))
   assert.equal(await v2Repo.load(), null)
   assert.equal(readFileSync(v2Path + '.bak', 'utf8'), '{broken-v2')
   assert.match(v2Repo.getStatus().error, /not valid JSON/)
@@ -558,7 +563,7 @@ test('corrupt v2 and legacy JSON are backed up byte-for-byte before rejection', 
   const legacyDir = tempDir()
   const legacyPath = join(legacyDir, 'legacy.json')
   writeFileSync(legacyPath, '{broken-legacy')
-  const legacyRepo = new LocalRepository(repoOptions(legacyDir, { value: WALL_TIME_MS }))
+  const legacyRepo = makeRepo(repoOptions(legacyDir, { value: WALL_TIME_MS }))
   assert.equal(await legacyRepo.load(), null)
   assert.equal(readFileSync(legacyPath + '.bak', 'utf8'), '{broken-legacy')
   assert.match(legacyRepo.getStatus().error, /not valid JSON/)
@@ -588,6 +593,15 @@ test('local document schema validates full OpIdCache and event history shape', (
   const badKeys = JSON.parse(JSON.stringify(base))
   badKeys.eventHistory = [{ eventSeq: 1, type: 'pet.statsChanged', payload: {}, extra: true }]
   assert.equal(validateLocalPetDocumentV2(badKeys), false)
+  const badEventType = JSON.parse(JSON.stringify(base))
+  badEventType.eventHistory = [{ eventSeq: 1, type: 'unknown.event', payload: {} }]
+  assert.equal(validateLocalPetDocumentV2(badEventType), false)
+  const badErrorCode = JSON.parse(JSON.stringify(base))
+  badErrorCode.idempotency.records[0] = {
+    petId: 'p', deviceId: 'd', opId: 'o', commandType: 'pet.bury', resultPresent: false,
+    error: { code: 'unknown_error_code', message: 'bad', refreshProjection: false },
+  }
+  assert.equal(validateLocalPetDocumentV2(badErrorCode), false)
 })
 
 test('stop/export/suspend/resume preserve prior scheduler, status and coverage on persist failure', async () => {
@@ -597,7 +611,7 @@ test('stop/export/suspend/resume preserve prior scheduler, status and coverage o
   let failWrite = false
   let starts = 0
   const startTimer = () => { starts++; return () => {} }
-  const repo = new LocalRepository(repoOptions(dir, clock, {
+  const repo = makeRepo(repoOptions(dir, clock, {
     autoScheduler: true, startTimer,
     writeDocument: (file, text) => { if (failWrite) throw new Error('write failed'); writeFileSync(file, text) },
   }))
@@ -631,4 +645,51 @@ test('stop/export/suspend/resume preserve prior scheduler, status and coverage o
   assert.equal(repo.getStatus().state, 'ready')
   assert.equal(repo.isSchedulerRunning(), true)
   await repo.stop()
+})
+
+test('import clears stale local events and opIds and next events follow imported eventSeq', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  const repo = makeRepo(repoOptions(dir, clock))
+  await repo.load()
+  const oldCommand = { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 5 } }
+  await repo.command(oldCommand, 'op-before-import', 'owner')
+  assert.ok(repo.getRecentEvents().length > 0)
+  assert.ok(repo.getDocument().idempotency.records.some(record => record.opId === 'op-before-import'))
+  const bundle = repo.exportPortableBundle()
+  const imported = await repo.importPortableBundle(bundle, { opId: 'op-import-reset' })
+  assert.ok(imported)
+  assert.deepEqual(repo.getRecentEvents(), [])
+  assert.equal(repo.getDocument().idempotency.records.some(record => record.opId === 'op-before-import'), false)
+  assert.equal(repo.getDocument().idempotency.records.some(record => record.opId === 'op-import-reset'), true)
+  const importedSeq = repo.getDocument().eventSeq
+  const replayOld = await repo.command(oldCommand, 'op-before-import', 'owner')
+  assert.equal(replayOld.duplicate, false)
+  assert.ok(repo.getDocument().eventSeq > importedSeq)
+  const nextEvents = repo.getRecentEvents()
+  assert.ok(nextEvents.every(event => event.eventSeq > importedSeq))
+})
+
+test('direct constructor is fail-closed without the private activation token; factory rejects legacy authority', () => {
+  const dir = tempDir()
+  const options = repoOptions(dir, { value: WALL_TIME_MS })
+  assert.throws(() => new LocalRepository(options), /activation token required/)
+  assert.throws(() => createLocalRepository(options, { authorityState: 'legacy-active', rendererCapability: true, env: ACTIVATION_ENV }), /activation denied/)
+  assert.throws(() => createLocalRepository(options, { authorityState: 'local-v2-active', rendererCapability: false, env: ACTIVATION_ENV }), /activation denied/)
+})
+
+test('stopped repositories reject export and rollback without reviving', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  const repo = makeRepo(repoOptions(dir, clock))
+  await repo.load()
+  await repo.exportForDetach(1)
+  await repo.stop()
+  assert.equal(repo.getStatus().state, 'stopped')
+  await assert.rejects(repo.exportForDetach(), /stopped/)
+  await assert.rejects(repo.rollbackDetach(), /stopped/)
+  assert.equal(repo.getStatus().state, 'stopped')
+  assert.equal(repo.getStatus().readOnly, true)
 })

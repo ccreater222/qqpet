@@ -137,26 +137,29 @@ export interface ResultDataMap {
 
 export type ResultDataFor<K extends CommandKey> = K extends keyof ResultDataMap ? ResultDataMap[K] : JsonValue
 
-export type CommandErrorCode =
-  | 'invalid_payload'
-  | 'no_pet'
-  | 'pet_dead'
-  | 'paused'
-  | 'busy'
-  | 'insufficient_funds'
-  | 'insufficient_item'
-  | 'not_available'
-  | 'wrong_phase'
-  | 'already_claimed'
-  | 'cooldown'
-  | 'unauthorized'
-  | 'offline'
-  | 'server_catching_up'
-  | 'authority_not_active'
-  | 'authority_fork_risk'
-  | 'authority_reset_required'
-  | 'anchor_out_of_bounds'
-  | 'internal'
+export const COMMAND_ERROR_CODES = [
+  'invalid_payload',
+  'no_pet',
+  'pet_dead',
+  'paused',
+  'busy',
+  'insufficient_funds',
+  'insufficient_item',
+  'not_available',
+  'wrong_phase',
+  'already_claimed',
+  'cooldown',
+  'unauthorized',
+  'offline',
+  'server_catching_up',
+  'authority_not_active',
+  'authority_fork_risk',
+  'authority_reset_required',
+  'anchor_out_of_bounds',
+  'internal',
+] as const
+
+export type CommandErrorCode = (typeof COMMAND_ERROR_CODES)[number]
 
 export interface CommandError {
   code: CommandErrorCode

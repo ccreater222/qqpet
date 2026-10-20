@@ -30,6 +30,19 @@ export const DOMAIN_EVENT_TYPES = [
 
 export type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number]
 
+/** Ordered event types emitted by runtime hosts, including host/administration events. */
+export const ORDERED_EVENT_TYPES = [
+  ...DOMAIN_EVENT_TYPES,
+  'admin.grant',
+  'achievement.unlocked',
+  'island.letterAccepted',
+  'island.letterDelivered',
+  'island.newsRefreshed',
+  'server.changed',
+  'settings.changed',
+  'social.visitCompleted',
+] as const
+
 /** A domain event ordered by the committing host for wire/projection delivery. */
 export interface OrderedEvent<
   TType extends string = string,

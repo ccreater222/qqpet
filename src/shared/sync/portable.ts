@@ -17,7 +17,9 @@ import type {
 } from '../pet-runtime/types'
 import type { OpIdCache } from '../pet-runtime/idempotency'
 import type { OrderedDomainEvent } from '../pet-runtime/events'
+import { ORDERED_EVENT_TYPES } from '../pet-runtime/events'
 import { isCommandKey } from './command-validation'
+import { COMMAND_ERROR_CODES } from './protocol'
 import type { SaveData } from '../save'
 import type { DeviceLocalOverlay, SharedSaveData } from './data-boundary'
 import {
@@ -791,7 +793,7 @@ function assertLocalIdempotencyCache(value: unknown, path: string): void {
       requireRecord(record.error, path + '.records[].error')
       assertRequiredKeys(record.error, ['code', 'message', 'refreshProjection'], path + '.records[].error')
       assertOnlyKeys(record.error, ['code', 'message', 'refreshProjection', 'retryable'], path + '.records[].error')
-      assertNonEmptyString(record.error.code, path + '.records[].error.code')
+      if (typeof record.error.code !== 'string' || COMMAND_ERROR_CODES.includes(record.error.code as never) === false) failSchema('invalid_schema', path + '.records[].error.code', 'unknown command error code')
       assertNonEmptyString(record.error.message, path + '.records[].error.message')
       if (typeof record.error.refreshProjection !== 'boolean') failSchema('invalid_schema', path + '.records[].error.refreshProjection', 'expected boolean')
       if (record.error.retryable !== undefined && typeof record.error.retryable !== 'boolean') failSchema('invalid_schema', path + '.records[].error.retryable', 'expected boolean')
@@ -851,7 +853,7 @@ export function assertLocalPetDocumentV2(value: unknown): asserts value is Local
       requireNonNegativeInteger(event.eventSeq, '$.local.eventHistory[].eventSeq')
       if (event.eventSeq <= previousEventSeq || event.eventSeq <= 0) failSchema('invalid_schema', '$.local.eventHistory', 'event sequence must increase')
       previousEventSeq = event.eventSeq
-      if (typeof event.type !== 'string' || event.type.length === 0) failSchema('invalid_schema', '$.local.eventHistory[].type', 'expected event type')
+      if (typeof event.type !== 'string' || ORDERED_EVENT_TYPES.includes(event.type as never) === false) failSchema('invalid_schema', '$.local.eventHistory[].type', 'unknown ordered event type')
       requireRecord(event.payload, '$.local.eventHistory[].payload')
     }
     if (previousEventSeq > value.eventSeq) failSchema('invalid_schema', '$.local.eventHistory', 'event history exceeds document eventSeq')

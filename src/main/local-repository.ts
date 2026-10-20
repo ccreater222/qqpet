@@ -28,6 +28,7 @@ export const LOCAL_V2_ACTIVE_ENV_FLAG = 'QQPET_LOCAL_V2_ACTIVE'
 export const LOCAL_SCHEDULER_POLL_MS = 1000
 export const LOCAL_COVERAGE_GRACE_MS = 60_000
 export const LOCAL_REPOSITORY_ACTIVATION_DEFERRED_TO_C6 = true
+const LOCAL_REPOSITORY_ACTIVATION_TOKEN = Symbol('local-repository-activation')
 
 export type LocalRepositoryState = 'loading' | 'ready' | 'catching_up' | 'read_only' | 'handoff_pending' | 'suspended' | 'stopped'
 export type LocalRepositoryRole = CommandRole
@@ -92,6 +93,7 @@ export interface LocalRepositoryOptions {
   /** Set true when the caller still owns the legacy authority; activation then fails closed. */
   legacyAuthorityActive?: boolean
   rendererCapability?: boolean
+  authorityState?: 'legacy-active' | 'local-v2-active'
 }
 
 export interface LocalRepositoryCapability {
@@ -108,7 +110,7 @@ export function localRepositoryCapability(env: NodeJS.ProcessEnv = process.env, 
   if (env[LOCAL_V2_ACTIVE_ENV_FLAG] !== '1') return { flagEnabled, canActivate: false, activation, reason: 'c6_activation_missing' }
   if (rendererCapability === false) return { flagEnabled, canActivate: false, activation, reason: 'renderer_capability_missing' }
   if (legacyAuthorityActive) return { flagEnabled, canActivate: false, activation, reason: 'legacy_authority_active' }
-  return { flagEnabled, canActivate: true, activation, reason: undefined as never }
+  return { flagEnabled, canActivate: true, activation }
 }
 
 export interface LocalImportOptions {
@@ -150,6 +152,19 @@ export function normalizeLocalPetDocument(raw: unknown): LoadedDocument {
   return { document: { ...document, idempotency }, idempotency }
 }
 
+export interface LocalRepositoryActivation {
+  authorityState: 'legacy-active' | 'local-v2-active'
+  rendererCapability: boolean
+  env?: NodeJS.ProcessEnv
+}
+
+export function createLocalRepository(options: LocalRepositoryOptions, activation: LocalRepositoryActivation): LocalRepository {
+  const env = activation.env ?? process.env
+  const capability = localRepositoryCapability(env, activation.authorityState === 'legacy-active', activation.rendererCapability)
+  if (capability.canActivate === false) throw new Error('local repository activation denied: ' + (capability.reason ?? 'unknown'))
+  return new LocalRepository(options, LOCAL_REPOSITORY_ACTIVATION_TOKEN)
+}
+
 export class LocalRepository {
   private readonly options: Required<Pick<LocalRepositoryOptions, 'documentPath' | 'pollIntervalMs' | 'maxChunkTicks' | 'autoScheduler'>> & LocalRepositoryOptions
   private readonly now: () => number
@@ -173,7 +188,8 @@ export class LocalRepository {
   private yieldToEventLoop: () => Promise<void>
   private startTimer: (tick: () => void, intervalMs: number) => () => void
 
-  constructor(options: LocalRepositoryOptions) {
+  constructor(options: LocalRepositoryOptions, activationToken: symbol) {
+    if (activationToken !== LOCAL_REPOSITORY_ACTIVATION_TOKEN) throw new Error('LocalRepository activation token required')
     if (typeof options.documentPath !== 'string' || options.documentPath.length === 0) throw new Error('LocalRepository documentPath is required')
     this.options = {
       ...options,
@@ -354,6 +370,7 @@ export class LocalRepository {
 
   async exportForDetach(incomingEpoch: number = 0): Promise<PortablePetBundleV1> {
     return this.enqueue(async () => {
+      if (this.stopped || this.state === 'stopped') throw new Error('local repository is stopped')
       if (this.localDocument === null || this.hasActiveAuthority() === false) throw new Error('authority_not_active')
       if (Number.isSafeInteger(incomingEpoch) === false || incomingEpoch < 0) throw new Error('incomingEpoch must be a non-negative safe integer')
       const previous = cloneDocument(this.localDocument)
@@ -379,6 +396,7 @@ export class LocalRepository {
 
   async rollbackDetach(): Promise<LocalPetProjection | null> {
     return this.enqueue(async () => {
+      if (this.stopped || this.state === 'stopped') throw new Error('local repository is stopped')
       if (this.localDocument === null || this.localDocument.authority.state !== 'handoff_pending') return this.getProjection()
       if (this.detachRollback === null) this.detachRollback = this.loadDetachRollback()
       if (this.detachRollback === null) return this.getProjection()
@@ -449,7 +467,7 @@ export class LocalRepository {
         candidate.eventHistory = []
         candidate.idempotency = {
           schemaVersion: OP_ID_CACHE_SCHEMA_VERSION,
-          records: [...(candidate.idempotency || emptyOpIdCache()).records, this.importRecord(opId, stamp)],
+          records: [this.importRecord(opId, stamp)],
         }
 
         this.backup(this.options.documentBackupPath || this.options.documentPath + '.bak', this.options.documentPath)
@@ -458,6 +476,7 @@ export class LocalRepository {
         this.idempotency = candidate.idempotency ?? emptyOpIdCache()
         this.openCoverageId = hostCoverage.coverageId
         this.lastReopenValue = importedEngine.coverageReopen
+        this.events = (candidate.eventHistory ?? []).slice(-512)
         this.state = 'ready'
         this.error = undefined
         this.startScheduler()
@@ -829,8 +848,9 @@ export function localRepositoryEnabled(env: NodeJS.ProcessEnv = process.env): bo
 }
 
 export function startLocalRepositoryIfEnabled(options: LocalRepositoryOptions, env: NodeJS.ProcessEnv = process.env): LocalRepository | null {
-  if (localRepositoryCapability(env, options.legacyAuthorityActive, options.rendererCapability === true).canActivate === false) return null
-  const repository = new LocalRepository(options)
+  if (options.authorityState === undefined) return null
+  if (localRepositoryCapability(env, options.authorityState === 'legacy-active', options.rendererCapability === true).canActivate === false) return null
+  const repository = createLocalRepository(options, { authorityState: options.authorityState, rendererCapability: options.rendererCapability === true, env })
   void repository.start()
   return repository
 }
@@ -844,8 +864,9 @@ export interface LocalRepositoryLifecycleEvents {
  * C6 renderer wiring is deliberately deferred; src/main/index.ts remains legacy-only,
  * so this helper cannot create a second authority in the current app. */
 export function registerLocalRepositoryLifecycle(options: LocalRepositoryOptions, events: LocalRepositoryLifecycleEvents, env: NodeJS.ProcessEnv = process.env): LocalRepository | null {
-  if (localRepositoryCapability(env, options.legacyAuthorityActive, options.rendererCapability === true).canActivate === false) return null
-  const repository = new LocalRepository(options)
+  if (options.authorityState === undefined) return null
+  if (localRepositoryCapability(env, options.authorityState === 'legacy-active', options.rendererCapability === true).canActivate === false) return null
+  const repository = createLocalRepository(options, { authorityState: options.authorityState, rendererCapability: options.rendererCapability === true, env })
   events.onReady(() => { void repository.start() })
   events.onQuit(async () => { await repository.flush(); await repository.stop() })
   return repository
