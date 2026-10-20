@@ -82,10 +82,14 @@ function validateRecord(value: unknown): asserts value is IdempotencyRecord {
   validateBoundedString(record.deviceId, 'idempotency deviceId')
   validateOpId(record.opId)
   if (typeof record.commandType !== 'string' || isCommandKey(record.commandType) === false) reject('invalid_payload', 'invalid idempotency commandType')
-  if (record.result !== undefined) {
+  const hasResult = Object.prototype.hasOwnProperty.call(record, 'result')
+  const hasError = Object.prototype.hasOwnProperty.call(record, 'error')
+  if (hasResult === hasError) reject('invalid_payload', 'idempotency record must contain exactly one of result or error')
+  if (hasResult) {
+    if (record.result === undefined) reject('invalid_payload', 'idempotency result must be present')
     try { stableStringify(record.result) } catch { reject('invalid_payload', 'idempotency result is not JSON-safe') }
   }
-  if (record.error !== undefined) validateError(record.error)
+  if (hasError) validateError(record.error)
 }
 
 export function emptyOpIdCache(): OpIdCache {
@@ -181,7 +185,7 @@ export function executeCommandIdempotent(
   }
   const outcome = executeCommand(document.engine, command, ctx)
   const record: IdempotencyRecord = outcome.ok
-    ? { petId, deviceId, opId, commandType: command.type, ...(outcome.result === undefined ? {} : { result: outcome.result }) }
+    ? { petId, deviceId, opId, commandType: command.type, result: outcome.result === undefined ? null : outcome.result }
     : { petId, deviceId, opId, commandType: command.type, error: outcome.error }
   return {
     duplicate: false,

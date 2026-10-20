@@ -33,6 +33,8 @@ const {
   serializePersistedRuntimeState,
   deserializePersistedRuntimeState,
   validatePersistedRuntimeState,
+  validateOpIdCache,
+  OP_ID_CACHE_SCHEMA_VERSION,
   C3_COMMAND_TYPES,
   C4A_COMMAND_TYPES,
   C4B_COMMAND_TYPES,
@@ -1189,4 +1191,34 @@ test('serialized executor queues concurrent callers and applies one duplicate-pr
   assert.equal(second.duplicate, true)
   assert.equal(executor.snapshot().engine.save.petInfo.yb, base.save.petInfo.yb + 50)
   assert.equal(executor.snapshot().idempotency.records.length, 1)
+})
+
+
+test('idempotency records require exactly one of result or error and preserve replay payloads', () => {
+  const base = baseState()
+  const document = createPersistedRuntimeState(base)
+  const error = { code: 'invalid_payload', message: 'bad', refreshProjection: false }
+  const resultRecord = { petId: 'pet-x', deviceId: 'device-x', opId: 'op-result', commandType: 'admin.grantCheat', result: { ok: true } }
+  const errorRecord = { petId: 'pet-x', deviceId: 'device-x', opId: 'op-error', commandType: 'admin.grantCheat', error }
+  const resultCache = { schemaVersion: OP_ID_CACHE_SCHEMA_VERSION, records: [resultRecord] }
+  const errorCache = { schemaVersion: OP_ID_CACHE_SCHEMA_VERSION, records: [errorRecord] }
+  validateOpIdCache(resultCache)
+  validateOpIdCache(errorCache)
+  validatePersistedRuntimeState({ ...document, idempotency: resultCache })
+  validatePersistedRuntimeState({ ...document, idempotency: errorCache })
+  const bothRecord = { ...resultRecord, error }
+  const bothCache = { schemaVersion: OP_ID_CACHE_SCHEMA_VERSION, records: [bothRecord] }
+  assert.throws(() => validateOpIdCache(bothCache))
+  assert.throws(() => validatePersistedRuntimeState({ ...document, idempotency: bothCache }))
+  const neitherCache = { schemaVersion: OP_ID_CACHE_SCHEMA_VERSION, records: [{ ...resultRecord, result: undefined }] }
+  assert.throws(() => validateOpIdCache(neitherCache))
+
+  const cheat = executeCommandIdempotent('pet-x', 'device-x', document, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 10 } }, context(base, { actorRole: 'owner' }), 'op-replay-result')
+  const cheatRetry = executeCommandIdempotent('pet-x', 'device-x', cheat.document, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 10 } }, context(cheat.document.engine, { actorRole: 'owner' }), 'op-replay-result')
+  assert.deepEqual(cheatRetry.outcome.result, cheat.outcome.result)
+  assert.equal(Object.prototype.hasOwnProperty.call(cheatRetry.outcome, 'result'), true)
+  const rejected = executeCommandIdempotent('pet-x', 'device-x', document, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 0 } }, context(base, { actorRole: 'owner' }), 'op-replay-error')
+  const rejectedRetry = executeCommandIdempotent('pet-x', 'device-x', rejected.document, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 0 } }, context(rejected.document.engine, { actorRole: 'owner' }), 'op-replay-error')
+  assert.deepEqual(rejectedRetry.outcome.error, rejected.outcome.error)
+  assert.equal(Object.prototype.hasOwnProperty.call(rejectedRetry.outcome, 'error'), true)
 })
