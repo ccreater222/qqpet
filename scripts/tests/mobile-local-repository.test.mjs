@@ -23,7 +23,7 @@ const { createAtomicV2Storage } = await import('../../src/shared/local-repositor
 const { androidLocalRepositoryStorage } = await import('../../src/android/local-repository-storage.ts')
 const { harmonyLocalRepositoryStorage } = await import('../../src/harmony/local-repository-storage.ts')
 const { iosLocalRepositoryStorage } = await import('../../src/ios/local-repository-storage.ts')
-const { createMobileLocalRepositoryBridge } = await import('../../src/mobile/local-repository-bridge.ts')
+const { createMobileLocalRepositoryBridge, mobileLocalRepositoryCapability } = await import('../../src/mobile/local-repository-bridge.ts')
 const { validateLocalPetDocumentV2 } = await import('../../src/shared/sync/portable.ts')
 const { validatePersistedRuntimeState } = await import('../../src/shared/pet-runtime/idempotency.ts')
 const { sessionActivityForInterval } = await import('../../src/shared/pet-runtime/coverage.ts')
@@ -38,7 +38,12 @@ function memoryFiles(initial = {}) {
     kind: 'mock-file',
     atomicDocument: true,
     backup: true,
-    async read(name) { return files.has(name) ? files.get(name) : null },
+    async readState(name) {
+      return { status: 'ok', text: files.has(name) ? files.get(name) : null }
+    },
+    async readLegacy() {
+      return { status: 'ok', text: files.has('save.json') ? files.get('save.json') : null }
+    },
     async writeAtomic(name, text) { files.set(name, text); writes.push(name) },
   }
   return { files, writes, host, storage: createAtomicV2Storage(host) }
@@ -248,7 +253,8 @@ test('Android, Harmony and iOS storage adapters all drive the same v2 host', asy
   cases.push({
     name: 'android-native-file',
     storage: androidLocalRepositoryStorage({
-      readStateFile: name => androidFiles.has(name) ? androidFiles.get(name) : null,
+      readStateFile: name => JSON.stringify({ status: 'ok', text: androidFiles.has(name) ? androidFiles.get(name) : null }),
+      readLegacySave: () => JSON.stringify({ status: 'ok', text: androidFiles.has('save.json') ? androidFiles.get('save.json') : null }),
       writeAtomic: (name, text) => { androidFiles.set(name, text); return true },
     }),
     files: androidFiles,
@@ -257,7 +263,8 @@ test('Android, Harmony and iOS storage adapters all drive the same v2 host', asy
   cases.push({
     name: 'harmony-native-file',
     storage: harmonyLocalRepositoryStorage({
-      readStateFile: name => harmonyFiles.has(name) ? harmonyFiles.get(name) : null,
+      readStateFile: name => JSON.stringify({ status: 'ok', text: harmonyFiles.has(name) ? harmonyFiles.get(name) : null }),
+      readLegacySave: () => JSON.stringify({ status: 'ok', text: harmonyFiles.has('save.json') ? harmonyFiles.get('save.json') : null }),
       writeAtomic: (name, text) => { harmonyFiles.set(name, text); return true },
     }),
     files: harmonyFiles,
@@ -267,7 +274,8 @@ test('Android, Harmony and iOS storage adapters all drive the same v2 host', asy
     name: 'ios-save-bridge',
     storage: iosLocalRepositoryStorage({
       async request(op, args) {
-        if (op === 'readLocalStateFile') return iosFiles.has(args.name) ? iosFiles.get(args.name) : null
+        if (op === 'readLocalStateFile') return { status: 'ok', text: iosFiles.has(args.name) ? iosFiles.get(args.name) : null }
+        if (op === 'readLegacySave') return { status: 'ok', text: iosFiles.has('save.json') ? iosFiles.get('save.json') : null }
         if (op === 'writeLocalStateFileAtomic') { iosFiles.set(args.name, args.text); return true }
         throw new Error('unexpected RPC ' + op)
       },
@@ -302,6 +310,7 @@ test('mobile bridge exposes only flag-gated local APIs and fans out projection/s
   const bridge = createMobileLocalRepositoryBridge({
     storage: memory.storage,
     devRuntimeFlag: true,
+    rendererCapability: true,
     nowMs: () => clock.value,
     randomUUID: ids(),
     seedHex: SEED,
@@ -389,8 +398,18 @@ test('activation capability fails closed without flag, storage atomicity/backup,
       capability: { ...memory.storage.capability, atomicDocument: false },
     },
     devRuntimeFlag: true,
+    rendererCapability: true,
     autoScheduler: false,
   }), /local runtime v2 unavailable: storage_atomic_write_missing/)
+  assert.equal(mobileLocalRepositoryCapability({
+    storage: memory.storage,
+    devRuntimeFlag: true,
+  }).reason, 'renderer_capability_missing')
+  assert.throws(() => createMobileLocalRepositoryBridge({
+    storage: memory.storage,
+    devRuntimeFlag: true,
+    autoScheduler: false,
+  }), /local runtime v2 unavailable: renderer_capability_missing/)
 })
 
 test('mobile local host parity: same command and scheduler sequence as desktop LocalRepository', async () => {
@@ -463,8 +482,13 @@ test('mobile bundles gate v2 explicitly, hide server mode, and never import serv
     assert.match(source, /VITE_QQPET_LOCAL_RUNTIME_V2/, relative)
     assert.match(source, /serverMode:\s*false/, relative)
     assert.match(source, /localRepositoryV2/, relative)
+    assert.match(source, /rendererCapability:\s*true/, relative)
     assert.match(source, /legacyV2DocumentPresent/, relative)
     assert.match(source, /legacyAuthorityDisabled/, relative)
+    assert.match(source, /exportPortableBundleJson/, relative)
+    assert.match(source, /importPortableBundleJson/, relative)
+    assert.match(source, /QQPet-portable-/, relative)
+    assert.doesNotMatch(source, /legacy save (?:export|import) is disabled while local runtime v2 is enabled/, relative)
     assert.doesNotMatch(source, /RemoteRepository|new WebSocket|wss:\/\//, relative)
   }
   const core = readFileSync(new URL('src/shared/local-repository/host.ts', root), 'utf8')
@@ -477,10 +501,52 @@ test('mobile bundles gate v2 explicitly, hide server mode, and never import serv
   assert.match(nativeRuntime, /localRuntimeV2Storage/)
   const androidNative = readFileSync(new URL('android/app/src/main/java/net/ankio/qqpet/PetService.kt', root), 'utf8')
   assert.match(androidNative, /readStateFile/)
+  assert.match(androidNative, /readLegacySave/)
   assert.match(androidNative, /ATOMIC_MOVE/)
+  assert.match(androidNative, /"status", "error"/)
+  const androidAllowlist = androidNative.slice(
+    androidNative.indexOf('private fun allowedStateName'),
+    androidNative.indexOf('private fun stateFile'),
+  )
+  assert.match(androidAllowlist, /save\.v2\.json/)
+  assert.match(androidAllowlist, /save\.v2\.json\.bak/)
+  assert.match(androidAllowlist, /save\.json\.bak/)
+  assert.match(androidAllowlist, /save\.v2\.json\.corrupt-/)
+  assert.doesNotMatch(androidAllowlist, /"save\.json"/)
+
   const harmonyNative = readFileSync(new URL('harmony/entry/src/main/ets/pet/Native.ets', root), 'utf8')
   assert.match(harmonyNative, /readStateFile/)
+  assert.match(harmonyNative, /readLegacySave/)
   assert.match(harmonyNative, /writeAtomic/)
+  assert.match(harmonyNative, /this\.okRead\(null\)/)
+  assert.match(harmonyNative, /this\.errorRead/)
+  assert.match(harmonyNative, /fs\.accessSync\(path\)/)
+  assert.match(harmonyNative, /fs\.fsyncSync\(file\.fd\)/)
+  assert.match(harmonyNative, /fs\.fsyncSync\(parent\.fd\)/)
+  const harmonyAllowlist = harmonyNative.slice(
+    harmonyNative.indexOf('private validStateName'),
+    harmonyNative.indexOf('private okRead'),
+  )
+  assert.match(harmonyAllowlist, /save\.v2\.json/)
+  assert.match(harmonyAllowlist, /save\.v2\.json\.bak/)
+  assert.match(harmonyAllowlist, /save\.json\.bak/)
+  assert.match(harmonyAllowlist, /save\.v2\.json\.corrupt-/)
+  assert.doesNotMatch(harmonyAllowlist, /'save\.json'/)
+
+  assert.match(nativeRuntime, /QPLocalReadOK\(nil\)/)
+  assert.match(nativeRuntime, /QPLocalReadError/)
+  assert.match(nativeRuntime, /QPLocalReadFile\(\[self\.state path:name\]\)/)
+  assert.match(nativeRuntime, /QPLegacySaveReadResult/)
+  assert.match(nativeRuntime, /readLegacySave/)
+  const iosAllowlist = nativeRuntime.slice(
+    nativeRuntime.indexOf('static BOOL QPLocalStateName'),
+    nativeRuntime.indexOf('static CGRect QPBox'),
+  )
+  assert.match(iosAllowlist, /save\.v2\.json/)
+  assert.match(iosAllowlist, /save\.v2\.json\.bak/)
+  assert.match(iosAllowlist, /save\.json\.bak/)
+  assert.match(iosAllowlist, /save\.v2\.json\.corrupt-/)
+  assert.doesNotMatch(iosAllowlist, /@"save\.json"/)
 })
 
 test('rejected commands persist idempotency without revision and duplicate retries do not reapply', async () => {
@@ -707,5 +773,365 @@ test('catch-up yields between bounded chunks and commits one revision per chunk'
   assert.equal(host.getProjection().gameTimeMs, started.gameTimeMs + 2 * 60_000)
   assert.ok(yields >= 1)
   assert.ok(host.getDocument().revision >= revision + 2)
+  await host.stop()
+})
+
+test('opId replay requires active authority, matching scope and matching command type', async () => {
+  const memory = memoryFiles({ 'save.json': JSON.stringify(fixtures.save) })
+  const clock = { value: WALL_TIME_MS }
+  const host = hostFor(memory, clock)
+  await host.start()
+  const first = await host.command(
+    { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 4 } },
+    { opId: 'op-conflict', role: 'owner' },
+  )
+  assert.equal(first.status, 'applied')
+  const revision = host.getDocument().revision
+  const conflict = await host.command(
+    { type: 'pet.cheer', payload: {} },
+    { opId: 'op-conflict', role: 'owner' },
+  )
+  assert.equal(conflict.status, 'rejected')
+  assert.equal(conflict.error.code, 'op_id_conflict')
+  assert.equal(host.getDocument().revision, revision)
+  assert.equal(host.getDocument().idempotency.records.filter(record => record.opId === 'op-conflict').length, 1)
+  await host.stop()
+
+  const scoped = JSON.parse(memory.files.get('save.v2.json'))
+  scoped.idempotency.records[0].petId = 'another-pet-scope'
+  memory.files.set('save.v2.json', JSON.stringify(scoped))
+  const scopedHost = hostFor(memory, clock)
+  await scopedHost.start()
+  const scopeConflict = await scopedHost.command(
+    { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 4 } },
+    { opId: 'op-conflict', role: 'owner' },
+  )
+  assert.equal(scopeConflict.status, 'rejected')
+  assert.equal(scopeConflict.error.code, 'op_id_conflict')
+  assert.equal(scopedHost.getDocument().idempotency.records[0].petId, 'another-pet-scope')
+  await scopedHost.stop()
+
+  const readOnlyDocument = JSON.parse(memory.files.get('save.v2.json'))
+  readOnlyDocument.authority.state = 'handoff_pending'
+  memory.files.set('save.v2.json', JSON.stringify(readOnlyDocument))
+  const readOnlyHost = hostFor(memory, clock)
+  assert.ok(await readOnlyHost.load())
+  assert.equal(readOnlyHost.getStatus().readOnly, true)
+  const blocked = await readOnlyHost.command(
+    { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 4 } },
+    { opId: 'op-conflict', role: 'owner' },
+  )
+  assert.equal(blocked.status, 'rejected')
+  assert.equal(blocked.error.code, 'authority_not_active')
+  assert.notEqual(blocked.status, 'duplicate')
+})
+
+test('event history persists commit revision and game time across restart', async () => {
+  const memory = memoryFiles({ 'save.json': JSON.stringify(fixtures.save) })
+  const clock = { value: WALL_TIME_MS }
+  const host = hostFor(memory, clock)
+  await host.start()
+  await host.command(
+    { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 6 } },
+    { opId: 'op-event-metadata', role: 'owner' },
+  )
+  clock.value += 2 * 60_000
+  await host.pump()
+  const before = host.getRecentEvents()
+  assert.ok(before.length > 0)
+  assert.equal(before.every(event => Number.isSafeInteger(event.revision) && Number.isSafeInteger(event.gameTimeMs)), true)
+  const stored = JSON.parse(memory.files.get('save.v2.json')).eventHistory
+  assert.deepEqual(
+    stored.map(event => ({ eventSeq: event.eventSeq, revision: event.revision, gameTimeMs: event.gameTimeMs, type: event.type, payload: event.payload })),
+    before.map(event => ({ eventSeq: event.eventSeq, revision: event.revision, gameTimeMs: event.gameTimeMs, type: event.type, payload: event.payload })),
+  )
+  await host.stop()
+  const restarted = hostFor(memory, clock)
+  await restarted.start()
+  assert.deepEqual(restarted.getRecentEvents(), before)
+  await restarted.stop()
+})
+
+test('valid v2 documents lacking idempotency or event metadata are backed up before rewrite', async () => {
+  const memory = memoryFiles({ 'save.json': JSON.stringify(fixtures.save) })
+  const clock = { value: WALL_TIME_MS }
+  const first = hostFor(memory, clock)
+  await first.start()
+  await first.command(
+    { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 8 } },
+    { opId: 'op-before-metadata-migration', role: 'owner' },
+  )
+  await first.stop()
+  const oldDocument = JSON.parse(memory.files.get('save.v2.json'))
+  oldDocument.eventHistory = oldDocument.eventHistory.map(event => ({
+    eventSeq: event.eventSeq,
+    type: event.type,
+    payload: event.payload,
+  }))
+  delete oldDocument.idempotency
+  const oldText = JSON.stringify(oldDocument, null, 2)
+  memory.files.set('save.v2.json', oldText)
+  const migrated = hostFor(memory, clock)
+  assert.ok(await migrated.start(), migrated.getStatus().error)
+  assert.equal(memory.files.get('save.v2.json.bak'), oldText)
+  const rewritten = JSON.parse(memory.files.get('save.v2.json'))
+  assert.equal(rewritten.idempotency.schemaVersion, 2)
+  assert.equal(rewritten.eventHistory.every(event => Number.isSafeInteger(event.revision) && Number.isSafeInteger(event.gameTimeMs)), true)
+  await migrated.stop()
+})
+
+test('portable bundle export/import atomically restores engine state with a pre-import backup', async () => {
+  const memory = memoryFiles({ 'save.json': JSON.stringify(fixtures.save) })
+  const clock = { value: WALL_TIME_MS }
+  const host = hostFor(memory, clock)
+  await host.start()
+  await host.command(
+    { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 5 } },
+    { opId: 'op-export-state', role: 'owner' },
+  )
+  const exported = host.exportPortableBundleJson()
+  assert.ok(exported)
+  const parsed = JSON.parse(exported)
+  assert.equal(parsed.format, 'qqpet-portable-v1')
+  assert.equal(typeof parsed.shared.petInfo.yb, 'number')
+  const ybAtExport = parsed.shared.petInfo.yb
+  await host.command(
+    { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 30 } },
+    { opId: 'op-import-replaces', role: 'owner' },
+  )
+  const beforeImportText = memory.files.get('save.v2.json')
+  const beforeImport = JSON.parse(beforeImportText)
+  const imported = await host.importPortableBundle(exported, { opId: 'op-import-bundle' })
+  assert.equal(imported.shared.petInfo.yb, ybAtExport)
+  assert.equal(imported.authority.stamp.epoch, beforeImport.authority.stamp.epoch + 1)
+  assert.equal(memory.files.get('save.v2.json.bak'), beforeImportText)
+  const document = host.getDocument()
+  assert.equal(document.idempotency.records.some(record => record.opId === 'op-import-bundle' && record.commandType === 'admin.importPortableBundle'), true)
+  assert.equal(document.bundle.engine.sessionCoverage.filter(interval => interval.disconnectedAtWallMs === undefined).length, 1)
+  assert.equal(document.bundle.engine.sessionCoverage.every(interval => interval.deviceId === host.currentDeviceId), true)
+  assert.equal(document.bundle.engine.coverageReopen, undefined)
+  assert.deepEqual(host.getRecentEvents(), [])
+  const duplicate = await host.importPortableBundle(exported, { opId: 'op-import-bundle' })
+  assert.equal(duplicate.revision, imported.revision)
+  await host.stop()
+})
+
+test('failed portable import leaves the existing v2 document and projection unchanged', async () => {
+  const memory = memoryFiles({ 'save.json': JSON.stringify(fixtures.save) })
+  const clock = { value: WALL_TIME_MS }
+  const host = hostFor(memory, clock)
+  await host.start()
+  const beforeText = memory.files.get('save.v2.json')
+  const before = host.getProjection()
+  await assert.rejects(host.importPortableBundle('{not-json', { opId: 'op-bad-import' }), /not valid JSON/)
+  assert.equal(memory.files.get('save.v2.json'), beforeText)
+  assert.deepEqual(host.getProjection(), before)
+  assert.equal(host.getStatus().state, 'ready')
+  await host.stop()
+})
+
+test('portable export/import bridge round-trip works through Android, Harmony and iOS storage adapters', async () => {
+  const cases = []
+  const androidFiles = new Map([['save.json', JSON.stringify(fixtures.save)]])
+  cases.push({
+    name: 'android',
+    storage: androidLocalRepositoryStorage({
+      readStateFile: name => JSON.stringify({ status: 'ok', text: androidFiles.has(name) ? androidFiles.get(name) : null }),
+      readLegacySave: () => JSON.stringify({ status: 'ok', text: androidFiles.has('save.json') ? androidFiles.get('save.json') : null }),
+      writeAtomic: (name, text) => { androidFiles.set(name, text); return true },
+    }),
+    files: androidFiles,
+  })
+  const harmonyFiles = new Map([['save.json', JSON.stringify(fixtures.save)]])
+  cases.push({
+    name: 'harmony',
+    storage: harmonyLocalRepositoryStorage({
+      readStateFile: name => JSON.stringify({ status: 'ok', text: harmonyFiles.has(name) ? harmonyFiles.get(name) : null }),
+      readLegacySave: () => JSON.stringify({ status: 'ok', text: harmonyFiles.has('save.json') ? harmonyFiles.get('save.json') : null }),
+      writeAtomic: (name, text) => { harmonyFiles.set(name, text); return true },
+    }),
+    files: harmonyFiles,
+  })
+  const iosFiles = new Map([['save.json', JSON.stringify(fixtures.save)]])
+  cases.push({
+    name: 'ios',
+    storage: iosLocalRepositoryStorage({
+      async request(op, args) {
+        if (op === 'readLocalStateFile') return { status: 'ok', text: iosFiles.has(args.name) ? iosFiles.get(args.name) : null }
+        if (op === 'readLegacySave') return { status: 'ok', text: iosFiles.has('save.json') ? iosFiles.get('save.json') : null }
+        if (op === 'writeLocalStateFileAtomic') { iosFiles.set(args.name, args.text); return true }
+        throw new Error('unexpected RPC ' + op)
+      },
+    }),
+    files: iosFiles,
+  })
+  for (const entry of cases) {
+    const clock = { value: WALL_TIME_MS }
+    const bridge = createMobileLocalRepositoryBridge({
+      storage: entry.storage,
+      devRuntimeFlag: true,
+      rendererCapability: true,
+      nowMs: () => clock.value,
+      randomUUID: ids(),
+      seedHex: SEED,
+      timeZone: 'Asia/Shanghai',
+      localDeviceId: 'bridge-import-device-' + entry.name,
+      appInstanceId: 'bridge-import-app-' + entry.name,
+      autoScheduler: false,
+    })
+    const initial = await bridge.load()
+    await bridge.command(
+      { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 7 } },
+      { opId: 'bridge-export-op-' + entry.name },
+    )
+    const firstState = bridge.getProjection().shared.petInfo.yb
+    const exported = await bridge.exportPortableBundleJson()
+    assert.equal(JSON.parse(exported).format, 'qqpet-portable-v1', entry.name)
+    await bridge.command(
+      { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 23 } },
+      { opId: 'bridge-after-export-op-' + entry.name },
+    )
+    assert.equal(bridge.getProjection().shared.petInfo.yb, firstState + 23, entry.name)
+    const beforeImport = entry.files.get('save.v2.json')
+    const restored = await bridge.importPortableBundleJson(exported)
+    assert.equal(restored.petInfo.yb, firstState, entry.name)
+    assert.equal(bridge.getProjection().shared.petInfo.yb, firstState, entry.name)
+    assert.equal(entry.files.get('save.v2.json.bak'), beforeImport, entry.name)
+    assert.equal(initial.havePet, true)
+    await bridge.stop()
+  }
+})
+
+test('state read errors are not treated as missing and never overwrite existing v2 bytes', async () => {
+  const cases = []
+  {
+    const files = new Map([['save.v2.json', '{"existing":true}']])
+    let writes = 0
+    cases.push({
+      name: 'android',
+      files,
+      writes: () => writes,
+      storage: androidLocalRepositoryStorage({
+        readStateFile: name => name === 'save.v2.json'
+          ? JSON.stringify({ status: 'error', error: 'EACCES state unreadable' })
+          : JSON.stringify({ status: 'ok', text: files.has(name) ? files.get(name) : null }),
+        readLegacySave: () => JSON.stringify({ status: 'ok', text: files.has('save.json') ? files.get('save.json') : null }),
+        writeAtomic: (name, text) => { writes += 1; files.set(name, text); return true },
+      }),
+    })
+  }
+  {
+    const files = new Map([['save.v2.json', '{"existing":true}']])
+    let writes = 0
+    cases.push({
+      name: 'harmony',
+      files,
+      writes: () => writes,
+      storage: harmonyLocalRepositoryStorage({
+        readStateFile: name => name === 'save.v2.json'
+          ? JSON.stringify({ status: 'error', error: 'EACCES state unreadable' })
+          : JSON.stringify({ status: 'ok', text: files.has(name) ? files.get(name) : null }),
+        readLegacySave: () => JSON.stringify({ status: 'ok', text: files.has('save.json') ? files.get('save.json') : null }),
+        writeAtomic: (name, text) => { writes += 1; files.set(name, text); return true },
+      }),
+    })
+  }
+  {
+    const files = new Map([['save.v2.json', '{"existing":true}']])
+    let writes = 0
+    cases.push({
+      name: 'ios',
+      files,
+      writes: () => writes,
+      storage: iosLocalRepositoryStorage({
+        async request(op, args) {
+          if (op === 'readLocalStateFile') return args.name === 'save.v2.json'
+            ? { status: 'error', error: 'EACCES state unreadable' }
+            : { status: 'ok', text: files.has(args.name) ? files.get(args.name) : null }
+          if (op === 'readLegacySave') return { status: 'ok', text: files.has('save.json') ? files.get('save.json') : null }
+          if (op === 'writeLocalStateFileAtomic') { writes += 1; files.set(args.name, args.text); return true }
+          throw new Error('unexpected RPC ' + op)
+        },
+      }),
+    })
+  }
+  for (const entry of cases) {
+    const clock = { value: WALL_TIME_MS }
+    const host = hostFor({ storage: entry.storage }, clock)
+    assert.equal(await host.start(), null, entry.name)
+    assert.equal(host.getStatus().state, 'read_only', entry.name)
+    assert.match(host.getStatus().error, /EACCES state unreadable/, entry.name)
+    assert.equal(entry.files.get('save.v2.json'), '{"existing":true}', entry.name)
+    assert.equal(entry.writes(), 0, entry.name)
+  }
+})
+
+test('legacy read errors do not create a fresh v2 document', async () => {
+  const cases = []
+  {
+    const files = new Map([['save.json', '{"existing":true}']])
+    let writes = 0
+    cases.push({
+      name: 'android',
+      writes: () => writes,
+      storage: androidLocalRepositoryStorage({
+        readStateFile: name => JSON.stringify({ status: 'ok', text: files.has(name) ? files.get(name) : null }),
+        readLegacySave: () => JSON.stringify({ status: 'error', error: 'EACCES legacy unreadable' }),
+        writeAtomic: (name, text) => { writes += 1; files.set(name, text); return true },
+      }),
+    })
+  }
+  {
+    const files = new Map([['save.json', '{"existing":true}']])
+    let writes = 0
+    cases.push({
+      name: 'harmony',
+      writes: () => writes,
+      storage: harmonyLocalRepositoryStorage({
+        readStateFile: name => JSON.stringify({ status: 'ok', text: files.has(name) ? files.get(name) : null }),
+        readLegacySave: () => JSON.stringify({ status: 'error', error: 'EACCES legacy unreadable' }),
+        writeAtomic: (name, text) => { writes += 1; files.set(name, text); return true },
+      }),
+    })
+  }
+  {
+    const files = new Map([['save.json', '{"existing":true}']])
+    let writes = 0
+    cases.push({
+      name: 'ios',
+      writes: () => writes,
+      storage: iosLocalRepositoryStorage({
+        async request(op, args) {
+          if (op === 'readLocalStateFile') return { status: 'ok', text: files.has(args.name) ? files.get(args.name) : null }
+          if (op === 'readLegacySave') return { status: 'error', error: 'EACCES legacy unreadable' }
+          if (op === 'writeLocalStateFileAtomic') { writes += 1; files.set(args.name, args.text); return true }
+          throw new Error('unexpected RPC ' + op)
+        },
+      }),
+    })
+  }
+  for (const entry of cases) {
+    const clock = { value: WALL_TIME_MS }
+    const host = hostFor({ storage: entry.storage }, clock)
+    assert.equal(await host.start(), null, entry.name)
+    assert.equal(host.getStatus().state, 'read_only', entry.name)
+    assert.match(host.getStatus().error, /EACCES legacy unreadable/, entry.name)
+    assert.equal(entry.writes(), 0, entry.name)
+  }
+})
+
+test('portable import migrates a bare legacy save through the same backup/atomic path', async () => {
+  const memory = memoryFiles({ 'save.json': JSON.stringify(fixtures.save) })
+  const clock = { value: WALL_TIME_MS }
+  const host = hostFor(memory, clock)
+  await host.start()
+  const beforeText = memory.files.get('save.v2.json')
+  const imported = await host.importPortableBundle(JSON.stringify(fixtures.save), { opId: 'op-import-bare-save' })
+  assert.equal(imported.shared.havePet, fixtures.save.havePet)
+  assert.equal(memory.files.get('save.v2.json.bak'), beforeText)
+  const document = host.getDocument()
+  assert.equal(document.bundle.format, 'qqpet-portable-v1')
+  assert.equal(document.idempotency.records[0].opId, 'op-import-bare-save')
+  assert.equal(document.bundle.engine.sessionCoverage.filter(interval => interval.disconnectedAtWallMs === undefined).length, 1)
   await host.stop()
 })

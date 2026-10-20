@@ -139,6 +139,7 @@ export type ResultDataFor<K extends CommandKey> = K extends keyof ResultDataMap 
 
 export const COMMAND_ERROR_CODES = [
   'invalid_payload',
+  'op_id_conflict',
   'no_pet',
   'pet_dead',
   'paused',

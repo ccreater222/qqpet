@@ -47,7 +47,7 @@ const OP_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/
 const RECORD_KEYS = ['petId', 'deviceId', 'opId', 'commandType', 'resultPresent', 'result', 'error'] as const
 const ERROR_KEYS = ['code', 'message', 'refreshProjection', 'retryable'] as const
 const COMMAND_ERROR_CODES = new Set([
-  'invalid_payload', 'no_pet', 'pet_dead', 'paused', 'busy', 'insufficient_funds',
+  'invalid_payload', 'op_id_conflict', 'no_pet', 'pet_dead', 'paused', 'busy', 'insufficient_funds',
   'insufficient_item', 'not_available', 'wrong_phase', 'already_claimed', 'cooldown',
   'unauthorized', 'offline', 'server_catching_up', 'authority_not_active',
   'authority_fork_risk', 'authority_reset_required', 'anchor_out_of_bounds', 'internal',
@@ -264,7 +264,7 @@ export function executeCommandIdempotent(
         outcome: {
           ok: false,
           events: [],
-          error: { code: 'invalid_payload', message: 'opId was already used for a different command', refreshProjection: false },
+          error: { code: 'op_id_conflict', message: 'opId was already used for a different command', refreshProjection: false },
         },
       }
     }

@@ -38,6 +38,7 @@ export {
   type LegacyEngineStateV0,
   type LegacyPortablePetBundleV0,
   type LegacySaveMigrationOptions,
+  type LocalEventHistoryEntry,
   type LocalPersistedRuntimeIdentity,
   type LocalRuntimeIdentity,
   type LocalPetDocumentV2,

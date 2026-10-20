@@ -21,6 +21,7 @@ import type {
   SessionCoverageInterval,
 } from '../pet-runtime/types'
 import type { OrderedEvent } from '../pet-runtime/events'
+import { reconcileImportedSessionActors } from '../pet-runtime/sessions'
 import type { CommandError, CommandKey, CommandResult, CommandRole, PetCommand } from '../sync/protocol'
 import {
   assertDeviceLocalOverlay,
@@ -35,7 +36,10 @@ import {
   LOCAL_DOCUMENT_SCHEMA_VERSION,
   migrateLegacyLocalPetDocumentV2,
   migrateLegacySaveDataToPortableBundle,
+  migratePortablePetBundle,
+  serializePortablePetBundle,
   type AuthorityStamp,
+  type LocalEventHistoryEntry,
   type LocalPetDocumentV2,
   type PortablePetBundleV1,
 } from '../sync/portable'
@@ -124,7 +128,7 @@ export interface LocalRepositoryHostStorage {
   /** Preserve the original legacy bytes before migration. Called once per file. */
   backupLegacySave(text: string, reason: 'migration' | 'corrupt'): Promise<void>
   /** Preserve the previous v2/mismatched bytes before rewriting. Called once per file. */
-  backupDocument(text: string, reason: 'migration' | 'corrupt' | 'identity_mismatch'): Promise<void>
+  backupDocument(text: string, reason: 'migration' | 'corrupt' | 'identity_mismatch' | 'import'): Promise<void>
   /** Preserve bytes under a unique, non-authoritative recovery name. */
   preserveCorruptDocument(text: string): Promise<void>
 }
@@ -318,7 +322,12 @@ export function normalizeLocalRepositoryDocument(raw: unknown): LoadedDocument {
   const idempotency = document.idempotency === undefined ? emptyOpIdCache() : migrateOpIdCache(document.idempotency)
   validateOpIdCache(idempotency)
   validatePersistedRuntimeState({ schemaVersion: 2, engine: document.bundle.engine, idempotency })
-  return { document: { ...document, idempotency }, idempotency }
+  const eventHistory = document.eventHistory?.map(event => ({
+    ...event,
+    revision: event.revision ?? document.revision,
+    gameTimeMs: event.gameTimeMs ?? document.bundle.engine.gameTimeMs,
+  }))
+  return { document: { ...document, idempotency, ...(eventHistory === undefined ? {} : { eventHistory }) }, idempotency }
 }
 
 export function createLocalRepositoryHost(
@@ -369,7 +378,7 @@ export class LocalRepositoryHost {
   private schedulerRunning = false
   private queue: Promise<void> = Promise.resolve()
   private lastProjectionValue: LocalRepositoryHostProjection | null = null
-  private eventHistory: OrderedDomainEvent[] = []
+  private eventHistory: LocalEventHistoryEntry[] = []
   private lastReopenValue: CoverageReopen | undefined
   private stopped = false
   private lastHeartbeatPersistedAt = 0
@@ -432,7 +441,14 @@ export class LocalRepositoryHost {
   }
 
   getRecentEvents(): LocalRepositoryHostEvent[] {
-    return this.eventHistory.map(event => this.projectEvent(event, this.currentRevision(), this.eventGameTimeMs()))
+    return this.eventHistory.map(event => ({
+      eventSeq: event.eventSeq,
+      revision: event.revision ?? this.currentRevision(),
+      ...(event.commandSeq === undefined ? {} : { commandSeq: event.commandSeq }),
+      gameTimeMs: event.gameTimeMs ?? this.eventGameTimeMs(),
+      type: event.type,
+      payload: clone(event.payload),
+    }))
   }
 
   async load(): Promise<LocalRepositoryHostProjection | null> {
@@ -540,6 +556,202 @@ export class LocalRepositoryHost {
     if (this.localDocument === null) return null
     return clone(this.localDocument.bundle)
   }
+
+  exportPortableBundleJson(): string | null {
+    const bundle = this.exportPortableBundle()
+    return bundle === null ? null : serializePortablePetBundle(bundle)
+  }
+
+  async importPortableBundle(
+    value: PortablePetBundleV1 | string,
+    options: LocalRepositoryHostImportOptions = {},
+  ): Promise<LocalRepositoryHostProjection> {
+    const opId = options.opId ?? this.newUuid()
+    return this.enqueue(async () => {
+      if (this.localDocument === null || this.stopped || this.state === 'loading') {
+        throw new Error('authority_not_active: local repository is not active')
+      }
+      requireOpId(opId)
+      if (this.state === 'read_only' || this.state === 'handoff_pending') {
+        throw new Error('authority_not_active: local repository is read-only')
+      }
+      if (this.state === 'catching_up') throw new Error('server_catching_up: local repository is catching up')
+      if (this.state === 'suspended') throw new Error('not_available: local repository is suspended')
+      if (
+        this.localDocument.authority.state !== 'active'
+        || this.localDocument.authority.stamp.owner !== 'local'
+      ) {
+        throw new Error('authority_not_active: local repository authority is not active')
+      }
+      const cached = this.findCachedCommands(opId)
+      const duplicateImport = cached.find(record =>
+        record.petId === this.localDeviceIdValue
+        && record.deviceId === this.localDeviceIdValue
+        && record.commandType === 'admin.importPortableBundle')
+      if (duplicateImport !== undefined) {
+        const current = this.getProjection()
+        if (current === null) throw new Error('internal: imported projection is unavailable')
+        return current
+      }
+      if (cached.length > 0) throw new Error('op_id_conflict: opId is already used by another import scope or command')
+
+      const at = this.now()
+      const parsed = typeof value === 'string' ? parseJson(value, 'portable bundle') : value
+      const bundle = this.parseImportBundle(parsed, at)
+      this.validateImportedBundle(bundle, options)
+      const current = this.localDocument
+      const candidate = clone(current)
+      const operationId = this.newUuid()
+      requireBoundedId(operationId, 'coverage operationId')
+      const survivors = this.captureSurvivorsOn(candidate)
+      this.closeAllOpenCoverageOn(candidate, at, 'import_replaced')
+
+      let importedEngine = clone(bundle.engine)
+      for (const interval of importedEngine.sessionCoverage) {
+        if (interval.disconnectedAtWallMs !== undefined) continue
+        this.closeCoverageInterval(interval, at, 'import_replaced')
+      }
+      importedEngine = reconcileImportedSessionActors(importedEngine, {
+        localActorDeviceId: bundle.originLocalDeviceId ?? this.localDeviceIdValue,
+        newActorDeviceId: this.localDeviceIdValue,
+        rebindLocalSessions: true,
+        nowMs: importedEngine.gameTimeMs,
+      })
+      delete importedEngine.coverageReopen
+
+      const incoming = bundle.authority
+      const currentStamp = current.authority.stamp
+      const stamp: AuthorityStamp = {
+        owner: 'local',
+        authorityId: incoming.owner === 'server' ? incoming.authorityId : currentStamp.authorityId,
+        epoch: Math.max(currentStamp.epoch, incoming.epoch) + 1,
+        restoreGeneration: incoming.owner === 'server'
+          ? incoming.restoreGeneration
+          : Math.max(currentStamp.restoreGeneration, incoming.restoreGeneration),
+        revision: incoming.revision,
+        eventSeq: incoming.eventSeq,
+        handoffId: incoming.handoffId || currentStamp.handoffId,
+        detachedAtWallMs: incoming.detachedAtWallMs,
+      }
+      const marker: CoverageReopen = {
+        operationId,
+        commitWallMs: at,
+        survivors: clone(survivors),
+        state: 'pending',
+      }
+      importedEngine.coverageReopen = marker
+      candidate.bundle = {
+        ...bundle,
+        originLocalDeviceId: this.localDeviceIdValue,
+        engine: importedEngine,
+        shared: importedEngine.save,
+        authority: stamp,
+        exportedAtWallMs: at,
+      }
+      candidate.authority = { state: 'active', stamp }
+      candidate.revision = stamp.revision
+      candidate.eventSeq = stamp.eventSeq
+      candidate.eventHistory = []
+      candidate.idempotency = {
+        schemaVersion: 2,
+        records: [{
+          petId: this.localDeviceIdValue,
+          deviceId: this.localDeviceIdValue,
+          opId,
+          commandType: 'admin.importPortableBundle',
+          resultPresent: true,
+          result: {
+            authorityId: stamp.authorityId,
+            epoch: stamp.epoch,
+            revision: stamp.revision,
+            eventSeq: stamp.eventSeq,
+          },
+        }],
+      }
+      const reopenedCoverageId = this.completeCoverageReopenOn(candidate, at)
+      this.syncAuthorityOn(candidate, at)
+
+      const currentText = await this.readStorage('readDocument', 'local v2 document')
+      await this.options.storage.backupDocument(currentText ?? JSON.stringify(current, null, 2), 'import')
+      try {
+        await this.persistDocument(candidate)
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error)
+        this.state = 'read_only'
+        this.stopScheduler()
+        this.emitProjection()
+        throw error
+      }
+
+      this.localDocument = candidate
+      this.idempotency = candidate.idempotency ?? emptyOpIdCache()
+      this.eventHistory = []
+      this.lastReopenValue = clone(marker)
+      this.openCoverageId = reopenedCoverageId
+      this.lastHeartbeatPersistedAt = at
+      this.state = 'ready'
+      this.error = undefined
+      this.startScheduler()
+      this.emitProjection()
+      const projection = this.getProjection()
+      if (projection === null) throw new Error('internal: imported projection is unavailable')
+      return projection
+    })
+  }
+
+  private parseImportBundle(value: unknown, at: number): PortablePetBundleV1 {
+    if (isRecord(value) && value.format === LOCAL_DOCUMENT_FORMAT) {
+      assertLocalPetDocumentV2(value)
+      if (value.authority.state !== 'active') throw new Error('authority_not_active: imported local document is not active')
+      return clone(value.bundle)
+    }
+    if (isRecord(value) && typeof value.format === 'string' && value.format.startsWith('qqpet-portable-')) {
+      return migratePortablePetBundle(value)
+    }
+    if (this.localDocument === null) throw new Error('authority_not_active: local repository is unavailable')
+    const current = this.localDocument
+    const authority: AuthorityStamp = {
+      ...current.authority.stamp,
+      owner: 'local',
+      revision: current.revision,
+      eventSeq: current.eventSeq,
+    }
+    return migrateLegacySaveDataToPortableBundle(value, {
+      nowMs: at,
+      localDeviceId: this.localDeviceIdValue,
+      timeZone: current.bundle.engine.timeZone,
+      seedHex: this.seedHex(),
+      authority,
+      advanceWhileEmpty: current.bundle.engine.advanceWhileEmpty,
+    })
+  }
+
+  private validateImportedBundle(bundle: PortablePetBundleV1, options: LocalRepositoryHostImportOptions): void {
+    if (this.localDocument === null) throw new Error('authority_not_active: local repository is unavailable')
+    const incoming = bundle.authority
+    if (bundle.originLocalDeviceId !== undefined && bundle.originLocalDeviceId !== this.localDeviceIdValue) {
+      throw new Error('identity_mismatch: originLocalDeviceId')
+    }
+    if (incoming.owner === 'server' && (
+      options.expectedAuthorityId === undefined
+      || options.expectedRestoreGeneration === undefined
+      || options.expectedEpoch === undefined
+      || options.expectedRevision === undefined
+      || options.expectedEventSeq === undefined
+    )) {
+      throw new Error('invalid_payload: handoff import requires exact authority fields')
+    }
+    if (options.expectedAuthorityId !== undefined && incoming.authorityId !== options.expectedAuthorityId) throw new Error('identity_mismatch: authorityId')
+    if (options.expectedRestoreGeneration !== undefined && incoming.restoreGeneration !== options.expectedRestoreGeneration) throw new Error('identity_mismatch: restoreGeneration')
+    if (options.expectedEpoch !== undefined && incoming.epoch !== options.expectedEpoch) throw new Error('identity_mismatch: epoch')
+    if (options.expectedRevision !== undefined && incoming.revision !== options.expectedRevision) throw new Error('identity_mismatch: revision')
+    if (options.expectedEventSeq !== undefined && incoming.eventSeq !== options.expectedEventSeq) throw new Error('identity_mismatch: eventSeq')
+    const currentStamp = this.localDocument.authority.stamp
+    if (incoming.owner === 'local' && incoming.authorityId !== currentStamp.authorityId) {
+      throw new Error('identity_mismatch: local authorityId')
+    }
+  }
+
 
   async suspend(): Promise<LocalRepositoryHostProjection | null> {
     return this.enqueue(async () => {
@@ -649,11 +861,8 @@ export class LocalRepositoryHost {
     return this.localDocument?.revision ?? 0
   }
 
-  private findIdempotencyRecord(opId: string): IdempotencyRecord | undefined {
-    return (this.localDocument?.idempotency ?? this.idempotency).records.find(record =>
-      record.petId === this.localDeviceIdValue
-      && record.deviceId === this.localDeviceIdValue
-      && record.opId === opId)
+  private findCachedCommands(opId: string): IdempotencyRecord[] {
+    return (this.localDocument?.idempotency ?? this.idempotency).records.filter(record => record.opId === opId)
   }
 
   private seedHex(): string {
@@ -728,6 +937,10 @@ export class LocalRepositoryHost {
       const record = isRecord(raw) ? raw : null
       const runtime = record !== null && isRecord(record.runtime) ? record.runtime : null
       const duplicateIdentity = runtime !== null && Object.prototype.hasOwnProperty.call(runtime, 'localDeviceId')
+      const missingIdempotency = record !== null && record.idempotency === undefined
+      const missingEventMetadata = record !== null
+        && Array.isArray(record.eventHistory)
+        && record.eventHistory.some(event => isRecord(event) === false || event.revision === undefined || event.gameTimeMs === undefined)
       if (duplicateIdentity && record !== null) {
         const expected = isRecord(record.device) && typeof record.device.localDeviceId === 'string'
           ? record.device.localDeviceId
@@ -737,6 +950,8 @@ export class LocalRepositoryHost {
           await this.options.storage.preserveCorruptDocument(documentText)
           throw new Error('identity_mismatch: runtime.localDeviceId must match device.localDeviceId')
         }
+      }
+      if (duplicateIdentity || missingIdempotency || missingEventMetadata) {
         await this.options.storage.backupDocument(documentText, 'migration')
       }
       let loaded: LoadedDocument
@@ -753,7 +968,13 @@ export class LocalRepositoryHost {
         appInstanceId: this.options.appInstanceId ?? this.newUuid(),
         startedAtWallMs: this.now(),
       }
-      loaded.notice = duplicateIdentity ? 'legacy-local-device-id-migrated' : undefined
+      loaded.notice = duplicateIdentity
+        ? 'legacy-local-device-id-migrated'
+        : missingIdempotency
+          ? 'legacy-idempotency-cache-migrated'
+          : missingEventMetadata
+            ? 'legacy-event-history-migrated'
+            : undefined
       return loaded
     }
 
@@ -1075,12 +1296,6 @@ export class LocalRepositoryHost {
       this.options.onCommandResult?.(clone(rejected))
       return rejected
     }
-    const existing = this.findIdempotencyRecord(opId)
-    if (existing !== undefined) {
-      const duplicate = this.duplicateCommandResult(command, opId, existing)
-      this.options.onCommandResult?.(clone(duplicate))
-      return duplicate
-    }
     if (this.state === 'read_only' || this.state === 'handoff_pending') {
       const rejected = this.rejectedCommandResult(command, opId, commandSeqFallback, {
         code: 'authority_not_active', message: 'local repository is read-only', refreshProjection: true,
@@ -1101,6 +1316,35 @@ export class LocalRepositoryHost {
       })
       this.options.onCommandResult?.(clone(rejected))
       return rejected
+    }
+    if (
+      this.localDocument.authority.state !== 'active'
+      || this.localDocument.authority.stamp.owner !== 'local'
+    ) {
+      const rejected = this.rejectedCommandResult(command, opId, commandSeqFallback, {
+        code: 'authority_not_active', message: 'local repository authority is not active', refreshProjection: true,
+      })
+      this.options.onCommandResult?.(clone(rejected))
+      return rejected
+    }
+    const cached = this.findCachedCommands(opId)
+    const duplicateRecord = cached.find(record =>
+      record.petId === this.localDeviceIdValue
+      && record.deviceId === this.localDeviceIdValue
+      && record.commandType === command.type)
+    if (duplicateRecord !== undefined) {
+      const duplicate = this.duplicateCommandResult(command, opId, duplicateRecord)
+      this.options.onCommandResult?.(clone(duplicate))
+      return duplicate
+    }
+    if (cached.length > 0) {
+      const conflict = this.rejectedCommandResult(command, opId, commandSeqFallback, {
+        code: 'op_id_conflict',
+        message: 'opId conflicts with a cached command in another scope or command type',
+        refreshProjection: true,
+      })
+      this.options.onCommandResult?.(clone(conflict))
+      return conflict
     }
 
     const baseDocument = this.localDocument
@@ -1180,9 +1424,15 @@ export class LocalRepositoryHost {
     candidate.revision = accepted ? baseDocument.revision + 1 : baseDocument.revision
     candidate.eventSeq = baseDocument.eventSeq + (outcome.outcome.ok ? outcome.outcome.events.length : 0)
     candidate.idempotency = outcome.document.idempotency
-    const ordered = outcome.outcome.ok
-      ? outcome.outcome.events.map((event: DomainEvent, index: number) =>
-          orderedDomainEvent(baseDocument.eventSeq + index + 1, event))
+    const commandSeq = candidate.idempotency.records.findIndex(item =>
+      item.deviceId === this.localDeviceIdValue && item.opId === opId) + 1
+    const ordered: LocalEventHistoryEntry[] = outcome.outcome.ok
+      ? outcome.outcome.events.map((event: DomainEvent, index: number) => ({
+          ...orderedDomainEvent(baseDocument.eventSeq + index + 1, event),
+          revision: candidate.revision,
+          gameTimeMs: candidate.bundle.engine.gameTimeMs,
+          commandSeq,
+        }))
       : []
     candidate.eventHistory = [...(baseDocument.eventHistory ?? []), ...ordered]
       .slice(-LOCAL_REPOSITORY_HOST_EVENT_HISTORY_LIMIT)
@@ -1206,10 +1456,8 @@ export class LocalRepositoryHost {
     this.lastHeartbeatPersistedAt = at
     if (reopenedCoverageId !== undefined) this.openCoverageId = reopenedCoverageId
     if (commitReopen !== undefined) this.lastReopenValue = clone(commitReopen)
-    const commandSeq = candidate.idempotency.records.findIndex(item =>
-      item.deviceId === this.localDeviceIdValue && item.opId === opId) + 1
     const projectedEvents = ordered.map(event =>
-      this.projectEvent(event, candidate.revision, candidate.bundle.engine.gameTimeMs, commandSeq))
+      this.projectEvent(event, event.revision ?? candidate.revision, event.gameTimeMs ?? candidate.bundle.engine.gameTimeMs, event.commandSeq))
     const commandResult = this.appliedOrRejectedResult(
       command,
       opId,
@@ -1327,11 +1575,14 @@ export class LocalRepositoryHost {
         maxChunkTicks: this.options.maxChunkTicks,
         coverageAtWallMs,
       })
-      const ordered = outcome.events.map((event: DomainEvent, index: number) =>
-        orderedDomainEvent(candidate.eventSeq + index + 1, event))
       candidate.bundle.engine = outcome.state
       candidate.bundle.shared = outcome.state.save
       if (outcome.ticks > 0) candidate.revision += 1
+      const ordered: LocalEventHistoryEntry[] = outcome.events.map((event: DomainEvent, index: number) => ({
+        ...orderedDomainEvent(candidate.eventSeq + index + 1, event),
+        revision: candidate.revision,
+        gameTimeMs: candidate.bundle.engine.gameTimeMs,
+      }))
       candidate.eventSeq += ordered.length
       candidate.eventHistory = [...(candidate.eventHistory ?? []), ...ordered]
         .slice(-LOCAL_REPOSITORY_HOST_EVENT_HISTORY_LIMIT)
@@ -1351,7 +1602,7 @@ export class LocalRepositoryHost {
       this.lastHeartbeatPersistedAt = at
       this.eventHistory = (candidate.eventHistory ?? []).slice(-LOCAL_REPOSITORY_HOST_EVENT_HISTORY_LIMIT)
       const events = ordered.map(event =>
-        this.projectEvent(event, candidate.revision, candidate.bundle.engine.gameTimeMs))
+        this.projectEvent(event, event.revision ?? candidate.revision, event.gameTimeMs ?? candidate.bundle.engine.gameTimeMs))
       this.emitProjection(events)
       if (outcome.frozen || outcome.ticks === 0) break
       await this.yieldToEventLoop()

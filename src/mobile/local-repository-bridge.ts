@@ -23,7 +23,7 @@ export interface MobileLocalRepositoryBridgeCapability {
 export interface MobileLocalRepositoryBridgeOptions {
   storage: LocalRepositoryHostStorage
   devRuntimeFlag: boolean
-  /** The bridge only installs this adapter when it replaces the legacy writer. */
+  /** The bridge only installs this adapter when it replaces the legacy writer; defaults false. */
   rendererCapability?: boolean
   nowMs?: () => number
   randomUUID?: () => string
@@ -49,6 +49,10 @@ export interface MobileLocalRepositoryBridge {
     options?: { opId?: string },
   ): Promise<CommandResult<K>>
   setAdvanceWhileEmpty(enabled: boolean): Promise<void>
+  /** Stable portable-bundle JSON, never a bare SaveData/save-patch document. */
+  exportPortableBundleJson(): Promise<string>
+  /** Validates/migrates the portable document, backs up the v2 file, and atomically replaces it. */
+  importPortableBundleJson(text: string): Promise<SaveData>
   flush(): Promise<void>
   suspend(): Promise<void>
   resume(): Promise<void>
@@ -113,7 +117,7 @@ export function mobileLocalRepositoryCapability(
 ): MobileLocalRepositoryCapabilityResult {
   const result = localRepositoryHostCapability({
     devRuntimeFlag: options.devRuntimeFlag,
-    rendererCapability: options.rendererCapability ?? true,
+    rendererCapability: options.rendererCapability ?? false,
     storage: options.storage.capability,
   })
   return {
@@ -163,7 +167,7 @@ export function createMobileLocalRepositoryBridge(
     },
   }, {
     devRuntimeFlag: options.devRuntimeFlag,
-    rendererCapability: options.rendererCapability ?? true,
+    rendererCapability: options.rendererCapability ?? false,
     storage: options.storage.capability,
   })
 
@@ -204,6 +208,17 @@ export function createMobileLocalRepositoryBridge(
     async setAdvanceWhileEmpty(enabled) {
       await start()
       await repository.setAdvanceWhileEmpty(enabled)
+    },
+    async exportPortableBundleJson() {
+      await start()
+      const text = repository.exportPortableBundleJson()
+      if (text === null) throw new Error('local runtime v2 portable export is unavailable')
+      return text
+    },
+    async importPortableBundleJson(text) {
+      await start()
+      await repository.importPortableBundle(text)
+      return JSON.parse(JSON.stringify(requireProjection().save)) as SaveData
     },
     async flush() {
       await repository.flush()

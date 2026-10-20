@@ -97,6 +97,14 @@ export interface LocalRuntimeIdentity extends LocalPersistedRuntimeIdentity {
   readonly localDeviceId: string
 }
 
+export interface LocalEventHistoryEntry extends OrderedDomainEvent {
+  /** Commit revision assigned by the local host when the event was persisted. */
+  revision?: number
+  /** Game time of the commit batch that emitted the event. */
+  gameTimeMs?: number
+  commandSeq?: number
+}
+
 export interface LocalPetDocumentV2 {
   format: typeof LOCAL_DOCUMENT_FORMAT
   schemaVersion: typeof LOCAL_DOCUMENT_SCHEMA_VERSION
@@ -112,7 +120,7 @@ export interface LocalPetDocumentV2 {
   /** Host-level opId cache committed atomically with the local document. */
   idempotency?: OpIdCache
   /** Recent ordered event history retained by the local host. */
-  eventHistory?: OrderedDomainEvent[]
+  eventHistory?: LocalEventHistoryEntry[]
 }
 
 export interface RemoteProjectionCacheV2 {
@@ -849,10 +857,13 @@ export function assertLocalPetDocumentV2(value: unknown): asserts value is Local
     for (const event of value.eventHistory) {
       requireRecord(event, '$.local.eventHistory[]')
       assertRequiredKeys(event, ['eventSeq', 'type', 'payload'], '$.local.eventHistory[]')
-      assertOnlyKeys(event, ['eventSeq', 'type', 'payload'], '$.local.eventHistory[]')
+      assertOnlyKeys(event, ['eventSeq', 'type', 'payload', 'revision', 'gameTimeMs', 'commandSeq'], '$.local.eventHistory[]')
       requireNonNegativeInteger(event.eventSeq, '$.local.eventHistory[].eventSeq')
       if (event.eventSeq <= previousEventSeq || event.eventSeq <= 0) failSchema('invalid_schema', '$.local.eventHistory', 'event sequence must increase')
       previousEventSeq = event.eventSeq
+      if (event.revision !== undefined) requireNonNegativeInteger(event.revision, '$.local.eventHistory[].revision')
+      if (event.gameTimeMs !== undefined) requireNonNegativeInteger(event.gameTimeMs, '$.local.eventHistory[].gameTimeMs')
+      if (event.commandSeq !== undefined) requireNonNegativeInteger(event.commandSeq, '$.local.eventHistory[].commandSeq')
       if (typeof event.type !== 'string' || ORDERED_EVENT_TYPES.includes(event.type as never) === false) failSchema('invalid_schema', '$.local.eventHistory[].type', 'unknown ordered event type')
       requireRecord(event.payload, '$.local.eventHistory[].payload')
     }

@@ -1,6 +1,6 @@
 import { fileIo as fs } from '@kit.CoreFileKit'
 import { http } from '@kit.NetworkKit'
-import { pasteboard } from '@kit.BasicServicesKit'
+import { BusinessError, pasteboard } from '@kit.BasicServicesKit'
 import { picker } from '@kit.CoreFileKit'
 import { util } from '@kit.ArkTS'
 import { PetHost } from './PetHost'
@@ -19,7 +19,7 @@ function flag(v: boolean | string | number): boolean {
 
 export class Native {
   static readonly METHODS: string[] = [
-    'read', 'write', 'readStateFile', 'writeAtomic', 'http', 'exportSave', 'importSave',
+    'read', 'write', 'readStateFile', 'readLegacySave', 'writeAtomic', 'http', 'exportSave', 'importSave',
     'openGame', 'quit', 'copyText', 'openUrl', 'setFocusable', 'setAutoStart',
     'setTray', 'setBounds', 'safeArea'
   ]
@@ -42,32 +42,85 @@ export class Native {
     fs.renameSync(tmp, `${dir}/${name}`)
   }
 
+  /** Exact v2 state writes only; save.json and arbitrary app-private paths are rejected. */
   private validStateName(name: string): boolean {
-    if (name.length === 0) return false
-    if (name === "." || name === "..") return false
-    if (name.includes("/")) return false
-    if (name.includes("\\")) return false
+    if (name === 'save.v2.json' || name === 'save.v2.json.bak' || name === 'save.json.bak') return true
+    const prefix = 'save.v2.json.corrupt-'
+    if (name.startsWith(prefix) === false) return false
+    const suffix = name.substring(prefix.length)
+    if (suffix.length === 0) return false
+    for (let index = 0; index < suffix.length; index++) {
+      const code = suffix.charCodeAt(index)
+      if (code < 48 || code > 57) return false
+    }
     return true
   }
-  readStateFile(name: string): string | null {
-    if (this.validStateName(name) === false) return null
+
+  private okRead(text: string | null): string {
+    return JSON.stringify({ status: 'ok', text: text })
+  }
+
+  private errorRead(message: string): string {
+    return JSON.stringify({ status: 'error', error: message })
+  }
+
+  private isMissing(error: BusinessError): boolean {
+    const code = `${error.code ?? ''}`
+    const message = error.message ?? ''
+    return code === '13900002' || code === '2' || message.toLowerCase().includes('no such file')
+  }
+
+  private readFileResult(path: string): string {
     try {
-      return fs.readTextSync(`${host().context.filesDir}/${name}`)
-    } catch (_e) {
-      return null
+      if (fs.accessSync(path) === false) return this.okRead(null)
+      return this.okRead(fs.readTextSync(path))
+    } catch (error) {
+      const failure = error as BusinessError
+      if (this.isMissing(failure)) return this.okRead(null)
+      return this.errorRead(failure.message ?? 'native state read failed')
     }
   }
 
+  /** Missing is ok+null; read failures are errors that the host must not migrate over. */
+  readStateFile(name: string): string {
+    if (this.validStateName(name) === false) return this.errorRead('Invalid local state filename')
+    return this.readFileResult(`${host().context.filesDir}/${name}`)
+  }
+
+  /** save.json is intentionally outside the state allowlist; only this read-only legacy bridge may read it. */
+  readLegacySave(): string {
+    return this.readFileResult(`${host().context.filesDir}/save.json`)
+  }
+
+  /** fsync temp and parent before acknowledging the atomic rename. */
   writeAtomic(name: string, text: string): boolean {
     if (this.validStateName(name) === false) return false
+    const dir = host().context.filesDir
+    const tmp = `${dir}/.${name}.${Date.now()}.tmp`
     try {
-      this.write(name, text)
+      const file = fs.openSync(tmp, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC)
+      try {
+        fs.writeSync(file.fd, text)
+        fs.fsyncSync(file.fd)
+      } finally {
+        fs.closeSync(file)
+      }
+      fs.renameSync(tmp, `${dir}/${name}`)
+      try {
+        const parent = fs.openSync(dir, fs.OpenMode.READ_ONLY)
+        try {
+          fs.fsyncSync(parent.fd)
+        } finally {
+          fs.closeSync(parent)
+        }
+      } catch (_e) {
+      }
       return true
     } catch (_e) {
+      try { fs.unlinkSync(tmp) } catch (_ignored) {}
       return false
     }
   }
-
   http(id: number | string, method: string, url: string, headers: string, body: string): void {
     const hid = num(id)
     const client = http.createHttp()

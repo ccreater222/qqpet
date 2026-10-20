@@ -328,14 +328,44 @@ class PetService : Service() {
             tmp.renameTo(File(filesDir, name))
         }
 
-        private fun stateFile(name: String): File? {
-            if (name.isEmpty() || name == "." || name == ".." || name.contains('/') || name.contains('\\')) return null
-            return File(filesDir, name)
+        /** Exact v2 state writes only; save.json and arbitrary app-private paths are rejected. */
+        private fun allowedStateName(name: String): Boolean {
+            if (name == "save.v2.json" || name == "save.v2.json.bak" || name == "save.json.bak") return true
+            val prefix = "save.v2.json.corrupt-"
+            if (name.startsWith(prefix) == false) return false
+            val suffix = name.substring(prefix.length)
+            return suffix.isNotEmpty() && suffix.all { it in '0'..'9' }
         }
 
-        /** C5b local-v2 state: missing is null so an empty existing file stays distinguishable. */
+        private fun stateFile(name: String): File? =
+            if (allowedStateName(name)) File(filesDir, name) else null
+
+        private fun okRead(text: String?): String =
+            JSONObject().put("status", "ok").put("text", text ?: JSONObject.NULL).toString()
+
+        private fun errorRead(message: String): String =
+            JSONObject().put("status", "error").put("error", message).toString()
+
+        private fun readFileResult(file: File): String {
+            if (file.exists() == false) return okRead(null)
+            if (file.isFile == false) return errorRead("State path is not a regular file")
+            return try {
+                okRead(file.readText())
+            } catch (e: Exception) {
+                errorRead(e.message ?: e.toString())
+            }
+        }
+
+        /** Missing is ok+null; read failures are error results that the host must not migrate over. */
         @JavascriptInterface
-        fun readStateFile(name: String): String? = stateFile(name)?.takeIf { it.isFile }?.readText()
+        fun readStateFile(name: String): String {
+            val file = stateFile(name) ?: return errorRead("Invalid local state filename")
+            return readFileResult(file)
+        }
+
+        /** save.json is intentionally outside the state allowlist; only this read-only legacy bridge may read it. */
+        @JavascriptInterface
+        fun readLegacySave(): String = readFileResult(File(filesDir, "save.json"))
 
         /** Replace a complete C5b state file with fsync+ATOMIC_MOVE; false means fail closed. */
         @JavascriptInterface
@@ -354,7 +384,6 @@ class PetService : Service() {
                 false
             }
         }
-
         @JavascriptInterface
         fun http(id: Int, method: String, url: String, headers: String, body: String?) = this@PetService.http(id, method, url, headers, body)
 

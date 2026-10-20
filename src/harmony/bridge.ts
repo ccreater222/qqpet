@@ -21,7 +21,10 @@ interface Native {
   read(name: string): string
   write(name: string, text: string): void
   /** Explicit atomic v2 state capability; absent on shells without the C5b native update. */
-  readStateFile?(name: string): string | null
+  /** Encoded discriminated read result; state reads reject save.json. */
+  readStateFile?(name: string): string
+  /** Separate legacy save.json read with missing/error discrimination. */
+  readLegacySave?(): string
   writeAtomic?(name: string, text: string): boolean
   http(id: number, method: string, url: string, headers: string, body: string): void
   exportSave(id: number, name: string, text: string): void
@@ -69,15 +72,16 @@ const legacyV2DocumentPresent = LOCAL_RUNTIME_V2_FLAG === false
 if (legacyV2DocumentPresent) localRuntimeFailure = 'local-v2 document exists; enable the explicit v2 flag'
 if (LOCAL_RUNTIME_V2_FLAG) {
   const readStateFile = native.readStateFile?.bind(native)
+  const readLegacySave = native.readLegacySave?.bind(native)
   const writeAtomic = native.writeAtomic?.bind(native)
-  if (typeof readStateFile !== 'function' || typeof writeAtomic !== 'function') {
+  if (typeof readStateFile !== 'function' || typeof readLegacySave !== 'function' || typeof writeAtomic !== 'function') {
     localRuntimeFailure = 'native atomic state storage capability is missing'
   } else if (webCryptoAvailable() === false) {
     localRuntimeFailure = 'Web Crypto getRandomValues is unavailable'
   } else {
     try {
       localRuntime = createMobileLocalRepositoryBridge({
-        storage: harmonyLocalRepositoryStorage({ readStateFile, writeAtomic }),
+        storage: harmonyLocalRepositoryStorage({ readStateFile, readLegacySave, writeAtomic }),
         devRuntimeFlag: true,
         rendererCapability: true,
         autoScheduler: true,
@@ -294,12 +298,23 @@ const api: QQPetApi = {
     relaunch()
   },
   async exportSave() {
-    if (legacyAuthorityDisabled()) throw new Error('legacy save export is disabled while local runtime v2 is enabled')
     const day = new Date().toISOString().slice(0, 10)
+    if (localRuntime !== null) {
+      const text = await localRuntime.exportPortableBundleJson()
+      return (await call((id) => native.exportSave(id, `QQPet-portable-${day}.json`, text))) !== null
+    }
+    if (legacyAuthorityDisabled()) throw new Error('local runtime v2 unavailable: ' + (localRuntimeFailure ?? 'unknown'))
     return (await call((id) => native.exportSave(id, `QQPet-${day}.json`, JSON.stringify(save, null, 2)))) !== null
   },
   async importSave() {
-    if (legacyAuthorityDisabled()) throw new Error('legacy save import is disabled while local runtime v2 is enabled')
+    if (localRuntime !== null) {
+      const text = await call((id) => native.importSave(id))
+      if (text === null) return
+      await localRuntime.importPortableBundleJson(text)
+      relaunch()
+      return
+    }
+    if (legacyAuthorityDisabled()) throw new Error('local runtime v2 unavailable: ' + (localRuntimeFailure ?? 'unknown'))
     const text = await call((id) => native.importSave(id))
     if (text === null) return
     const pet = petOf(JSON.parse(text))
@@ -359,10 +374,11 @@ if (localRuntime !== null) {
 }
 if (LOCAL_RUNTIME_V2_FLAG) {
   addEventListener('pagehide', () => {
-    if (localRuntime !== null) void localRuntime.suspend()
+    if (leaving || localRuntime === null) return
+    void localRuntime.suspend()
   })
   document.addEventListener('visibilitychange', () => {
-    if (localRuntime === null) return
+    if (leaving || localRuntime === null) return
     if (document.visibilityState === 'hidden') void localRuntime.suspend()
     else void localRuntime.resume()
   })

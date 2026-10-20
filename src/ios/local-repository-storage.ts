@@ -1,5 +1,5 @@
 import type { LocalRepositoryHostStorage } from '../shared/local-repository/host'
-import { createAtomicV2Storage } from '../shared/local-repository/storage'
+import { createAtomicV2Storage, type LocalRepositoryFileReadResult } from '../shared/local-repository/storage'
 
 export interface IOSLocalStateRPC {
   request<T>(op: string, args: Record<string, unknown>): Promise<T>
@@ -11,7 +11,8 @@ export function iosLocalRepositoryStorage(rpc: IOSLocalStateRPC): LocalRepositor
     kind: 'ios-save-bridge',
     atomicDocument: true,
     backup: true,
-    read: async name => rpc.request<string | null>('readLocalStateFile', { name }),
+    readState: async name => rpc.request<LocalRepositoryFileReadResult>('readLocalStateFile', { name }),
+    readLegacy: async () => rpc.request<LocalRepositoryFileReadResult>('readLegacySave', {}),
     writeAtomic: async (name, text) => {
       const ok = await rpc.request<boolean>('writeLocalStateFileAtomic', { name, text })
       if (ok !== true) throw new Error('iOS atomic state write failed')

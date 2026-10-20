@@ -408,14 +408,29 @@ const api: QQPetApi = {
     }).catch((error) => reportError('resetPet', error))
   },
   exportSave: () => exclusive(async () => {
-    if (legacyAuthorityDisabled()) throw new Error('legacy save export is disabled while local runtime v2 is enabled')
+    const day = new Date().toISOString().slice(0, 10)
+    if (localRuntime !== null) {
+      await flushRenderer()
+      const text = await localRuntime.exportPortableBundleJson()
+      return await rpc.request<boolean>('exportSave', { name: `QQPet-portable-${day}.json`, text }, { timeout: 0 })
+    }
+    if (legacyAuthorityDisabled()) throw new Error('local runtime v2 unavailable: ' + (localRuntimeFailure ?? 'unknown'))
     await flushRenderer()
     const { save } = requireOwner()
-    const day = new Date().toISOString().slice(0, 10)
     return await rpc.request<boolean>('exportSave', { name: `QQPet-${day}.json`, text: JSON.stringify(save, null, 2) }, { timeout: 0 })
   }),
   importSave: () => exclusive(async () => {
-    if (legacyAuthorityDisabled()) throw new Error('legacy save import is disabled while local runtime v2 is enabled')
+    if (localRuntime !== null) {
+      await flushRenderer()
+      const text = await rpc.request<string | null>('importSave', {}, { timeout: 0 })
+      if (text === null) return
+      if (typeof text !== 'string') throw new Error('The picker did not return a portable bundle.')
+      await localRuntime.importPortableBundleJson(text)
+      leaving = true
+      location.reload()
+      return
+    }
+    if (legacyAuthorityDisabled()) throw new Error('local runtime v2 unavailable: ' + (localRuntimeFailure ?? 'unknown'))
     await flushRenderer()
     requireOwner()
     const text = await rpc.request<string | null>('importSave', {}, { timeout: 0 })
@@ -568,12 +583,12 @@ const stopTextInput = gamePage ? () => {} : installTextInput(rpc, flushRenderer,
 void ready.catch((error) => reportError('bootstrap', error))
 if (LOCAL_RUNTIME_V2_FLAG && gamePage === false) {
   addEventListener('pagehide', () => {
-    if (localRuntime === null) return
+    if (leaving || localRuntime === null) return
     const runtime = localRuntime
     void runtime.flush().then(() => runtime.suspend()).catch((error) => reportError('pagehide-local-runtime', error))
   })
   document.addEventListener('visibilitychange', () => {
-    if (localRuntime === null) return
+    if (leaving || localRuntime === null) return
     if (document.visibilityState === 'hidden') void localRuntime.suspend()
     else void localRuntime.resume()
   })
