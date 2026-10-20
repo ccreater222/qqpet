@@ -518,7 +518,9 @@ export function lootGoods(rng: RuntimeRng, count: number, pool: number | null = 
     }
     const list = LOOT_POOLS[selectedPool]
     if (list === undefined || list.length === 0) continue
-    const code = list[rng.randIntInclusive(0, list.length - 1)]
+    const index = rng.randomIndex(list.length)
+    if (index === null) continue
+    const code = list[index]
     const good = parseGoodCode(code)
     if (good !== null) goods.push(good)
   }

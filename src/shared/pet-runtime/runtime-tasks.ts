@@ -151,8 +151,7 @@ export function resetDailyTasks(
     next.taskList[tab] = STATIC_TASKS[tab].map((template, index) => {
       const existing = next.taskList[tab][index]
       if (existing !== undefined) return existing
-      const entry = entryFor(template, rng)
-      return template.keep ? { ...entry, take: true } : entry
+      return entryFor(template, rng)
     })
   }
   writeTaskProgress(save, next)

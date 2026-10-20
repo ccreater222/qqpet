@@ -28,6 +28,7 @@ const {
   deserializeRuntimeState,
   fallbackWeatherForDay,
   applyTravelCompletion,
+  chooseTravelEarlyMinutes,
   travelInventoryTotal,
   sessionActivityForInterval,
   stableStringify,
@@ -37,15 +38,16 @@ const {
 } = await import('../../src/shared/pet-runtime/index.ts')
 const { validateEngineState } = await import('../../src/shared/sync/portable.ts')
 const { COMMAND_TYPES } = await import('../../src/shared/sync/command-validation.ts')
-const { goodOf, TRAVEL_PROVINCES, DAILY_TASK_TEMPLATES, STATIC_TASKS, EXAM_BANK } = await import('../../src/shared/pet-runtime/content/index.ts')
+const { goodOf, TRAVEL_PROVINCES, DAILY_TASK_TEMPLATES, STATIC_TASKS, EXAM_BANK, LOOT_POOLS, parseGoodCode } = await import('../../src/shared/pet-runtime/content/index.ts')
 const {
   dailyTaskCandidates,
   dailyTaskIsOff,
   dailyTaskNeeded,
   dailyTaskPool,
+  resetDailyTasks,
   rollDailyTasks,
 } = await import('../../src/shared/pet-runtime/runtime-tasks.ts')
-const { createRuntimeRng } = await import('../../src/shared/pet-runtime/runtime-helpers.ts')
+const { createRuntimeRng, lootGoods } = await import('../../src/shared/pet-runtime/runtime-helpers.ts')
 const {
   DAY_KEY,
   GAME_TIME_MS,
@@ -57,6 +59,10 @@ const {
 } = await import('./sync-fixtures.mjs')
 
 const OTHER_DEVICE_ID = 'local-device-other'
+
+function deterministicSeed(attempt) {
+  return SEED.slice(0, 24) + attempt.toString(16).padStart(8, '0')
+}
 const fixtures = createSyncFixtures()
 
 function clone(value) {
@@ -920,7 +926,9 @@ test('task tables drift guard matches renderer TASKS/KINDS exactly', () => {
       canLevelTwo: template.canLevelTwo,
       hasCan: template.hasCan,
     })),
-    renderer.kinds,
+    renderer.kinds.map(({ obj, label, num, msg, needsKind, canLevelTwo, hasCan }) => ({
+      obj, label, num, msg, needsKind, canLevelTwo, hasCan,
+    })),
   )
   assert.equal(DAILY_TASK_TEMPLATES.some(template => template.obj === 'Game'), true)
   assert.equal(DAILY_TASK_TEMPLATES.some(template => template.obj === 'GameRound'), true)
@@ -977,7 +985,7 @@ test('daily task messages follow the need branch and Game is in the daily pool',
   function findTaskWithObj(start, obj, attemptLimit = 200) {
     for (let attempt = 1; attempt <= attemptLimit; attempt++) {
       const save = clone(start.save)
-      const seed = attempt.toString(16).padStart(32, '0')
+      const seed = deterministicSeed(attempt)
       const daily = rollDailyTasks(save, GAME_TIME_MS, 'Asia/Shanghai', createRuntimeRng(createRngState(seed)))
       const task = daily.find(candidate => candidate.obj === obj)
       if (task) return { task, save, off: dailyTaskIsOff(GAME_TIME_MS, 'Asia/Shanghai') }
@@ -1058,7 +1066,7 @@ test('normal 60-minute travel does not add a souvenir and early roll does', () =
   let normal = null
   let early = null
   for (let attempt = 1; attempt <= 200 && (normal === null || early === null); attempt++) {
-    const seed = attempt.toString(16).padStart(32, '0')
+    const seed = deterministicSeed(attempt)
     const result = run(seed)
     if (result.early) early = result
     else normal = result
@@ -1093,4 +1101,190 @@ test('sweetheart passive self-care consumes owned goods and records canonical ta
   assert.equal(careEvents.length, 3)
   assert.ok(ticked.events.some(event => event.type === 'item.consumed' && event.payload.source === 'sweetheart' && event.payload.type === 'clean'))
   assert.equal(ticked.events.filter(event => event.type === 'task.progress' && event.payload.counter === 'Eat').length, 3)
+})
+
+
+
+test('due travel jobs are authoritative even with missing or stale activity projection', () => {
+  const state = baseState()
+  const destination = TRAVEL_PROVINCES[0].name
+  state.save.activeOption.trip = 'stale-destination'
+  state.save.saveJsonData.activity = '42'
+  state.scheduledJobs = [{
+    id: 1,
+    type: 'travel',
+    dueAtGameMs: state.gameTimeMs + 60000,
+    payload: {
+      activityKind: 'travel',
+      activityId: destination,
+      startedAtGameMs: state.gameTimeMs - 59 * 60000,
+      early: 0,
+      plannedMinutes: 60,
+    },
+    status: 'pending',
+  }]
+  state.nextScheduledJobId = 2
+  const beforeInventory = travelInventoryTotal(state.save)
+  const ticked = advanceMinute(state, context(state, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(ticked.ok, true, JSON.stringify(ticked.ok ? ticked.result : ticked.error))
+  assert.equal(ticked.state.scheduledJobs[0].status, 'completed')
+  assert.equal(ticked.state.save.activeOption.trip, null)
+  assert.equal(ticked.state.save.gameSaveDatas.travel_china.some(entry => entry.name === destination), true)
+  assert.equal(blob(ticked.state, 'album').length, 1)
+  assert.equal(Object.values(blob(ticked.state, 'email')).some(mail => typeof mail.p === 'string'), true)
+  assert.equal(travelInventoryTotal(ticked.state.save), beforeInventory)
+  assert.equal(blob(ticked.state, 'activity'), 0)
+
+  const missing = clone(state)
+  missing.save.activeOption.trip = null
+  delete missing.save.saveJsonData.activity
+  const missingTick = advanceMinute(missing, context(missing, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(missingTick.ok, true, JSON.stringify(missingTick.ok ? missingTick.result : missingTick.error))
+  assert.equal(missingTick.state.save.gameSaveDatas.travel_china.some(entry => entry.name === destination), true)
+
+  const cancelled = clone(state)
+  cancelled.scheduledJobs[0].status = 'cancelled'
+  const cancelledTick = advanceMinute(cancelled, context(cancelled, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(cancelledTick.ok, true, JSON.stringify(cancelledTick.ok ? cancelledTick.result : cancelledTick.error))
+  assert.equal(cancelledTick.state.save.gameSaveDatas.travel_china.length, 0)
+  assert.equal(cancelledTick.state.save.activeOption.trip, null)
+  assert.equal(blob(cancelledTick.state, 'activity'), 0)
+})
+
+test('first daily reset and reset/adopt cycles keep travel tasks claimable', () => {
+  const first = baseState()
+  const resetTasks = resetDailyTasks(first.save, GAME_TIME_MS, 'Asia/Shanghai', createRuntimeRng(createRngState(SEED)))
+  assert.equal(resetTasks.next.taskList.travel.slice(2).every(entry => entry.take === false), true)
+  assert.equal(resetTasks.next.taskList.ddw.every(entry => entry.take === false), true)
+  assert.equal(resetTasks.next.taskList.growth.every(entry => entry.take === false), true)
+
+  const reset = ok(baseState(), 'pet.reset', {}, { actorRole: 'owner' })
+  const afterReset = resetDailyTasks(reset.state.save, GAME_TIME_MS, 'Asia/Shanghai', createRuntimeRng(createRngState(SEED)))
+  assert.equal(afterReset.next.taskList.travel.slice(2).every(entry => entry.take === false), true)
+
+  const adopted = ok(reset.state, 'pet.adopt', { sex: 'GG' }, { actorRole: 'owner' })
+  adopted.state.gameTimeMs = NEXT_BOUNDARY_MS - 60000
+  adopted.state.nextDailyBoundaryMs = NEXT_BOUNDARY_MS
+  adopted.state.lastProcessedDayBoundaryKey = DAY_KEY
+  const boundary = advanceMinute(adopted.state, context(adopted.state, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(boundary.ok, true, JSON.stringify(boundary.ok ? boundary.result : boundary.error))
+  const travelTasks = blob(boundary.state, 'task').taskList.travel
+  assert.equal(travelTasks.length, 9)
+  assert.equal(travelTasks.slice(2).every(entry => entry.take === false), true)
+})
+
+test('runtime need and availability predicates match renderer semantics exactly', () => {
+  const renderer = readRendererTaskTables()
+  assert.equal(renderer.kinds.length, DAILY_TASK_TEMPLATES.length)
+  const compile = source => new Function('info', 'save', 'off', 'return (' + source + ')(off)')
+  const canScenarios = []
+  const base = baseState()
+  for (const level of [1, 2, 3]) {
+    for (const yb of [0, 5000]) {
+      for (const mood of [0, 1000]) {
+        for (const hunger of [0, 1800]) {
+          const save = clone(base.save)
+          save.petComputedlInfo.level = level
+          save.petInfo.yb = yb
+          save.petInfo.mood = mood
+          save.petInfo.hunger = hunger
+          save.petInfo.clean = hunger
+          save.petInfo.charm = hunger ? 0 : 1000
+          save.petInfo.intel = hunger ? 0 : 1000
+          save.petInfo.strong = hunger ? 0 : 1000
+          canScenarios.push(save)
+        }
+      }
+    }
+  }
+  DAILY_TASK_TEMPLATES.forEach((template, index) => {
+    const source = renderer.kinds[index]
+    assert.equal(source.obj, template.obj)
+    assert.equal(source.canSource === null, template.hasCan === false)
+    if (source.canSource !== null) {
+      assert.equal(source.canSource, '() => save.petComputedlInfo.level >= 2', 'unsupported renderer can predicate')
+      const rendererCan = compile(source.canSource)
+      for (const save of canScenarios) {
+        const expected = rendererCan(save.petInfo, save, false)
+        const actual = dailyTaskCandidates(save).some(candidate => candidate.obj === template.obj)
+        assert.equal(actual, expected, template.obj + ' can predicate')
+      }
+    }
+  })
+
+  const needsScenarios = []
+  for (const cap of [1100, 1800]) {
+    const hungerValues = [0, cap / 2 - 1, cap / 2, cap / 2 + 1, cap]
+    const cleanValues = [0, cap / 2 - 1, cap / 2, cap / 2 + 1, cap]
+    const moodValues = [0, 499, 500, 501, 1000]
+    const ybValues = [0, 499, 500, 501, 5000]
+    for (const off of [false, true]) {
+      for (const hunger of hungerValues) {
+        for (const clean of cleanValues) {
+          for (const mood of moodValues) {
+            for (const yb of ybValues) {
+              const save = clone(base.save)
+              save.petComputedlInfo.hungerMax = cap
+              save.petComputedlInfo.cleanMax = cap
+              save.petComputedlInfo.moodMax = 1000
+              save.petInfo.hunger = hunger
+              save.petInfo.clean = clean
+              save.petInfo.mood = mood
+              save.petInfo.yb = yb
+              needsScenarios.push({ save, off })
+            }
+          }
+        }
+      }
+    }
+  }
+  DAILY_TASK_TEMPLATES.forEach((template, index) => {
+    const source = renderer.kinds[index]
+    const rendererNeed = compile(source.needsSource)
+    for (const scenario of needsScenarios) {
+      const expected = rendererNeed(scenario.save.petInfo, scenario.save, scenario.off)
+      const actual = dailyTaskNeeded(template, scenario.save, scenario.off)
+      assert.equal(actual, expected, template.obj + ' need predicate mismatch off=' + scenario.off)
+    }
+  })
+})
+
+
+test('canonical loot uses floor randomIndex rather than rounded integer selection', () => {
+  const calls = []
+  const fakeRng = {
+    randomUnit: () => 0.999,
+    randomIndex(count) {
+      calls.push(count)
+      return count - 1
+    },
+    randIntInclusive() {
+      throw new Error('loot must not use rounded selection')
+    },
+  }
+  const goods = lootGoods(fakeRng, 2, 0)
+  assert.equal(goods.length, 2)
+  assert.deepEqual(calls, [LOOT_POOLS[0].length, LOOT_POOLS[0].length])
+  const last = parseGoodCode(LOOT_POOLS[0][LOOT_POOLS[0].length - 1])
+  assert.equal(goods[0].id, last.id)
+  assert.equal(goods[1].id, last.id)
+})
+
+test('sweetheart self-care uses recomputed caps on a level-up tick', () => {
+  const state = baseState()
+  state.save.petInfo.growth = 5899.5
+  state.save.petComputedlInfo = { ...levelAndCapsOf(5000), healthMax: 5, moodMax: 1000 }
+  state.save.petInfo.sweetHeart = true
+  state.save.petInfo.sweetHeartOverTime = Math.floor(GAME_TIME_MS / 1000) + 7 * 86400
+  state.save.petInfo.hunger = 1100
+  state.save.petInfo.clean = 1000
+  state.save.petInfo.mood = 1000
+  state.save.selfGoodDatas.food = ['_10013006*5']
+  const ticked = advanceMinute(state, context(state, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(ticked.ok, true, JSON.stringify(ticked.ok ? ticked.result : ticked.error))
+  assert.equal(ticked.state.save.petComputedlInfo.level, 9)
+  assert.equal(ticked.state.save.petComputedlInfo.hungerMax, 1900)
+  assert.equal(ticked.state.save.selfGoodDatas.food.find(entry => entry.startsWith('_10013006*')), '_10013006*4')
+  assert.equal(blob(ticked.state, 'task').doNums.Eat, 1)
+  assert.ok(ticked.state.save.petInfo.hunger > 1100)
 })

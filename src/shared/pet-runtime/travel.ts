@@ -13,6 +13,37 @@ import {
   type RuntimeRng,
 } from './runtime-helpers'
 import type { EngineState, JsonObject } from './types'
+import { fatigue, luck } from './stats'
+
+
+/** Pre-rolls the renderer's final-five-minute early return into the authoritative job deadline. */
+export function chooseTravelEarlyMinutes(save: SharedSaveData, rng: RuntimeRng): { minutes: number; early: boolean } {
+  const tired = fatigue({
+    health: save.petInfo.health,
+    mood: save.petInfo.mood,
+    moodMax: save.petComputedlInfo.moodMax,
+    clean: save.petInfo.clean,
+    cleanMax: save.petComputedlInfo.cleanMax,
+    hunger: save.petInfo.hunger,
+    hungerMax: save.petComputedlInfo.hungerMax,
+    busy: true,
+    strong: save.petInfo.strong,
+    level: save.petComputedlInfo.level,
+  })
+  const lucky = luck({
+    pinkDiamond: save.petInfo.pinkDiamond,
+    PDiamondLevel: save.petInfo.PDiamondLevel,
+    sweetHeart: save.petInfo.sweetHeart,
+    charm: save.petInfo.charm,
+    intel: save.petInfo.intel,
+    fatigue: tired,
+  })
+  const threshold = Math.max(0, 1000 - lucky * 10)
+  for (let done = 56; done <= 60; done++) {
+    if (rng.randIntInclusive(0, threshold) <= 10) return { minutes: done, early: true }
+  }
+  return { minutes: 60, early: false }
+}
 
 export interface TravelShot { id: string; city: string; d: number }
 
@@ -45,7 +76,9 @@ export function takeTravelPhoto(
     [city, ''].map(place => left.filter(photo => photo.b === kind && photo.p === place)),
   ).find(entries => entries.length > 0)
   if (pool === undefined) return null
-  const photo = pool[rng.randIntInclusive(0, pool.length - 1)]
+  const index = rng.randomIndex(pool.length)
+  if (index === null) return null
+  const photo = pool[index]
   const shot: TravelShot = { id: photo.id, city, d: Math.floor(gameTimeMs / 1000) }
   writeSharedBlob(save, 'album', [...readShots(save), shot])
   return shot

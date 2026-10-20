@@ -88,7 +88,7 @@ export function claimOnlineGift(context: HandlerContext): HandlerResult {
   if (state.isOnlineLastTime > 0) reject('cooldown', 'the online gift is not ready')
   const cost = state.onlineGiftNum * 100
   if (cost > 0) payYb(context.state.save, cost)
-  const roll = context.rng.randIntInclusive(0, context.state.save.petInfo.pinkDiamond ? 1000 : 10_000)
+  const roll = context.rng.randomIndex(context.state.save.petInfo.pinkDiamond ? 1000 : 10_000) ?? 0
   const tier = roll < 2 ? 0 : state.onlineGiftNum % 10 === 0 ? 1 : 2
   const count = context.state.save.petInfo.pinkDiamond ? 2 : 1
   const goods = lootGoods(context.rng, count, tier)
@@ -112,7 +112,7 @@ export function claimBirthdayGift(context: HandlerContext): HandlerResult {
   const current = localDate(context.ctx.gameTimeMs, context.state.timeZone)
   const born = zonedDateTimeParts(context.state.save.petInfo.birthDay * 1000, context.state.timeZone)
   if (current.day !== born.day) reject('not_available', 'today is not the birthday')
-  const index = context.rng.randIntInclusive(0, BIRTHDAY_FOOD_IDS.length - 1)
+  const index = context.rng.randomIndex(BIRTHDAY_FOOD_IDS.length) ?? 0
   const food = goodOf('food', BIRTHDAY_FOOD_IDS[index])
   state.getBirthDayGift = true
   writeSignIn(context.state.save, state)

@@ -81,19 +81,24 @@ function readTaskSource() {
         if (element == null || element.type !== 'ObjectExpression') throw new Error('unexpected KINDS entry')
         const fields = {}
         let needsKind = null
+        let needsSource = null
+        let canSource = null
         let canLevelTwo = false
         let hasCan = false
         for (const property of element.properties) {
           const key = propertyKey(property)
-          if (key === 'needs') needsKind = needKindFor(sourceOf(property.value, source))
-          else if (key === 'can') {
+          if (key === 'needs') {
+            needsSource = sourceOf(property.value, source)
+            needsKind = needKindFor(needsSource)
+          } else if (key === 'can') {
             hasCan = true
-            canLevelTwo = /level\s*>=\s*2/.test(sourceOf(property.value, source))
+            canSource = sourceOf(property.value, source)
+            canLevelTwo = /level\s*>=\s*2/.test(canSource)
           } else if (key !== null) {
             fields[key] = literal(property.value)
           }
         }
-        return { ...fields, needsKind, canLevelTwo, hasCan }
+        return { ...fields, needsKind, needsSource, canSource, canLevelTwo, hasCan }
       })
       return { tasks, kinds }
     }
