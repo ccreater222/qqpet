@@ -2,8 +2,13 @@ import type { ShapeRect } from './hit-shape'
 import type { LanPeer } from './lan'
 import type { WebhookMsg } from './webhook'
 import type { OrderedEvent } from './pet-runtime/events'
-import type { LocalRepositoryHostProjection, LocalRepositoryHostStatus } from './local-repository/host'
+import type {
+  RendererProjection,
+  RendererRepositoryStatus,
+  RendererRuntimeInfo,
+} from './renderer-api'
 import type { CommandKey, CommandResult, PetCommand } from './sync/protocol'
+import type { DeviceLocalOverlay, DeviceLocalOverlayPatch } from './sync/data-boundary'
 import type { SaveData, SavePatch, Sex } from './save'
 
 export const IPC = {
@@ -12,6 +17,18 @@ export const IPC = {
   resetPet: 'pet:reset',
   exportSave: 'pet:export',
   importSave: 'pet:import',
+  runtimeInfo: 'pet:runtime-info',
+  command: 'pet:command',
+  setAdvanceWhileEmpty: 'pet:set-advance-while-empty',
+  localSettingsLoad: 'pet:local-settings-load',
+  localSettingsUpdate: 'pet:local-settings-update',
+  flush: 'pet:flush',
+  getProjection: 'pet:get-projection',
+  getStatus: 'pet:get-status',
+  projection: 'pet:projection',
+  commandResult: 'pet:command-result',
+  syncStatus: 'pet:sync-status',
+  resync: 'pet:resync',
   openGame: 'game:open',
   calendar: 'app:calendar',
   gamePlayed: 'game:played',
@@ -218,21 +235,30 @@ export interface QQPetApi {
     localRepositoryV2Reason?: string
   }
   load(): Promise<SaveData>
-  /** Merges object groups field by field, replaces other keys, then persists. */
+  /** Legacy local-only persistence. Fail-closed for canonical fields in runtime mode. */
   save(patch: SavePatch): void
-  /** Resolves after previously submitted saves reach persistent storage. */
-  flush?(): Promise<void>
-  /** Semantic local/server command; present only under the explicit v2 dev flag. */
-  command?<K extends CommandKey>(
+  /** Waits for local output durability or in-flight command/status reconciliation. */
+  flush(): Promise<void>
+  /** Whether this renderer is attached to an explicit local-runtime-v2 authority. */
+  runtimeInfo(): Promise<RendererRuntimeInfo>
+  /** Executes one semantic command through the local/remote repository. */
+  command<K extends CommandKey>(
     command: Extract<PetCommand, { type: K }>,
     options?: { opId?: string },
   ): Promise<CommandResult<K>>
-  setAdvanceWhileEmpty?(enabled: boolean): Promise<void>
-  onProjection?(listener: (projection: LocalRepositoryHostProjection, events: OrderedEvent[]) => void): void
-  onCommandResult?(listener: (result: CommandResult) => void): void
-  onSyncStatus?(listener: (status: LocalRepositoryHostStatus) => void): void
-  getProjection?(): LocalRepositoryHostProjection | null
-  getStatus?(): LocalRepositoryHostStatus
+  /** Same unified capability on every host; server mode requires owner authority. */
+  setAdvanceWhileEmpty(enabled: boolean): Promise<void>
+  /** Device-only settings, position and presentation. Never canonical gameplay. */
+  localSettings: {
+    load(): Promise<DeviceLocalOverlay>
+    update: (patch: DeviceLocalOverlayPatch) => Promise<DeviceLocalOverlay>
+  }
+  onProjection(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): void
+  onCommandResult(listener: (result: CommandResult) => void): void
+  onSyncStatus(listener: (status: RendererRepositoryStatus) => void): void
+  onResync(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): void
+  getProjection?(): RendererProjection | null | Promise<RendererProjection | null>
+  getStatus?(): RendererRepositoryStatus | Promise<RendererRepositoryStatus>
   /** Buries the pet and relaunches into egg selection, or straight into a newborn of `sex`. */
   resetPet(sex?: Sex): void
   /** Asks where to write the save; false when cancelled. */

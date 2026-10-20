@@ -24,7 +24,9 @@ import type { OrderedEvent } from '../pet-runtime/events'
 import { reconcileImportedSessionActors } from '../pet-runtime/sessions'
 import type { CommandError, CommandKey, CommandResult, CommandRole, PetCommand } from '../sync/protocol'
 import {
-  assertDeviceLocalOverlay,
+  composeSaveWithOverlay,
+  mergeDeviceLocalOverlay,
+  sanitizeDeviceLocalOverlayPatch,
   toDeviceLocalOverlay,
   type DeviceLocalOverlay,
   type DeviceLocalSettings,
@@ -303,11 +305,7 @@ function legacySaveCandidate(value: unknown): SaveData {
 
 /** Applies the device-local overlay to canonical shared state for renderer load(). */
 export function composeLocalRepositorySave(shared: SharedSaveData, device: DeviceLocalOverlay): SaveData {
-  return {
-    ...shared,
-    petInfo: { ...shared.petInfo, ...device.petInfo },
-    settings: { ...shared.settings, ...device.settings },
-  } as SaveData
+  return composeSaveWithOverlay(shared, device)
 }
 
 export function normalizeLocalRepositoryDocument(raw: unknown): LoadedDocument {
@@ -526,11 +524,16 @@ export class LocalRepositoryHost {
   }
 
   async setLocalSettings(patch: Partial<DeviceLocalSettings>): Promise<LocalRepositoryHostProjection | null> {
+    return this.updateDeviceOverlay({ settings: patch })
+  }
+
+  /** Local-only position/settings/presentation update; never touches canonical shared state. */
+  async updateDeviceOverlay(value: unknown): Promise<LocalRepositoryHostProjection | null> {
     return this.enqueue(async () => {
       if (this.localDocument === null || this.isReadOnly() || this.state === 'suspended') throw new Error('local repository is read-only')
+      const patch = sanitizeDeviceLocalOverlayPatch(value)
       const candidate = clone(this.localDocument)
-      candidate.device = { ...candidate.device, settings: { ...candidate.device.settings, ...patch } }
-      assertDeviceLocalOverlay(candidate.device)
+      candidate.device = mergeDeviceLocalOverlay(candidate.device, patch)
       this.syncAuthorityOn(candidate, this.now())
       await this.persistDocument(candidate)
       this.localDocument = candidate

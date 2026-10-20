@@ -15,6 +15,7 @@ import { button, div, img } from './dom'
 import { TALK } from './island-talk'
 import { openShop, SOLD } from './shop'
 import { openTask } from './task'
+import { registerProjectionCacheInvalidator } from '../pet/projection-cache'
 
 const pick = <T>(a: readonly T[]): T => a[Math.floor(Math.random() * a.length)]
 /** One line of `pool` with its {slots} filled; {pet} is the pet's name. */
@@ -836,24 +837,29 @@ interface State {
   wins: number
 }
 
-const state: State = {
-  day: 0,
-  sent: 0,
-  letter: '',
-  note: '',
-  lit: [],
-  lamps: [],
-  tier: 0,
-  pieces: 0,
-  piece: false,
-  want: '',
-  loved: false,
-  news: [],
-  errands: [],
-  fought: [],
-  wins: 0,
-  ...JSON.parse(save.saveJsonData.island || '{}'),
+function loadState(): State {
+  return {
+    day: 0,
+    sent: 0,
+    letter: '',
+    note: '',
+    lit: [],
+    lamps: [],
+    tier: 0,
+    pieces: 0,
+    piece: false,
+    want: '',
+    loved: false,
+    news: [],
+    errands: [],
+    fought: [],
+    wins: 0,
+    ...JSON.parse(save.saveJsonData.island || '{}'),
+  }
 }
+
+let state = loadState()
+registerProjectionCacheInvalidator('island', () => { state = loadState() })
 const store = (): void => update('saveJsonData', { island: JSON.stringify(state) })
 
 /** The mall sells it and the pet can buy it now. */

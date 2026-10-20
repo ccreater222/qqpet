@@ -1,6 +1,7 @@
 import { windowView } from '../ui/window-view'
 import FRIES from './data/fries.json'
 import { earnYb, info, save, setInfo, update } from './store'
+import { registerProjectionCacheInvalidator } from './projection-cache'
 
 const HOUR = 3600
 const FEED_PRICE = 10
@@ -54,7 +55,7 @@ function load(): Pond {
   return { PD: p.PD ?? { allvipcnt: 0, canusecnt: 0 }, fishs }
 }
 
-const pond = load()
+let pond = load()
 const store = (): void => update('saveJsonData', { fishs: JSON.stringify(pond) })
 const now = (): number => Math.floor(Date.now() / 1000)
 const ripe = (f: Fish): boolean => f.stage >= 3
@@ -70,6 +71,7 @@ function grow(f: Fish, t: number): void {
 }
 
 let last = 0
+registerProjectionCacheInvalidator('fishing', () => { pond = load(); last = 0 })
 
 /** Grows every fish up to now; a clock set back empties the pond, as in the original. */
 function settle(): void {

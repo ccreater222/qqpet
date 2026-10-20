@@ -1,6 +1,16 @@
 import type { SaveData } from '../shared/save'
 import type { CommandKey, CommandResult, PetCommand } from '../shared/sync/protocol'
 import type { OrderedEvent } from '../shared/pet-runtime/events'
+import {
+  classifyProjectionDelivery,
+  createRendererProjection,
+  createRendererStatus,
+  type ProjectionCursor,
+  type RendererProjection,
+  type RendererRepositoryStatus,
+  type RendererRuntimeInfo,
+} from '../shared/renderer-api'
+import type { DeviceLocalOverlay, DeviceLocalOverlayPatch } from '../shared/sync/data-boundary'
 import { decodeEncodedReadResult, type LocalRepositoryFileReadResult } from '../shared/local-repository/storage'
 import {
   createLocalRepositoryHost,
@@ -8,7 +18,6 @@ import {
   type LocalRepositoryHost,
   type LocalRepositoryHostEvent,
   type LocalRepositoryHostProjection,
-  type LocalRepositoryHostStatus,
   type LocalRepositoryHostStorage,
   type LocalRepositoryHostTimerRuntime,
 } from '../shared/local-repository/host'
@@ -134,12 +143,18 @@ export interface MobileLocalRepositoryBridge {
   resume(): Promise<void>
   stop(): Promise<void>
   pump(): Promise<void>
-  getProjection(): LocalRepositoryHostProjection | null
-  getStatus(): LocalRepositoryHostStatus
+  runtimeInfo(): RendererRuntimeInfo
+  localSettings: {
+    load(): Promise<DeviceLocalOverlay>
+    update(patch: DeviceLocalOverlayPatch): Promise<DeviceLocalOverlay>
+  }
+  getProjection(): RendererProjection | null
+  getStatus(): RendererRepositoryStatus
   getRecentEvents(): LocalRepositoryHostEvent[]
-  onProjection(listener: (projection: LocalRepositoryHostProjection, events: OrderedEvent[]) => void): void
+  onProjection(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): void
+  onResync(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): void
   onCommandResult(listener: (result: CommandResult) => void): void
-  onSyncStatus(listener: (status: LocalRepositoryHostStatus) => void): void
+  onSyncStatus(listener: (status: RendererRepositoryStatus) => void): void
 }
 
 export function webCryptoAvailable(): boolean {
@@ -211,9 +226,25 @@ export function createMobileLocalRepositoryBridge(
   if (capability.canActivate === false) {
     throw new Error('local runtime v2 unavailable: ' + (capability.reason ?? 'capability_missing'))
   }
-  const projectionListeners: ((projection: LocalRepositoryHostProjection, events: OrderedEvent[]) => void)[] = []
+  const projectionListeners: ((projection: RendererProjection, events: OrderedEvent[]) => void)[] = []
+  const resyncListeners: ((projection: RendererProjection, events: OrderedEvent[]) => void)[] = []
   const resultListeners: ((result: CommandResult) => void)[] = []
-  const statusListeners: ((status: LocalRepositoryHostStatus) => void)[] = []
+  const statusListeners: ((status: RendererRepositoryStatus) => void)[] = []
+  let cursor: ProjectionCursor | null = null
+  const toRenderer = (projection: LocalRepositoryHostProjection): RendererProjection => {
+    const base = createRendererProjection({
+      save: projection.save,
+      shared: projection.shared,
+      device: projection.device,
+      revision: projection.revision,
+      eventSeq: projection.eventSeq,
+      gameTimeMs: projection.gameTimeMs,
+      timeZone: projection.timeZone,
+      advanceWhileEmpty: projection.advanceWhileEmpty,
+      authority: projection.authority,
+    })
+    return { ...base, status: createRendererStatus(projection.status, base) }
+  }
   const repository: LocalRepositoryHost = createLocalRepositoryHost({
     storage: options.storage,
     nowMs: options.nowMs ?? (() => Date.now()),
@@ -233,13 +264,31 @@ export function createMobileLocalRepositoryBridge(
       globalThis.setTimeout(resolve, 0)
     })),
     onProjection: (projection, events) => {
-      for (const listener of projectionListeners) listener(projection, events)
+      const renderer = toRenderer(projection)
+      const delivery = classifyProjectionDelivery(cursor, renderer, events)
+      if (delivery.kind === 'stale') return
+      cursor = {
+        revision: renderer.revision,
+        eventSeq: renderer.eventSeq,
+        owner: renderer.authority.owner,
+        authorityId: renderer.authority.authorityId,
+        authorityEpoch: renderer.authority.epoch,
+        restoreGeneration: renderer.authority.restoreGeneration,
+      }
+      if (delivery.kind === 'resync') {
+        for (const listener of resyncListeners) listener(renderer, events)
+        return
+      }
+      for (const listener of projectionListeners) listener(renderer, events)
     },
     onCommandResult: result => {
       for (const listener of resultListeners) listener(result)
     },
     onStatus: status => {
-      for (const listener of statusListeners) listener(status)
+      const current = repository.getProjection()
+      const renderer = current === null ? null : toRenderer(current)
+      const publicStatus = createRendererStatus(status, renderer)
+      for (const listener of statusListeners) listener(publicStatus)
     },
   }, {
     devRuntimeFlag: options.devRuntimeFlag,
@@ -311,10 +360,33 @@ export function createMobileLocalRepositoryBridge(
     async pump() {
       await repository.pump()
     },
-    getProjection: () => repository.getProjection(),
-    getStatus: () => repository.getStatus(),
+    runtimeInfo() {
+      return { localRepositoryV2: true, serverMode: false }
+    },
+    localSettings: {
+      async load() {
+        await start()
+        const projection = requireProjection()
+        return JSON.parse(JSON.stringify(projection.device)) as DeviceLocalOverlay
+      },
+      async update(patch) {
+        await start()
+        const projection = await repository.updateDeviceOverlay(patch)
+        if (projection === null) throw new Error('local settings update did not produce a projection')
+        return JSON.parse(JSON.stringify(projection.device)) as DeviceLocalOverlay
+      },
+    },
+    getProjection() {
+      const projection = repository.getProjection()
+      return projection === null ? null : toRenderer(projection)
+    },
+    getStatus() {
+      const projection = repository.getProjection()
+      return createRendererStatus(repository.getStatus(), projection === null ? null : toRenderer(projection))
+    },
     getRecentEvents: () => repository.getRecentEvents(),
     onProjection(listener) { projectionListeners.push(listener) },
+    onResync(listener) { resyncListeners.push(listener) },
     onCommandResult(listener) { resultListeners.push(listener) },
     onSyncStatus(listener) { statusListeners.push(listener) },
   }

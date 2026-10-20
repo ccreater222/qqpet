@@ -7,6 +7,10 @@ declare global {
     qqpet: QQPetApi
     __qqpetReady?: Promise<void>
     __qqpetInitialSave?: SaveData
+    /** Set before the store imports: true only for the explicit local-runtime-v2 authority. */
+    __qqpetRuntimeV2?: boolean
+    /** Initial repository head so the store can enforce ordered projection gaps. */
+    __qqpetInitialProjectionCursor?: { revision: number; eventSeq: number; owner?: 'local' | 'server'; authorityId?: string; authorityEpoch?: number; restoreGeneration?: number } | null
     __qqpetFlush?: () => Promise<void>
     __qqpetInput?: (input: PetPointerInput) => void
     __qqpetNativePetInput?: boolean

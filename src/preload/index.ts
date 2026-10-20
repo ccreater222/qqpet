@@ -1,14 +1,18 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, type QQPetApi } from '../shared/ipc'
+import { createRendererRuntimePreload } from './renderer-api'
 
 const send =
   (channel: string) =>
   (arg?: unknown): void =>
     ipcRenderer.send(channel, arg)
 
+const runtime = createRendererRuntimePreload(ipcRenderer)
+
 const api: QQPetApi = {
   load: () => ipcRenderer.invoke(IPC.load),
   save: send(IPC.save),
+  ...runtime,
   resetPet: send(IPC.resetPet),
   exportSave: () => ipcRenderer.invoke(IPC.exportSave),
   importSave: () => ipcRenderer.invoke(IPC.importSave),

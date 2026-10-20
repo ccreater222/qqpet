@@ -1,4 +1,5 @@
 import { app, clipboard, dialog, ipcMain, net, powerMonitor, session, shell } from 'electron'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { IPC, type TrayMenuItem, type TrayState } from '../shared/ipc'
 import type { SavePatch, Sex } from '../shared/save'
 import { aiChat, aiModels } from '../shared/ai'
@@ -11,7 +12,7 @@ import { contentMissing } from './content'
 import { openFirstRun, registerPackIpc } from './first-run'
 import { relaunch, spawnSelf } from './relaunch'
 import { handleScheme, registerScheme } from './protocol'
-import { exportSave, getSave, importSave, loadSave, patchSave, resetSave } from './save'
+import { exportSave, getSave, importSave, loadSave, patchSave, resetSave, setSaveView } from './save'
 import { createPetTray } from './tray'
 import { frontName } from './front'
 import { createPetWindow, openGameWindow } from './window'
@@ -21,6 +22,8 @@ import { VisitQueue } from './visit-queue'
 import { addFacts, clearMemory, loadDialogueState, loadHistory, loadMemory, rewriteFacts, saveDialogueState, saveHistory, type HistoryTurn } from './memory'
 import { DEFAULT_HOTKEY, parseHotkey, watchHotkey, type KeyWatcher } from './hotkey'
 import { preloadAsr, transcribe } from './asr'
+import { DesktopRendererRuntime, installRendererRuntimeIpc } from './renderer-runtime'
+import { desktopRendererRuntimeEnabled } from './renderer-runtime-flags'
 
 // A test sidecar (QQPET_USER_DATA) runs beside the real pet: own save, own id, own lock.
 if (process.env.QQPET_USER_DATA) app.setPath('userData', process.env.QQPET_USER_DATA)
@@ -40,13 +43,31 @@ if (toX11) {
 
 registerScheme()
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   handleScheme()
   registerPackIpc()
   // A lite installer's first run: get the pet's content before there is a pet (#28).
   if (contentMissing()) return void openFirstRun()
   app.dock?.hide()
-  loadSave()
+
+  // The legacy bare save remains the default. Only an explicit C6 runtime
+  // assertion constructs the local v2 authority; a failure never falls back to
+  // a second writer in the same run.
+  let rendererRuntime: DesktopRendererRuntime | null = null
+  if (desktopRendererRuntimeEnabled()) {
+    try {
+      rendererRuntime = new DesktopRendererRuntime({ userDataPath: app.getPath('userData') })
+      setSaveView(await rendererRuntime.start())
+    } catch (error) {
+      console.error('QQPet local runtime v2 failed to start:', error)
+      dialog.showErrorBox('QQPet 本地运行时启动失败', error instanceof Error ? error.message : String(error))
+      app.quit()
+      return
+    }
+  } else {
+    loadSave()
+  }
+  installRendererRuntimeIpc(rendererRuntime)
   // The talk key records locally; nothing else asks for permissions here.
   // The talk key records in the pet window only, and only sound: a game or community page never gets the microphone
   // or the camera. Every other permission keeps Electron's default (granted), as before voice existed.
@@ -61,6 +82,7 @@ app.whenReady().then(() => {
   }
 
   const win = createPetWindow()
+  rendererRuntime?.attachWindow(win)
   const petInit = (): { name: string; host: string; sex: 'GG' | 'MM'; level: number } => {
     const s = getSave()
     return { name: s.petInfo.name, host: s.petInfo.host, sex: s.petInfo.sex, level: s.petComputedlInfo.level }
@@ -187,10 +209,36 @@ app.whenReady().then(() => {
   }, () => {
     if (!win.isDestroyed()) win.webContents.send(IPC.trayHoverLeave)
   })
-  app.on('before-quit', () => {
+  const appliedSettings = { ...getSave().settings }
+  rendererRuntime?.onView((view) => {
+    if (win.isDestroyed()) return
+    const next = view.settings
+    if (next.zoom !== appliedSettings.zoom) win.webContents.setZoomFactor(next.zoom)
+    if (next.hd !== appliedSettings.hd) tray.setState(view)
+    if (next.watchApp !== appliedSettings.watchApp) watchFront(next.watchApp)
+    if (next.lan !== appliedSettings.lan) {
+      if (next.lan) startLan()
+      else {
+        lan.stop()
+        lanOn = false
+      }
+    }
+    if (next.webhook !== appliedSettings.webhook || next.webhookPort !== appliedSettings.webhookPort || next.webhookToken !== appliedSettings.webhookToken) syncWebhook()
+    if (next.voice !== appliedSettings.voice) (next.voice ? startVoice : stopVoice)()
+    tray.retip(view.petInfo)
+    Object.assign(appliedSettings, next)
+  })
+
+  let quitFinalized = false
+  app.on('before-quit', (event) => {
+    if (quitFinalized) return
+    quitFinalized = true
     tray.destroy()
     lan.stop()
     webhook.stop()
+    if (rendererRuntime === null) return
+    event.preventDefault()
+    void rendererRuntime.stop().finally(() => app.quit())
   })
   ipcMain.on(IPC.trayMenu, (event, items: TrayMenuItem[]) => {
     if (event.sender !== win.webContents) return
@@ -208,8 +256,14 @@ app.whenReady().then(() => {
     if (text.trim() && getSave().settings.clip) win.webContents.send(IPC.clipboard, text)
   }, 500)
 
-  ipcMain.handle(IPC.load, () => getSave())
+  ipcMain.handle(IPC.load, () => rendererRuntime === null ? getSave() : rendererRuntime.load())
   ipcMain.on(IPC.save, (_e, patch: SavePatch) => {
+    if (rendererRuntime !== null) {
+      void rendererRuntime.savePatch(patch).catch((error: unknown) => {
+        console.error('runtime save(patch) rejected:', error)
+      })
+      return
+    }
     patchSave(patch)
     if (patch.petInfo) {
       tray.retip(getSave().petInfo)
@@ -232,6 +286,12 @@ app.whenReady().then(() => {
     if (patch.settings?.voice !== undefined) (patch.settings.voice ? startVoice : stopVoice)()
   })
   ipcMain.on(IPC.resetPet, (_e, sex?: Sex) => {
+    if (rendererRuntime !== null) {
+      void rendererRuntime.reset().then(relaunch, (error: unknown) => {
+        console.error('runtime resetPet rejected:', error)
+      })
+      return
+    }
     resetSave(sex)
     relaunch()
   })
@@ -239,12 +299,21 @@ app.whenReady().then(() => {
     const day = new Date().toISOString().slice(0, 10)
     const r = await dialog.showSaveDialog(win, { defaultPath: `QQPet-${day}.json`, filters: [{ name: 'QQ宠物存档', extensions: ['json'] }] })
     if (r.canceled || !r.filePath) return false
+    if (rendererRuntime !== null) {
+      writeFileSync(r.filePath, await rendererRuntime.exportPortableBundleJson())
+      return true
+    }
     exportSave(r.filePath)
     return true
   })
   ipcMain.handle(IPC.importSave, async () => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'QQ宠物存档', extensions: ['json'] }] })
     if (r.canceled) return
+    if (rendererRuntime !== null) {
+      await rendererRuntime.importPortableBundleJson(readFileSync(r.filePaths[0], 'utf8'))
+      relaunch()
+      return
+    }
     importSave(r.filePaths[0])
     relaunch()
   })

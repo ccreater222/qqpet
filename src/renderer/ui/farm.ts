@@ -1,4 +1,5 @@
-import { avatar, info, onSaveFlush, save, scaleYb, setInfo, update } from '../pet/store'
+import { avatar, info, onSaveFlush, runtimeProjectionMode, save, scaleYb, setInfo, update } from '../pet/store'
+import { registerProjectionCacheInvalidator } from '../pet/projection-cache'
 import { SwfPlayer } from '../swf/player'
 import { readSol, writeSol, type Sol } from '../swf/sol'
 import { openBox } from './box'
@@ -22,13 +23,15 @@ interface Land {
 }
 
 // Farms used to live only in localStorage; adopt one once, at startup, so a later reset or import can't pick up a stale one.
-if (localStorage.getItem(MIGRATED) === null) {
+if (runtimeProjectionMode === false && localStorage.getItem(MIGRATED) === null) {
   const legacy = readSol(KEY)?.user
   if (legacy && !save.saveJsonData.farm) update('saveJsonData', { farm: JSON.stringify(legacy) })
   localStorage.setItem(MIGRATED, '1')
 }
 
 let open = false
+let farmStale = false
+let closeFarm: (() => void) | null = null
 
 /** The save Farm.swf writes on its first run (FarmMain.locationInit). */
 function fresh(): Sol {
@@ -56,6 +59,7 @@ function fresh(): Sol {
 export function openFarm(): void {
   if (open) return
   open = true
+  farmStale = false
   const stored = save.saveJsonData.farm
   const user: Sol = { ...(stored ? JSON.parse(stored) : fresh()), username: info.name, wealth: String(info.yb) }
   writeSol(KEY, 'test', { user })
@@ -95,17 +99,27 @@ export function openFarm(): void {
     button('fcc wsnw act', async () => void (await player.callback('farmView'))(), '全景/原尺寸'),
   )
   window.qqpet.setFocusable(true)
-  openBox(div('ui-farm', host, actions), {
+  closeFarm = openBox(div('ui-farm', host, actions), {
     onClose: () => {
       clearInterval(timer)
-      flushFarm()
+      if (farmStale === false) flushFarm()
       stopFlush()
       window.qqpet.setFocusable(false)
       open = false
+      closeFarm = null
     },
   })
   void player.load('pet/qqfarm/Farm.swf', 'pet/qqfarm/')
 }
+
+// A remote farm projection invalidates the running SWF's scratch state. Close
+// the panel rather than letting stale local SWF bytes overwrite canonical farm
+// state on the next settle; the next open starts from the projection.
+registerProjectionCacheInvalidator('farm', () => {
+  if (open === false) return
+  farmStale = true
+  closeFarm?.()
+})
 
 let ripening: Promise<Record<string, number>> | undefined
 

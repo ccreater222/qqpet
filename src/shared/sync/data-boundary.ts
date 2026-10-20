@@ -39,6 +39,13 @@ export interface DeviceLocalOverlay {
   presentation?: JsonObject
 }
 
+/** Renderer-initiated device-only update. It can never carry `localDeviceId` or canonical fields. */
+export interface DeviceLocalOverlayPatch {
+  petInfo?: Partial<DeviceLocalOverlay['petInfo']>
+  settings?: Partial<DeviceLocalSettings>
+  presentation?: JsonObject
+}
+
 export const SHARED_PET_INFO_KEYS = [
   'name', 'host', 'sex', 'growth', 'hunger', 'clean', 'health', 'mood', 'birthDay',
   'intel', 'charm', 'strong', 'onLineTime', 'yb', 'lastLoginTime', 'onlineDataTime',
@@ -129,6 +136,79 @@ export function pickDeviceLocalSettings(settings: Settings): DeviceLocalSettings
   const local: Record<string, unknown> = {}
   for (const key of DEVICE_LOCAL_SETTINGS_KEYS) local[key] = settings[key]
   return local as DeviceLocalSettings
+}
+
+/** Applies a validated device-only patch while retaining the persisted local identity. */
+export function mergeDeviceLocalOverlay(
+  current: DeviceLocalOverlay,
+  patch: DeviceLocalOverlayPatch,
+): DeviceLocalOverlay {
+  assertDeviceLocalOverlay(current)
+  const next: DeviceLocalOverlay = {
+    localDeviceId: current.localDeviceId,
+    petInfo: { ...current.petInfo, ...(patch.petInfo ?? {}) },
+    settings: { ...current.settings, ...(patch.settings ?? {}) },
+  }
+  if (patch.presentation !== undefined) {
+    next.presentation = { ...(current.presentation ?? {}), ...patch.presentation }
+  } else if (current.presentation !== undefined) {
+    next.presentation = current.presentation
+  }
+  assertDeviceLocalOverlay(next)
+  return next
+}
+
+/** Rejects unknown fields before a patch can reach the persisted overlay. */
+export function sanitizeDeviceLocalOverlayPatch(value: unknown): DeviceLocalOverlayPatch {
+  requireRecord(value, '$.localSettingsPatch')
+  assertOnlyKeys(value, ['petInfo', 'settings', 'presentation'], '$.localSettingsPatch')
+  const patch: DeviceLocalOverlayPatch = {}
+  if (value.petInfo !== undefined) {
+    requireRecord(value.petInfo, '$.localSettingsPatch.petInfo')
+    assertOnlyKeys(value.petInfo, DEVICE_ONLY_PET_INFO_KEYS, '$.localSettingsPatch.petInfo')
+    for (const key of DEVICE_ONLY_PET_INFO_KEYS) {
+      const entry = value.petInfo[key]
+      if (entry !== undefined && (typeof entry !== 'number' || Number.isFinite(entry) === false)) {
+        failSchema('invalid_schema', '$.localSettingsPatch.petInfo.' + key, 'expected a finite number')
+      }
+    }
+    patch.petInfo = value.petInfo as Partial<DeviceLocalOverlay['petInfo']>
+  }
+  if (value.settings !== undefined) {
+    requireRecord(value.settings, '$.localSettingsPatch.settings')
+    assertOnlyKeys(value.settings, DEVICE_LOCAL_SETTINGS_KEYS, '$.localSettingsPatch.settings')
+    // Field types are checked after merging by assertDeviceLocalOverlay.
+    patch.settings = value.settings as Partial<DeviceLocalSettings>
+  }
+  if (value.presentation !== undefined) {
+    requireJsonObject(value.presentation, '$.localSettingsPatch.presentation')
+    for (const key of Object.keys(value.presentation)) {
+      if ((SHARED_SAVE_JSON_KEYS as readonly string[]).includes(key)) {
+        failSchema('forbidden_field', '$.localSettingsPatch.presentation.' + key, 'canonical saveJsonData keys cannot be device presentation')
+      }
+    }
+    patch.presentation = value.presentation as JsonObject
+  }
+  return patch
+}
+
+/**
+ * Renderer-facing SaveData: canonical shared state with the device overlay applied.
+ * Presentation entries that are strings overlay the corresponding `saveJsonData` cache keys.
+ */
+export function composeSaveWithOverlay(shared: SharedSaveData, device: DeviceLocalOverlay): SaveData {
+  const saveJsonData: Record<string, string> = { ...shared.saveJsonData }
+  for (const [key, value] of Object.entries(device.presentation ?? {})) {
+    if (typeof value === 'string' && (SHARED_SAVE_JSON_KEYS as readonly string[]).includes(key) === false) {
+      saveJsonData[key] = value
+    }
+  }
+  return {
+    ...shared,
+    petInfo: { ...shared.petInfo, ...device.petInfo },
+    settings: { ...shared.settings, ...device.settings },
+    saveJsonData,
+  } as SaveData
 }
 
 export function toSharedSaveData(save: SaveData): SharedSaveData {

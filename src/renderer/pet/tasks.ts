@@ -5,6 +5,7 @@ import { loot } from './loot'
 import { rand } from './rand'
 import { info, save, update } from './store'
 import { dayStart } from './vip'
+import { registerProjectionCacheInvalidator } from './projection-cache'
 
 /**
  * Today's face pokes, trips, goods eaten, cleaned with and played with, shifts, lessons, games and minutes of games;
@@ -130,7 +131,8 @@ function load(): Progress {
   }
 }
 
-const progress = load()
+let progress = load()
+registerProjectionCacheInvalidator('tasks', () => { progress = load() })
 const store = (): void => update('saveJsonData', { task: JSON.stringify(progress) })
 const defs = (tab: Tab): Task[] => (tab === 'daily' ? progress.daily : TASKS[tab])
 

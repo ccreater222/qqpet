@@ -4,6 +4,7 @@ import { loot } from './loot'
 import { rand } from './rand'
 import { info, save, update } from './store'
 import { dayStart } from './vip'
+import { registerProjectionCacheInvalidator } from './projection-cache'
 
 const GIFT_MINUTES = 20
 const BIRTHDAY_FOODS =
@@ -35,7 +36,8 @@ function load(): SignIn {
   }
 }
 
-export const signin = load()
+export let signin = load()
+registerProjectionCacheInvalidator('signin', () => { signin = load() })
 const store = (): void => update('saveJsonData', { signin: JSON.stringify(signin) })
 
 export const monthSigns = (y: number, m: number): number[] => signin.collectionList[y]?.[m] ?? []

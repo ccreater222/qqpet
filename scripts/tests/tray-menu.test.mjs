@@ -46,6 +46,9 @@ function fixture(platform) {
   }
   const api = platform === 'mobile' ? {} : load('../../src/preload/index.ts', {
     process: { platform }, IPC, ipcRenderer, contextBridge: { exposeInMainWorld() {} },
+    // C6 runtime methods have their own focused IPC test; this fixture only
+    // needs the tray/menu members of the preload API.
+    createRendererRuntimePreload: () => ({}),
   })
   const open = load('../../src/renderer/ui/menu.ts', {
     window: { qqpet: { ...api, quit: () => actions.push('quit') } },

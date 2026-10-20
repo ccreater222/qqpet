@@ -3,6 +3,7 @@ import { webSearch } from '../shared/websearch'
 import { calendar } from '../shared/calendar'
 import { cloneJson } from '../shared/compat'
 import type { Fetch, Point, QQPetApi, TrayClick, TrayState } from '../shared/ipc'
+import { legacyRendererStatus } from '../shared/renderer-api'
 import type { SaveData } from '../shared/save'
 import type { SwfFailure } from '../renderer/swf/player'
 import { applyPatch, buried, petOf, startSave } from '../shared/save-logic'
@@ -388,6 +389,27 @@ window.__qqpetIOS = {
 
 const api: QQPetApi = {
   capabilities,
+  runtimeInfo: async () => ({
+    localRepositoryV2: localRuntime !== null,
+    serverMode: false,
+    ...(localRuntimeFailure === undefined ? {} : { reason: localRuntimeFailure }),
+  }),
+  async command() {
+    throw new Error('local runtime v2 is not active')
+  },
+  async setAdvanceWhileEmpty() {
+    throw new Error('local runtime v2 is not active')
+  },
+  localSettings: {
+    async load() { throw new Error('local runtime v2 is not active') },
+    async update() { throw new Error('local runtime v2 is not active') },
+  },
+  onProjection() {},
+  onCommandResult() {},
+  onSyncStatus() {},
+  onResync() {},
+  getProjection: () => null,
+  getStatus: () => legacyRendererStatus(),
   async load() {
     await ready
     if (localRuntime !== null) return localRuntime.load()
@@ -543,9 +565,15 @@ const ready: Promise<void> = rpc.request<Bootstrap>('bootstrap', { role }).then(
       localRuntimeFailure = undefined
       capabilities.localRepositoryV2 = true
       delete capabilities.localRepositoryV2Reason
+      api.runtimeInfo = async () => runtime.runtimeInfo()
       api.command = runtime.command.bind(runtime)
       api.setAdvanceWhileEmpty = async (enabled) => { await runtime.setAdvanceWhileEmpty(enabled) }
+      api.localSettings = {
+        load: () => runtime.localSettings.load(),
+        update: patch => runtime.localSettings.update(patch),
+      }
       api.onProjection = listener => runtime.onProjection(listener)
+      api.onResync = listener => runtime.onResync(listener)
       api.onCommandResult = listener => runtime.onCommandResult(listener)
       api.onSyncStatus = listener => runtime.onSyncStatus(listener)
       api.getProjection = () => runtime.getProjection()

@@ -13,8 +13,10 @@ import {
 } from '../shared/pet-runtime/idempotency'
 import type { CommandError, CommandRole, PetCommand } from '../shared/sync/protocol'
 import type { RuntimeCommandContext, RuntimeOutcome } from '../shared/pet-runtime/runtime-types'
+import type { SaveData } from '../shared/save'
 import {
-  assertDeviceLocalOverlay, toDeviceLocalOverlay, type DeviceLocalOverlay, type DeviceLocalSettings,
+  composeSaveWithOverlay, mergeDeviceLocalOverlay, sanitizeDeviceLocalOverlayPatch,
+  toDeviceLocalOverlay, type DeviceLocalOverlay, type DeviceLocalSettings,
   type SharedSaveData,
 } from '../shared/sync/data-boundary'
 import {
@@ -27,7 +29,6 @@ export const LOCAL_REPOSITORY_ENV_FLAG = 'QQPET_LOCAL_REPOSITORY_V2'
 export const LOCAL_V2_ACTIVE_ENV_FLAG = 'QQPET_LOCAL_V2_ACTIVE'
 export const LOCAL_SCHEDULER_POLL_MS = 1000
 export const LOCAL_COVERAGE_GRACE_MS = 60_000
-export const LOCAL_REPOSITORY_ACTIVATION_DEFERRED_TO_C6 = true
 const LOCAL_REPOSITORY_ACTIVATION_TOKEN = Symbol('local-repository-activation')
 
 export type LocalRepositoryState = 'loading' | 'ready' | 'catching_up' | 'read_only' | 'handoff_pending' | 'suspended' | 'stopped'
@@ -56,6 +57,8 @@ export interface LocalPetProjection {
   timeZone: string
   advanceWhileEmpty: boolean
   authority: { state: 'active' | 'handoff_pending' | 'archived'; stamp: AuthorityStamp }
+  /** Renderer-ready shared state with the device overlay applied. */
+  save: SaveData
   shared: SharedSaveData
   device: DeviceLocalOverlay
   runtime: { appInstanceId: string; startedAtWallMs: number; localDeviceId: string }
@@ -99,13 +102,13 @@ export interface LocalRepositoryOptions {
 export interface LocalRepositoryCapability {
   flagEnabled: boolean
   canActivate: boolean
-  activation: 'deferred-c6'
+  activation: 'c6-renderer-capability'
   reason?: 'flag_disabled' | 'c6_activation_missing' | 'renderer_capability_missing' | 'legacy_authority_active'
 }
 
 export function localRepositoryCapability(env: NodeJS.ProcessEnv = process.env, legacyAuthorityActive = false, rendererCapability = false): LocalRepositoryCapability {
   const flagEnabled = localRepositoryEnabled(env)
-  const activation = LOCAL_REPOSITORY_ACTIVATION_DEFERRED_TO_C6 ? 'deferred-c6' as const : 'deferred-c6' as const
+  const activation = 'c6-renderer-capability' as const
   if (flagEnabled === false) return { flagEnabled, canActivate: false, activation, reason: 'flag_disabled' }
   if (env[LOCAL_V2_ACTIVE_ENV_FLAG] !== '1') return { flagEnabled, canActivate: false, activation, reason: 'c6_activation_missing' }
   if (rendererCapability === false) return { flagEnabled, canActivate: false, activation, reason: 'renderer_capability_missing' }
@@ -337,16 +340,26 @@ export class LocalRepository {
   }
 
   setLocalSettings(patch: Partial<DeviceLocalSettings>): Promise<LocalPetProjection | null> {
+    return this.updateDeviceOverlay({ settings: patch })
+  }
+
+  /** Device-only position/settings/presentation update; canonical gameplay never changes. */
+  updateDeviceOverlay(value: unknown): Promise<LocalPetProjection | null> {
     return this.enqueue(async () => {
       if (this.localDocument === null || this.isReadOnly()) throw new Error('local repository is read-only')
+      const patch = sanitizeDeviceLocalOverlayPatch(value)
       const candidate = cloneDocument(this.localDocument)
-      candidate.device = { ...candidate.device, settings: { ...candidate.device.settings, ...patch } }
-      assertDeviceLocalOverlay(candidate.device)
+      candidate.device = mergeDeviceLocalOverlay(candidate.device, patch)
+      this.syncAuthorityOn(candidate, this.now())
       this.persistCandidate(candidate)
       this.localDocument = candidate
       this.emitProjection()
       return this.getProjection()
     })
+  }
+
+  getDeviceOverlay(): DeviceLocalOverlay | null {
+    return this.localDocument === null ? null : JSON.parse(JSON.stringify(this.localDocument.device)) as DeviceLocalOverlay
   }
 
   command(command: PetCommand, opId: string, role: LocalRepositoryRole = 'owner'): Promise<LocalCommandResult> {
@@ -834,6 +847,7 @@ export class LocalRepository {
       revision: this.localDocument.revision, eventSeq: this.localDocument.eventSeq,
       gameTimeMs: engine.gameTimeMs, timeZone: engine.timeZone, advanceWhileEmpty: engine.advanceWhileEmpty,
       authority: { state: this.localDocument.authority.state, stamp: this.localDocument.authority.stamp },
+      save: composeSaveWithOverlay(engine.save, this.localDocument.device),
       shared: engine.save, device: this.localDocument.device,
       runtime: { appInstanceId: this.localDocument.runtime.appInstanceId, startedAtWallMs: this.localDocument.runtime.startedAtWallMs, localDeviceId: this.localDeviceIdValue },
     }
@@ -860,9 +874,9 @@ export interface LocalRepositoryLifecycleEvents {
   onQuit(listener: () => void): void
 }
 
-/** Registers start-on-ready/stop-on-quit only when the explicit flag is enabled.
- * C6 renderer wiring is deliberately deferred; src/main/index.ts remains legacy-only,
- * so this helper cannot create a second authority in the current app. */
+/** Registers start-on-ready/stop-on-quit only when the explicit C6 flag is enabled.
+ * src/main/index.ts uses DesktopRendererRuntime directly; this helper stays for
+ * host tests and programmatic lifecycle reconciliation. */
 export function registerLocalRepositoryLifecycle(options: LocalRepositoryOptions, events: LocalRepositoryLifecycleEvents, env: NodeJS.ProcessEnv = process.env): LocalRepository | null {
   if (options.authorityState === undefined) return null
   if (localRepositoryCapability(env, options.authorityState === 'legacy-active', options.rendererCapability === true).canActivate === false) return null
