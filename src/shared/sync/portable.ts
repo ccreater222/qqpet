@@ -16,6 +16,7 @@ import type {
   WeatherDayRecord,
 } from '../pet-runtime/types'
 import type { OpIdCache } from '../pet-runtime/idempotency'
+import type { OrderedDomainEvent } from '../pet-runtime/events'
 import type { SaveData } from '../save'
 import type { DeviceLocalOverlay, SharedSaveData } from './data-boundary'
 import {
@@ -107,6 +108,8 @@ export interface LocalPetDocumentV2 {
   device: DeviceLocalOverlay
   /** Host-level opId cache committed atomically with the local document. */
   idempotency?: OpIdCache
+  /** Recent ordered event history retained by the local host. */
+  eventHistory?: OrderedDomainEvent[]
 }
 
 export interface RemoteProjectionCacheV2 {
@@ -700,11 +703,7 @@ export function migrateLegacyLocalPetDocumentV2(value: unknown): LocalPetDocumen
   requireRecord(value, '$.local')
   requireRecord(value.device, '$.local.device')
   assertNonEmptyString(value.device.localDeviceId, '$.local.device.localDeviceId')
-  if (value.idempotency !== undefined) {
-    requireRecord(value.idempotency, '$.local.idempotency')
-    if (value.idempotency.schemaVersion !== 2) failSchema('unsupported_schema_version', '$.local.idempotency.schemaVersion', 'expected idempotency schema version 2')
-    if (Array.isArray(value.idempotency.records) === false) failSchema('invalid_schema', '$.local.idempotency.records', 'expected array')
-  }
+  if (value.idempotency !== undefined) assertLocalIdempotencyCache(value.idempotency, '$.local.idempotency')
   requireRecord(value.runtime, '$.local.runtime')
   const runtime: Record<string, unknown> = { ...value.runtime }
   if (Object.prototype.hasOwnProperty.call(runtime, 'localDeviceId')) {
@@ -759,6 +758,45 @@ export function deserializePortablePetBundle(serialized: string): PortablePetBun
   return migratePortablePetBundle(parsed)
 }
 
+function assertLocalIdempotencyCache(value: unknown, path: string): void {
+  requireRecord(value, path)
+  assertOnlyKeys(value, ['schemaVersion', 'records'], path)
+  if (value.schemaVersion !== 2) failSchema('unsupported_schema_version', path + '.schemaVersion', 'expected idempotency schema version 2')
+  if (Array.isArray(value.records) === false) failSchema('invalid_schema', path + '.records', 'expected array')
+  const seen = new Set<string>()
+  for (const record of value.records) {
+    requireRecord(record, path + '.records[]')
+    assertRequiredKeys(record, ['petId', 'deviceId', 'opId', 'commandType', 'resultPresent'], path + '.records[]')
+    assertOnlyKeys(record, ['petId', 'deviceId', 'opId', 'commandType', 'resultPresent', 'result', 'error'], path + '.records[]')
+
+    assertNonEmptyString(record.petId, path + '.records[].petId')
+    assertNonEmptyString(record.deviceId, path + '.records[].deviceId')
+    assertNonEmptyString(record.opId, path + '.records[].opId')
+    if (typeof record.commandType !== 'string' || record.commandType.length === 0) failSchema('invalid_schema', path + '.records[].commandType', 'expected command type')
+    if (typeof record.resultPresent !== 'boolean') failSchema('invalid_schema', path + '.records[].resultPresent', 'expected boolean')
+    const hasResult = Object.prototype.hasOwnProperty.call(record, 'result')
+    const hasError = Object.prototype.hasOwnProperty.call(record, 'error')
+    if (hasResult && hasError) failSchema('invalid_schema', path + '.records[]', 'result and error are mutually exclusive')
+    if (record.resultPresent) {
+      if (hasResult === false) failSchema('invalid_schema', path + '.records[]', 'resultPresent requires result')
+      if (hasError) failSchema('invalid_schema', path + '.records[]', 'resultPresent cannot have error')
+    } else if (hasResult) {
+      failSchema('invalid_schema', path + '.records[]', 'resultPresent=false cannot have result')
+    } else if (hasError) {
+      requireRecord(record.error, path + '.records[].error')
+      assertRequiredKeys(record.error, ['code', 'message', 'refreshProjection'], path + '.records[].error')
+      assertOnlyKeys(record.error, ['code', 'message', 'refreshProjection', 'retryable'], path + '.records[].error')
+      assertNonEmptyString(record.error.code, path + '.records[].error.code')
+      assertNonEmptyString(record.error.message, path + '.records[].error.message')
+      if (typeof record.error.refreshProjection !== 'boolean') failSchema('invalid_schema', path + '.records[].error.refreshProjection', 'expected boolean')
+      if (record.error.retryable !== undefined && typeof record.error.retryable !== 'boolean') failSchema('invalid_schema', path + '.records[].error.retryable', 'expected boolean')
+    }
+    const key = JSON.stringify([record.petId, record.deviceId, record.opId])
+    if (seen.has(key)) failSchema('invalid_schema', path + '.records', 'duplicate idempotency key')
+    seen.add(key)
+  }
+}
+
 export function assertLocalPetDocumentV2(value: unknown): asserts value is LocalPetDocumentV2 {
   try {
     assertJsonSafe(value)
@@ -780,7 +818,7 @@ export function assertLocalPetDocumentV2(value: unknown): asserts value is Local
   assertSchemaVersion(value.schemaVersion, LOCAL_DOCUMENT_SCHEMA_VERSION, '$.local.schemaVersion', 'local document')
   if (value.format !== LOCAL_DOCUMENT_FORMAT) failSchema('unsupported_format', '$.local.format', 'expected ' + LOCAL_DOCUMENT_FORMAT)
   assertRequiredKeys(value, ['format', 'schemaVersion', 'revision', 'eventSeq', 'authority', 'bundle', 'runtime', 'device'], '$.local')
-  assertOnlyKeys(value, ['format', 'schemaVersion', 'revision', 'eventSeq', 'authority', 'bundle', 'runtime', 'device', 'idempotency'], '$.local')
+  assertOnlyKeys(value, ['format', 'schemaVersion', 'revision', 'eventSeq', 'authority', 'bundle', 'runtime', 'device', 'idempotency', 'eventHistory'], '$.local')
   requireNonNegativeInteger(value.revision, '$.local.revision')
   requireNonNegativeInteger(value.eventSeq, '$.local.eventSeq')
   requireRecord(value.authority, '$.local.authority')
@@ -797,10 +835,19 @@ export function assertLocalPetDocumentV2(value: unknown): asserts value is Local
   if (value.revision !== value.bundle.authority.revision || value.eventSeq !== value.bundle.authority.eventSeq) {
     failSchema('invalid_schema', '$.local', 'local revision/eventSeq must match the bundle authority stamp')
   }
-  if (value.idempotency !== undefined) {
-    requireRecord(value.idempotency, '$.local.idempotency')
-    if (value.idempotency.schemaVersion !== 2) failSchema('unsupported_schema_version', '$.local.idempotency.schemaVersion', 'expected idempotency schema version 2')
-    if (Array.isArray(value.idempotency.records) === false) failSchema('invalid_schema', '$.local.idempotency.records', 'expected array')
+  if (value.idempotency !== undefined) assertLocalIdempotencyCache(value.idempotency, '$.local.idempotency')
+  if (value.eventHistory !== undefined) {
+    if (Array.isArray(value.eventHistory) === false) failSchema('invalid_schema', '$.local.eventHistory', 'expected array')
+    let previousEventSeq = 0
+    for (const event of value.eventHistory) {
+      requireRecord(event, '$.local.eventHistory[]')
+      assertRequiredKeys(event, ['eventSeq', 'type', 'payload'], '$.local.eventHistory[]')
+      requireNonNegativeInteger(event.eventSeq, '$.local.eventHistory[].eventSeq')
+      if (event.eventSeq <= previousEventSeq) failSchema('invalid_schema', '$.local.eventHistory', 'event sequence must increase')
+      previousEventSeq = event.eventSeq
+      if (typeof event.type !== 'string' || event.type.length === 0) failSchema('invalid_schema', '$.local.eventHistory[].type', 'expected event type')
+    }
+    if (previousEventSeq > value.eventSeq) failSchema('invalid_schema', '$.local.eventHistory', 'event history exceeds document eventSeq')
   }
   requireRecord(value.runtime, '$.local.runtime')
   assertRequiredKeys(value.runtime, ['appInstanceId', 'startedAtWallMs'], '$.local.runtime')

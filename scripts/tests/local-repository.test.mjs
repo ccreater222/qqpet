@@ -14,7 +14,7 @@ registerHooks({
   },
 })
 
-const { LocalRepository, localRepositoryEnabled, startLocalRepositoryIfEnabled, registerLocalRepositoryLifecycle } = await import('../../src/main/local-repository.ts')
+const { LocalRepository, localRepositoryEnabled, localRepositoryCapability, startLocalRepositoryIfEnabled, registerLocalRepositoryLifecycle } = await import('../../src/main/local-repository.ts')
 const { validateLocalPetDocumentV2 } = await import('../../src/shared/sync/portable.ts')
 const { createSyncFixtures, SEED, WALL_TIME_MS, LOCAL_DEVICE_ID } = await import('./sync-fixtures.mjs')
 const { validateOpIdCache } = await import('../../src/shared/pet-runtime/idempotency.ts')
@@ -71,7 +71,7 @@ test('local repository migrates bare save to atomic v2 document and supports ide
   const saved = JSON.parse(readFileSync(join(dir, 'save.json'), 'utf8'))
   assert.equal(saved.format, 'qqpet-local-v2')
   assert.ok(saved.idempotency.records.some(record => record.opId === 'op-local-1'))
-  repo.setLocalSettings({ zoom: 1.25 })
+  await repo.setLocalSettings({ zoom: 1.25 })
   assert.equal(repo.getProjection().device.settings.zoom, 1.25)
   repo.setRole('player')
   assert.equal(repo.getStatus().role, 'player')
@@ -197,6 +197,10 @@ test('default legacy path stays untouched unless the explicit local repository f
   const options = repoOptions(dir, { value: WALL_TIME_MS })
   assert.equal(startLocalRepositoryIfEnabled(options, {}), null)
   assert.equal(existsSync(join(dir, 'save.json')), false)
+  assert.equal(localRepositoryCapability({}, false).canActivate, false)
+  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1' }, true).reason, 'legacy_authority_active')
+  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1' }, false).canActivate, true)
+  assert.equal(startLocalRepositoryIfEnabled({ ...options, legacyAuthorityActive: true }, { QQPET_LOCAL_REPOSITORY_V2: '1' }), null)
 })
 
 test('suspend/resume closes exact segment without counting suspended time; malformed documents fail read-only', async () => {
@@ -206,14 +210,14 @@ test('suspend/resume closes exact segment without counting suspended time; malfo
   const repo = new LocalRepository(repoOptions(dir, clock))
   await repo.load()
   clock.value += 1000
-  const suspended = repo.suspend()
+  const suspended = await await repo.suspend()
   assert.equal(suspended.status.state, 'suspended')
   let coverage = repo.getDocument().bundle.engine.sessionCoverage
   assert.equal(coverage[0].disconnectedAtWallMs, WALL_TIME_MS + 1000)
   assert.equal(coverage[0].closeReason, 'suspend')
   assert.equal(repo.getDocument().bundle.engine.coverageReopen.state, 'suspended')
   clock.value += 5000
-  repo.resume()
+  await repo.resume()
   coverage = repo.getDocument().bundle.engine.sessionCoverage
   assert.equal(coverage[coverage.length - 1].connectedAtWallMs, WALL_TIME_MS + 6000)
   assert.equal(repo.getDocument().bundle.engine.coverageReopen, undefined)
@@ -262,7 +266,7 @@ test('local command queue serializes concurrent retries and persists one idempot
   assert.equal([first.duplicate, second.duplicate].filter(Boolean).length, 1)
   assert.equal(repo.getProjection().shared.petInfo.yb, startYb + 11)
   assert.equal(repo.getDocument().idempotency.records.filter(record => record.opId === 'op-queue').length, 1)
-  repo.setAdvanceWhileEmpty(false)
+  await repo.setAdvanceWhileEmpty(false)
   assert.equal(repo.getProjection().advanceWhileEmpty, false)
   await repo.stop()
 })
@@ -310,13 +314,14 @@ test('detach freezes epoch and server-detach import validates authority then rea
   serverBundle.authority.restoreGeneration = 2
   const imported = await repo.importPortableBundle(serverBundle, {
     opId: 'op-server-import', expectedAuthorityId: 'server-authority-1',
-    expectedRestoreGeneration: 2, expectedEpoch: 5, expectedRevision: serverBundle.authority.revision,
+    expectedRestoreGeneration: 2, expectedEpoch: 5, expectedRevision: serverBundle.authority.revision, expectedEventSeq: serverBundle.authority.eventSeq,
   })
   assert.ok(imported)
   const importedDoc = repo.getDocument()
   assert.equal(importedDoc.authority.state, 'active')
   assert.equal(importedDoc.authority.stamp.owner, 'local')
   assert.equal(importedDoc.authority.stamp.epoch, 7)
+  assert.equal(importedDoc.authority.stamp.authorityId, 'server-authority-1')
   assert.equal(importedDoc.authority.stamp.restoreGeneration, 2)
   assert.equal(importedDoc.bundle.engine.sessionCoverage.length, detached.engine.sessionCoverage.length + 1)
   assert.equal(importedDoc.bundle.engine.sessionCoverage.filter(interval => interval.disconnectedAtWallMs === undefined).length, 1)
@@ -424,7 +429,7 @@ test('suspend closes normal coverage at heartbeat grace and projection callbacks
   callbackProjection.shared.petInfo.yb = -2
   assert.notEqual(repo.getProjection().shared.petInfo.yb, -2)
   clock.value += 120000
-  repo.suspend()
+  await repo.suspend()
   const doc = repo.getDocument()
   assert.equal(doc.bundle.engine.sessionCoverage[0].disconnectedAtWallMs, WALL_TIME_MS + 60000)
   assert.equal(repo.lastReopen.commitWallMs, WALL_TIME_MS + 60000)
@@ -446,4 +451,127 @@ test('flush and stop drain the serialized queue before final write', async () =>
   const saved = JSON.parse(readFileSync(join(dir, 'save.json'), 'utf8'))
   assert.equal(saved.bundle.engine.save.petInfo.yb, startYb + 13)
   assert.ok(saved.idempotency.records.some(record => record.opId === 'op-drain'))
+})
+
+test('detach rollback snapshot restores active scheduler after restart and clears read-only error', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  let starts = 0
+  let stops = 0
+  const startTimer = () => { starts++; return () => { stops++ } }
+  const first = new LocalRepository(repoOptions(dir, clock, { autoScheduler: true, startTimer }))
+  await first.start()
+  assert.equal(first.isSchedulerRunning(), true)
+  await first.exportForDetach(2)
+  assert.equal(first.isSchedulerRunning(), false)
+  assert.ok(existsSync(join(dir, 'save.json.pre-detach.json')))
+  const restarted = new LocalRepository(repoOptions(dir, clock, { autoScheduler: true, startTimer }))
+  await restarted.start()
+  assert.equal(restarted.getStatus().readOnly, true)
+  assert.equal(restarted.isSchedulerRunning(), false)
+  await restarted.rollbackDetach()
+  assert.equal(restarted.getStatus().state, 'ready')
+  assert.equal(restarted.getStatus().error, undefined)
+  assert.equal(restarted.isSchedulerRunning(), true)
+  assert.ok(starts >= 2)
+  assert.ok(stops >= 1)
+})
+
+test('server handoff import rejects missing exact authority fields and stays read-only', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  const repo = new LocalRepository(repoOptions(dir, clock))
+  await repo.load()
+  const bundle = await repo.exportForDetach(1)
+  bundle.authority.owner = 'server'
+  bundle.authority.authorityId = 'server-detach-auth'
+  const result = await repo.importPortableBundle(bundle, { opId: 'op-missing-authority' })
+  assert.equal(result, null)
+  assert.equal(repo.getStatus().readOnly, true)
+  assert.equal(repo.getDocument().authority.state, 'handoff_pending')
+  await repo.rollbackDetach()
+  assert.equal(repo.getStatus().state, 'ready')
+})
+
+test('public setters/suspend are queued candidate mutations with write-failure rollback', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  let failWrite = false
+  const repo = new LocalRepository(repoOptions(dir, clock, {
+    writeDocument: (file, text) => { if (failWrite) throw new Error('write failed'); writeFileSync(file, text) },
+  }))
+  await repo.load()
+  const original = repo.getDocument()
+  failWrite = true
+  await assert.rejects(repo.setAdvanceWhileEmpty(true))
+  await assert.rejects(repo.setLocalSettings({ zoom: 1.5 }))
+  await assert.rejects(repo.suspend())
+  assert.equal(repo.getProjection().advanceWhileEmpty, original.bundle.engine.advanceWhileEmpty)
+  assert.equal(repo.getProjection().device.settings.zoom, original.device.settings.zoom)
+  assert.equal(repo.getDocument().bundle.engine.coverageReopen, original.bundle.engine.coverageReopen)
+  failWrite = false
+  await Promise.all([
+    repo.setAdvanceWhileEmpty(true),
+    repo.setLocalSettings({ zoom: 1.75 }),
+  ])
+  assert.equal(repo.getProjection().advanceWhileEmpty, true)
+  assert.equal(repo.getProjection().device.settings.zoom, 1.75)
+  await repo.stop()
+})
+
+test('recent event history persists across restart and aligns with eventSeq', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  const repo = new LocalRepository(repoOptions(dir, clock))
+  await repo.load()
+  await repo.command({ type: 'admin.grantCheat', payload: { stat: 'yb', amount: 9 } }, 'op-history', 'owner')
+  const events = repo.getRecentEvents()
+  assert.ok(events.length > 0)
+  const eventSeq = repo.getDocument().eventSeq
+  assert.deepEqual(repo.getDocument().eventHistory, events)
+  await repo.stop()
+  const restarted = new LocalRepository(repoOptions(dir, clock))
+  await restarted.load()
+  assert.equal(restarted.getDocument().eventSeq, eventSeq)
+  assert.deepEqual(restarted.getRecentEvents(), events)
+  assert.equal(restarted.getRecentEvents().at(-1).eventSeq, eventSeq)
+})
+
+test('corrupt v2 and legacy JSON are backed up byte-for-byte before rejection', async () => {
+  const v2Dir = tempDir()
+  const v2Path = join(v2Dir, 'save.json')
+  writeFileSync(v2Path, '{broken-v2')
+  const v2Repo = new LocalRepository(repoOptions(v2Dir, { value: WALL_TIME_MS }))
+  assert.equal(await v2Repo.load(), null)
+  assert.equal(readFileSync(v2Path + '.bak', 'utf8'), '{broken-v2')
+  assert.match(v2Repo.getStatus().error, /not valid JSON/)
+
+  const legacyDir = tempDir()
+  const legacyPath = join(legacyDir, 'legacy.json')
+  writeFileSync(legacyPath, '{broken-legacy')
+  const legacyRepo = new LocalRepository(repoOptions(legacyDir, { value: WALL_TIME_MS }))
+  assert.equal(await legacyRepo.load(), null)
+  assert.equal(readFileSync(legacyPath + '.bak', 'utf8'), '{broken-legacy')
+  assert.match(legacyRepo.getStatus().error, /not valid JSON/)
+})
+
+test('local document schema validates full OpIdCache and event history shape', () => {
+  const error = { code: 'invalid_payload', message: 'bad', refreshProjection: false }
+  const base = JSON.parse(JSON.stringify(fixtures.localDocument))
+  base.idempotency = {
+    schemaVersion: 2,
+    records: [{ petId: 'p', deviceId: 'd', opId: 'o', commandType: 'pet.bury', resultPresent: true, result: null }],
+  }
+  assert.equal(validateLocalPetDocumentV2(base), true)
+  const both = JSON.parse(JSON.stringify(base))
+  both.idempotency.records[0].error = error
+  assert.equal(validateLocalPetDocumentV2(both), false)
+  const badHistory = JSON.parse(JSON.stringify(base))
+  badHistory.eventHistory = [{ eventSeq: 2, type: 'x', payload: {} }]
+  badHistory.eventSeq = 1
+  assert.equal(validateLocalPetDocumentV2(badHistory), false)
 })
