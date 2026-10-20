@@ -283,6 +283,50 @@ test('protocol parser validates versions, directions, request correlation and sh
     result: { ...commandResult, opId: 'different-op' },
   }).ok, false)
   assert.equal(parseServerMessage({
+    ...projection,
+    events: [{ ...orderedEvent, payload: { aiKey: 'secret' } }],
+  }).ok, false)
+  assert.equal(parseServerMessage({
+    ...projection,
+    events: [{ ...orderedEvent, payload: { blob: '{"answerKey":"secret"}' } }],
+  }).ok, false)
+  assert.equal(parseServerMessage({
+    ...commandResult,
+    commandType: 'pet.cheer',
+    result: { aiKey: 'secret' },
+  }).ok, false)
+  assert.equal(parseServerMessage({
+    ...commandResult,
+    commandType: 'pet.cheer',
+    result: { blob: '{"answerKey":"secret"}' },
+  }).ok, false)
+  const ownerBundleResult = {
+    ...commandResult,
+    commandType: 'admin.exportForDetach',
+    result: { authority: fixtures.authority, bundle: fixtures.bundle },
+  }
+  assert.equal(parseServerMessage(ownerBundleResult).ok, true)
+  const dirtyOwnerBundle = JSON.parse(JSON.stringify(fixtures.bundle))
+  dirtyOwnerBundle.engine.scheduledJobs[0].payload.note = '{"webhookToken":"secret"}'
+  assert.equal(parseServerMessage({
+    ...ownerBundleResult,
+    result: { authority: fixtures.authority, bundle: dirtyOwnerBundle },
+  }).ok, false)
+
+  assert.equal(parseServerMessage({
+    t: 'replay', v: PROTOCOL_VERSION, fromEventSeq: 2, toEventSeq: 1, events: [orderedEvent],
+  }).ok, false)
+  assert.equal(parseServerMessage({
+    ...commandResult,
+    status: 'applied',
+    error: { code: 'invalid_payload', message: 'bad', refreshProjection: false },
+  }).ok, false)
+  assert.equal(parseServerMessage({ ...commandResult, status: 'rejected' }).ok, false)
+  assert.equal(parseServerMessage({
+    t: 'commandStatusResult', v: 1, requestId: 'req-status', opId: 'op-1', status: 'not_applied',
+    result: commandResult,
+  }).ok, false)
+  assert.equal(parseServerMessage({
     t: 'portableBundle', v: 1, requestId: 'req-bundle', bundle: fixtures.bundle,
   }).ok, true)
 
@@ -315,12 +359,6 @@ test('protocol parser validates versions, directions, request correlation and sh
     commandType: 'pet.cheer',
     result: { nested: { answerKey: 'secret' } },
   }).ok, false)
-  const ownerBundleResult = {
-    ...commandResult,
-    commandType: 'admin.exportForDetach',
-    result: { authority: fixtures.authority, bundle: fixtures.bundle },
-  }
-  assert.equal(parseServerMessage(ownerBundleResult).ok, true)
   assert.equal(parseServerMessage({
     ...projection,
     save: { ...fixtures.shared, gameSessions: fixtures.engine.gameSessions },

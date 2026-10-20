@@ -1,15 +1,22 @@
 import type { PetInfo, SaveData, Settings } from '../save'
 import type { JsonObject } from '../pet-runtime/types'
-import { assertJsonSafe } from '../pet-runtime/serialization'
+import { assertJsonSafe, stableStringify } from '../pet-runtime/serialization'
 import {
   assertOnlyKeys,
   assertRequiredKeys,
   failSchema,
   isEnum,
   isNonEmptyString,
+  isNonNegativeIntegerArray,
+  isNumberArray,
+  isStringArray,
+  requireBoolean,
+  requireFiniteNumber,
   requireJsonObject,
   requireJsonValue,
+  requireNonNegativeInteger,
   requireRecord,
+  requireString,
 } from './schema'
 
 export const SHARED_SETTINGS_KEYS = ['paused', 'difficulty', 'undying'] as const
@@ -128,11 +135,7 @@ export function toSharedSaveData(save: SaveData): SharedSaveData {
   const petInfo: Record<string, unknown> = { ...save.petInfo }
   delete petInfo.lastX
   delete petInfo.lastY
-  const saveJsonData: Record<string, string> = {}
-  for (const key of SHARED_SAVE_JSON_KEYS) {
-    const value = save.saveJsonData[key]
-    if (value !== undefined) saveJsonData[key] = value
-  }
+  const saveJsonData = filterSharedSaveJsonData(save.saveJsonData)
   const shared = {
     ...save,
     petInfo: petInfo as unknown as SharedPetInfo,
@@ -254,11 +257,7 @@ export function assertSharedSaveData(value: unknown): asserts value is SharedSav
   assertOnlyKeys(value.saveJsonData, SHARED_SAVE_JSON_KEYS, '$.shared.saveJsonData')
   for (const [key, blob] of Object.entries(value.saveJsonData)) {
     if (typeof blob !== 'string') failSchema('invalid_schema', '$.shared.saveJsonData.' + key, 'expected a JSON string')
-    try {
-      JSON.parse(blob)
-    } catch {
-      failSchema('invalid_schema', '$.shared.saveJsonData.' + key, 'expected valid JSON text')
-    }
+    assertCanonicalSaveJsonBlob(key, blob, '$.shared.saveJsonData.' + key)
   }
 }
 
@@ -334,3 +333,473 @@ export function isDeviceLocalOverlay(value: unknown): value is DeviceLocalOverla
 }
 
 export const validateDeviceLocalOverlay = isDeviceLocalOverlay
+
+export type SharedSaveJsonKey = (typeof SHARED_SAVE_JSON_KEYS)[number]
+export type ForbiddenJsonKeyKind = 'never_upload' | 'session_answer_key' | 'nested_json_depth'
+
+export interface ForbiddenJsonKeyHit {
+  kind: ForbiddenJsonKeyKind
+  path: string
+  key?: string
+}
+
+export interface ForbiddenJsonKeyScanOptions {
+  includeNeverUpload?: boolean
+  includeSessionAnswerKeys?: boolean
+  maxNestedJsonDepth?: number
+}
+
+export const MAX_NESTED_JSON_DEPTH = 4
+
+const NO_EMBEDDED_JSON = Symbol('no-embedded-json')
+const SESSION_ANSWER_KEY_SET = new Set<string>(SESSION_ANSWER_KEY_FIELDS)
+const SHARED_SAVE_JSON_KEY_SET = new Set<string>(SHARED_SAVE_JSON_KEYS)
+const PRESENTATION_SAVE_JSON_KEY_SET = new Set<string>(PRESENTATION_ONLY_SAVE_JSON_KEYS)
+const GOOD_BLOB_KEYS = [
+  'PD', 'charm', 'classNum', 'classNumUp', 'clean', 'desc', 'education', 'group', 'hunger',
+  'id', 'intel', 'mood', 'name', 'needLevel', 'num', 'object', 'outOfPrint', 'price', 'rectype',
+  'school', 'strong', 'tolkName', 'type', 'url', 'useArtt', 'useId', 'useTime', 'useTimeing',
+  'value', 'yb',
+] as const
+const GOOD_BLOB_NUMBER_KEYS = [
+  'charm', 'classNum', 'classNumUp', 'clean', 'group', 'hunger', 'intel', 'mood', 'needLevel',
+  'num', 'price', 'strong', 'useTimeing', 'value', 'yb',
+] as const
+const GOOD_BLOB_STRING_KEYS = ['desc', 'id', 'name', 'object', 'rectype', 'school', 'tolkName', 'type', 'url', 'useId', 'useTime'] as const
+const GOOD_BLOB_BOOLEAN_KEYS = ['PD', 'outOfPrint'] as const
+const EDUCATION_KEYS = ['chinese', 'mathematics', 'politics', 'music', 'art', 'manner', 'pe', 'labouring', 'wushu'] as const
+const USE_ARTT_KEYS = ['intel', 'strong', 'charm'] as const
+const TASK_COUNTERS = ['Amusing', 'Travel1', 'Eat', 'Clean', 'Toy', 'Work', 'Study', 'GameRound', 'Game', 'Travel2'] as const
+const TASK_TABS = ['daily', 'ddw', 'growth', 'travel'] as const
+const FISH_KEYS = [
+  'id', 'fryid', 'name', 'stage', 'time', 'interval', 'costyb', 'YB', 'quantity', 'basequantity',
+  'avatar', 'AIXIN', 'growth', 'strong', 'iq', 'charm', 'born', 'siLiao',
+] as const
+const FISH_NUMBER_KEYS = [
+  'id', 'fryid', 'stage', 'time', 'interval', 'costyb', 'YB', 'quantity', 'basequantity',
+  'avatar', 'AIXIN', 'growth', 'strong', 'iq', 'charm', 'born', 'siLiao',
+] as const
+const FARM_KEYS = ['house', 'kennel', 'fence', 'experience', 'rank', 'burden', 'warehouse', 'farmland', 'weather', 'username', 'wealth', 'checked'] as const
+const FARM_LAND_KEYS = ['farmland', 'crop', 'time', 'harvest', 'grass', 'worm'] as const
+const ISLAND_CANONICAL_FIELDS = [
+  'day', 'sent', 'letter', 'note', 'lit', 'lamps', 'tier', 'pieces', 'piece', 'want', 'loved',
+  'errands', 'fought', 'wins',
+] as const
+const ISLAND_PRESENTATION_FIELDS = ['news'] as const
+const ISLAND_ERRAND_FIELDS = ['from', 'kind', 'to', 'got', 'took'] as const
+const ISLAND_ERRAND_PRESENTATION_FIELDS = ['ask'] as const
+const ISLAND_ERRAND_KINDS = [
+  'talk', 'bring', 'visit', 'chat', 'quiz', 'seek', 'play', 'care', 'time', 'spot', 'fight', 'tour',
+  'chore', 'gift',
+] as const
+
+function isSharedSaveJsonKey(key: string): key is SharedSaveJsonKey {
+  return SHARED_SAVE_JSON_KEY_SET.has(key)
+}
+
+function isPresentationOnlySaveJsonKey(key: string): boolean {
+  return PRESENTATION_SAVE_JSON_KEY_SET.has(key)
+}
+
+function parseEmbeddedJsonString(value: string): unknown | typeof NO_EMBEDDED_JSON {
+  const trimmed = value.trim()
+  const first = trimmed[0]
+  if (first !== '{' && first !== '[' && first !== '"') return NO_EMBEDDED_JSON
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return NO_EMBEDDED_JSON
+  }
+}
+
+/** Finds forbidden keys and answer keys in JSON data, including bounded nested JSON strings. */
+export function findForbiddenJsonKey(
+  value: unknown,
+  options: ForbiddenJsonKeyScanOptions = {},
+  path = '$',
+  depth = 0,
+): ForbiddenJsonKeyHit | null {
+  const includeNeverUpload = options.includeNeverUpload ?? true
+  const includeSessionAnswerKeys = options.includeSessionAnswerKeys ?? true
+  const maxDepth = options.maxNestedJsonDepth ?? MAX_NESTED_JSON_DEPTH
+  if (typeof value === 'string') {
+    const parsed = parseEmbeddedJsonString(value)
+    if (parsed === NO_EMBEDDED_JSON) return null
+    if (depth >= maxDepth) return { kind: 'nested_json_depth', path }
+    return findForbiddenJsonKey(parsed, options, path, depth + 1)
+  }
+  if (value === null || typeof value !== 'object') return null
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index++) {
+      const hit = findForbiddenJsonKey(value[index], options, path + '[' + index + ']', depth)
+      if (hit !== null) return hit
+    }
+    return null
+  }
+  const record = value as Record<string, unknown>
+  for (const key of Object.keys(record)) {
+    if (includeNeverUpload && isNeverUploadKey(key)) return { kind: 'never_upload', key, path: path + '.' + key }
+    if (includeSessionAnswerKeys && SESSION_ANSWER_KEY_SET.has(key)) {
+      return { kind: 'session_answer_key', key, path: path + '.' + key }
+    }
+    const hit = findForbiddenJsonKey(record[key], options, path + '.' + key, depth)
+    if (hit !== null) return hit
+  }
+  return null
+}
+
+export function hasForbiddenJsonKey(value: unknown, options: ForbiddenJsonKeyScanOptions = {}): boolean {
+  return findForbiddenJsonKey(value, options) !== null
+}
+
+export function assertNoForbiddenJsonKey(value: unknown, path = '$', options: ForbiddenJsonKeyScanOptions = {}): void {
+  const hit = findForbiddenJsonKey(value, options, path)
+  if (hit === null) return
+  if (hit.kind === 'nested_json_depth') {
+    failSchema('invalid_schema', hit.path, 'nested JSON string exceeds the maximum parsing depth')
+  }
+  failSchema('forbidden_field', hit.path, hit.kind + ' field is forbidden in canonical data')
+}
+
+function assertBlobObject(
+  value: unknown,
+  path: string,
+  allowedKeys: readonly string[],
+  requiredKeys: readonly string[] = [],
+): asserts value is Record<string, unknown> {
+  requireRecord(value, path)
+  assertRequiredKeys(value, requiredKeys, path)
+  assertOnlyKeys(value, allowedKeys, path)
+}
+
+function assertBlobArray(value: unknown, path: string): asserts value is unknown[] {
+  if (Array.isArray(value) === false) failSchema('invalid_schema', path, 'expected an array')
+}
+
+function assertOptionalStringField(record: Record<string, unknown>, key: string, path: string): void {
+  if (record[key] !== undefined) requireString(record[key], path + '.' + key)
+}
+
+function assertOptionalFiniteNumberField(record: Record<string, unknown>, key: string, path: string): void {
+  if (record[key] !== undefined) requireFiniteNumber(record[key], path + '.' + key)
+}
+
+function assertOptionalBooleanField(record: Record<string, unknown>, key: string, path: string): void {
+  if (record[key] !== undefined) requireBoolean(record[key], path + '.' + key)
+}
+
+function assertOptionalNonNegativeIntegerField(record: Record<string, unknown>, key: string, path: string): void {
+  if (record[key] !== undefined) requireNonNegativeInteger(record[key], path + '.' + key)
+}
+
+function assertSharedGoodBlob(value: unknown, path: string): void {
+  assertBlobObject(value, path, GOOD_BLOB_KEYS, ['id', 'name', 'type', 'url', 'num'])
+  for (const key of GOOD_BLOB_STRING_KEYS) assertOptionalStringField(value, key, path)
+  for (const key of GOOD_BLOB_NUMBER_KEYS) assertOptionalFiniteNumberField(value, key, path)
+  for (const key of GOOD_BLOB_BOOLEAN_KEYS) assertOptionalBooleanField(value, key, path)
+  requireNonNegativeInteger(value.num, path + '.num')
+  if (value.education !== undefined) {
+    assertBlobObject(value.education, path + '.education', EDUCATION_KEYS)
+    for (const key of EDUCATION_KEYS) {
+      if (value.education[key] !== undefined) requireFiniteNumber(value.education[key], path + '.education.' + key)
+    }
+  }
+  if (value.useArtt !== undefined) {
+    assertBlobObject(value.useArtt, path + '.useArtt', USE_ARTT_KEYS)
+    for (const key of USE_ARTT_KEYS) {
+      if (value.useArtt[key] !== undefined) requireFiniteNumber(value.useArtt[key], path + '.useArtt.' + key)
+    }
+  }
+}
+
+function assertSharedGoodArray(value: unknown, path: string): asserts value is unknown[] {
+  assertBlobArray(value, path)
+  value.forEach((good, index) => assertSharedGoodBlob(good, path + '[' + index + ']'))
+}
+
+function assertTaskDefinitionBlob(value: unknown, path: string): void {
+  assertBlobObject(value, path, ['label', 'msg', 'obj', 'num', 'keep', 'reroll', 'good'], ['label', 'msg', 'obj', 'num'])
+  requireString(value.label, path + '.label')
+  requireString(value.msg, path + '.msg')
+  if (isEnum(value.obj, TASK_COUNTERS) === false) failSchema('invalid_schema', path + '.obj', 'unknown task counter')
+  requireNonNegativeInteger(value.num, path + '.num')
+  assertOptionalBooleanField(value, 'keep', path)
+  assertOptionalNonNegativeIntegerField(value, 'reroll', path)
+  if (value.good !== undefined) {
+    if (isStringArray(value.good) === false) failSchema('invalid_schema', path + '.good', 'expected good strings')
+  }
+}
+
+function assertTaskListEntryBlob(value: unknown, path: string): void {
+  assertBlobObject(value, path, ['take', 'good'], ['take', 'good'])
+  requireBoolean(value.take, path + '.take')
+  assertSharedGoodArray(value.good, path + '.good')
+}
+
+function assertTaskBlob(value: unknown, path: string): void {
+  assertBlobObject(value, path, ['doNums', 'taskList', 'daily', 'dailyDay'])
+  if (value.doNums !== undefined) {
+    assertBlobObject(value.doNums, path + '.doNums', TASK_COUNTERS)
+    for (const [counter, count] of Object.entries(value.doNums)) {
+      if (isEnum(counter, TASK_COUNTERS) === false) failSchema('forbidden_field', path + '.doNums.' + counter, 'unknown task counter')
+      requireFiniteNumber(count, path + '.doNums.' + counter)
+    }
+  }
+  if (value.taskList !== undefined) {
+    assertBlobObject(value.taskList, path + '.taskList', TASK_TABS)
+    for (const tab of TASK_TABS) {
+      const entries = value.taskList[tab]
+      if (entries === undefined) continue
+      assertBlobArray(entries, path + '.taskList.' + tab)
+      entries.forEach((entry, index) => assertTaskListEntryBlob(entry, path + '.taskList.' + tab + '[' + index + ']'))
+    }
+  }
+  if (value.daily !== undefined) {
+    assertBlobArray(value.daily, path + '.daily')
+    value.daily.forEach((task, index) => assertTaskDefinitionBlob(task, path + '.daily[' + index + ']'))
+  }
+  assertOptionalFiniteNumberField(value, 'dailyDay', path)
+}
+
+function assertSigninBlob(value: unknown, path: string): void {
+  assertBlobObject(value, path, ['collectionList', 'getGrowth', 'onlineGiftNum', 'isOnlineLastTime', 'getBirthDayGift'])
+  if (value.collectionList !== undefined) {
+    requireRecord(value.collectionList, path + '.collectionList')
+    for (const [year, months] of Object.entries(value.collectionList)) {
+      if (/^\d{4}$/.test(year) === false) failSchema('forbidden_field', path + '.collectionList.' + year, 'invalid sign-in year key')
+      requireRecord(months, path + '.collectionList.' + year)
+      for (const [month, days] of Object.entries(months)) {
+        if (/^(?:[1-9]|1[0-2])$/.test(month) === false) {
+          failSchema('forbidden_field', path + '.collectionList.' + year + '.' + month, 'invalid sign-in month key')
+        }
+        if (isNonNegativeIntegerArray(days) === false) {
+          failSchema('invalid_schema', path + '.collectionList.' + year + '.' + month, 'expected sign-in timestamps')
+        }
+      }
+    }
+  }
+  if (value.getGrowth !== undefined && value.getGrowth !== null) {
+    assertBlobArray(value.getGrowth, path + '.getGrowth')
+    if (value.getGrowth.length !== 2) failSchema('invalid_schema', path + '.getGrowth', 'expected two growth draw slots')
+    if (isNumberArray(value.getGrowth[0]) === false) failSchema('invalid_schema', path + '.getGrowth[0]', 'expected draw digits')
+    const extra = value.getGrowth[1]
+    if (extra !== null && isNumberArray(extra) === false) failSchema('invalid_schema', path + '.getGrowth[1]', 'expected draw digits or null')
+  }
+  assertOptionalNonNegativeIntegerField(value, 'onlineGiftNum', path)
+  assertOptionalFiniteNumberField(value, 'isOnlineLastTime', path)
+  assertOptionalBooleanField(value, 'getBirthDayGift', path)
+}
+
+function assertFishBlob(value: unknown, path: string): void {
+  assertBlobObject(value, path, FISH_KEYS, FISH_KEYS)
+  requireString(value.name, path + '.name')
+  for (const key of FISH_NUMBER_KEYS) requireFiniteNumber(value[key], path + '.' + key)
+}
+
+function assertPondBlob(value: unknown, path: string): void {
+  assertBlobObject(value, path, ['PD', 'fishs'])
+  if (value.PD !== undefined) {
+    assertBlobObject(value.PD, path + '.PD', ['allvipcnt', 'canusecnt'], ['allvipcnt', 'canusecnt'])
+    requireNonNegativeInteger(value.PD.allvipcnt, path + '.PD.allvipcnt')
+    requireNonNegativeInteger(value.PD.canusecnt, path + '.PD.canusecnt')
+  }
+  if (value.fishs !== undefined) {
+    assertBlobArray(value.fishs, path + '.fishs')
+    value.fishs.forEach((fish, index) => assertFishBlob(fish, path + '.fishs[' + index + ']'))
+  }
+}
+
+function assertFarmLandBlob(value: unknown, path: string): void {
+  assertBlobObject(value, path, FARM_LAND_KEYS, ['farmland'])
+  requireString(value.farmland, path + '.farmland')
+  assertOptionalStringField(value, 'crop', path)
+  assertOptionalFiniteNumberField(value, 'time', path)
+  assertOptionalFiniteNumberField(value, 'grass', path)
+  assertOptionalFiniteNumberField(value, 'worm', path)
+}
+
+function assertFarmBlob(value: unknown, path: string): void {
+  assertBlobObject(value, path, FARM_KEYS)
+  for (const key of ['house', 'kennel', 'fence', 'experience', 'rank', 'weather', 'username', 'wealth'] as const) {
+    assertOptionalStringField(value, key, path)
+  }
+  assertOptionalFiniteNumberField(value, 'checked', path)
+  if (value.burden !== undefined) assertBlobArray(value.burden, path + '.burden')
+  if (value.warehouse !== undefined) assertBlobArray(value.warehouse, path + '.warehouse')
+  if (value.farmland !== undefined) {
+    assertBlobArray(value.farmland, path + '.farmland')
+    value.farmland.forEach((land, index) => assertFarmLandBlob(land, path + '.farmland[' + index + ']'))
+  }
+}
+
+function assertAlbumBlob(value: unknown, path: string): void {
+  assertBlobArray(value, path)
+  value.forEach((shot, index) => {
+    const shotPath = path + '[' + index + ']'
+    assertBlobObject(shot, shotPath, ['id', 'city', 'd'], ['id', 'city', 'd'])
+    requireString(shot.id, shotPath + '.id')
+    requireString(shot.city, shotPath + '.city')
+    requireNonNegativeInteger(shot.d, shotPath + '.d')
+  })
+}
+
+function assertMailBlob(value: unknown, path: string): void {
+  requireRecord(value, path)
+  if (value.e === true) {
+    assertBlobObject(value, path, ['d', 'e', 'k'], ['d', 'e'])
+    requireNonNegativeInteger(value.d, path + '.d')
+    assertOptionalStringField(value, 'k', path)
+    return
+  }
+  assertBlobObject(value, path, ['d', 'l', 'glb', 'r', 'm', 'k', 'p'], ['d', 'l', 'glb'])
+  requireNonNegativeInteger(value.d, path + '.d')
+  requireString(value.l, path + '.l')
+  assertSharedGoodArray(value.glb, path + '.glb')
+  assertOptionalBooleanField(value, 'r', path)
+  assertOptionalStringField(value, 'm', path)
+  assertOptionalStringField(value, 'k', path)
+  assertOptionalStringField(value, 'p', path)
+}
+
+function assertEmailBlob(value: unknown, path: string): void {
+  requireRecord(value, path)
+  for (const [key, mail] of Object.entries(value)) {
+    if (/^(0|[1-9]\d*)$/.test(key) === false) failSchema('forbidden_field', path + '.' + key, 'invalid mail key')
+    assertMailBlob(mail, path + '.' + key)
+  }
+}
+
+function assertActivityBlob(value: unknown, path: string): void {
+  requireFiniteNumber(value, path)
+  if ((value as number) < 0) failSchema('invalid_schema', path, 'activity minutes must not be negative')
+}
+
+function assertIslandErrandCanonical(value: unknown, path: string): void {
+  assertBlobObject(value, path, ISLAND_ERRAND_FIELDS, ISLAND_ERRAND_FIELDS)
+  requireString(value.from, path + '.from')
+  if (isEnum(value.kind, ISLAND_ERRAND_KINDS) === false) failSchema('invalid_schema', path + '.kind', 'invalid island errand kind')
+  requireString(value.to, path + '.to')
+  requireNonNegativeInteger(value.got, path + '.got')
+  requireBoolean(value.took, path + '.took')
+}
+
+function assertIslandCanonical(value: unknown, path: string): void {
+  assertBlobObject(value, path, ISLAND_CANONICAL_FIELDS)
+  assertOptionalFiniteNumberField(value, 'day', path)
+  assertOptionalNonNegativeIntegerField(value, 'sent', path)
+  assertOptionalStringField(value, 'letter', path)
+  assertOptionalStringField(value, 'note', path)
+  assertOptionalStringField(value, 'want', path)
+  assertOptionalBooleanField(value, 'piece', path)
+  assertOptionalBooleanField(value, 'loved', path)
+  assertOptionalNonNegativeIntegerField(value, 'tier', path)
+  assertOptionalNonNegativeIntegerField(value, 'pieces', path)
+  assertOptionalNonNegativeIntegerField(value, 'wins', path)
+  if (value.lit !== undefined && isStringArray(value.lit) === false) failSchema('invalid_schema', path + '.lit', 'expected string list')
+  if (value.fought !== undefined && isStringArray(value.fought) === false) failSchema('invalid_schema', path + '.fought', 'expected string list')
+  if (value.lamps !== undefined && isNonNegativeIntegerArray(value.lamps) === false) {
+    failSchema('invalid_schema', path + '.lamps', 'expected lamp scene indexes')
+  }
+  if (value.errands !== undefined) {
+    assertBlobArray(value.errands, path + '.errands')
+    value.errands.forEach((errand, index) => assertIslandErrandCanonical(errand, path + '.errands[' + index + ']'))
+  }
+}
+
+/**
+ * Migration filter for island: keeps the canonical decision/counter/flag
+ * subset and strips AI-created news prose plus per-errand `ask` wording.
+ */
+export function filterIslandCanonicalState(value: unknown, path = '$.island'): JsonObject {
+  requireRecord(value, path)
+  assertOnlyKeys(value, [...ISLAND_CANONICAL_FIELDS, ...ISLAND_PRESENTATION_FIELDS], path)
+  const output: Record<string, unknown> = {}
+  for (const key of ISLAND_CANONICAL_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) output[key] = value[key]
+  }
+  if (value.errands !== undefined) {
+    assertBlobArray(value.errands, path + '.errands')
+    output.errands = value.errands.map((errand, index) => {
+      const errandPath = path + '.errands[' + index + ']'
+      requireRecord(errand, errandPath)
+      assertOnlyKeys(errand, [...ISLAND_ERRAND_FIELDS, ...ISLAND_ERRAND_PRESENTATION_FIELDS], errandPath)
+      const canonical: Record<string, unknown> = {}
+      for (const key of ISLAND_ERRAND_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(errand, key)) canonical[key] = errand[key]
+      }
+      return canonical
+    })
+  }
+  assertIslandCanonical(output, path)
+  return output as JsonObject
+}
+
+export const SHARED_SAVE_JSON_BLOB_VALIDATORS: Record<SharedSaveJsonKey, (value: unknown, path: string) => void> = {
+  email: assertEmailBlob,
+  task: assertTaskBlob,
+  signin: assertSigninBlob,
+  fishs: assertPondBlob,
+  farm: assertFarmBlob,
+  activity: assertActivityBlob,
+  album: assertAlbumBlob,
+  island: assertIslandCanonical,
+}
+
+function parseCanonicalSaveJsonBlob(text: unknown, path: string): unknown {
+  if (typeof text !== 'string') failSchema('invalid_schema', path, 'expected a JSON string')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    failSchema('invalid_schema', path, 'expected valid JSON text')
+  }
+  try {
+    assertJsonSafe(parsed)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'blob is not JSON-safe'
+    failSchema('invalid_schema', path, message)
+  }
+  assertNoForbiddenJsonKey(parsed, path)
+  return parsed
+}
+
+export function assertCanonicalSaveJsonBlob(key: string, text: unknown, path = '$'): void {
+  if (isSharedSaveJsonKey(key) === false) failSchema('forbidden_field', path, 'unknown saveJsonData blob')
+  const parsed = parseCanonicalSaveJsonBlob(text, path)
+  SHARED_SAVE_JSON_BLOB_VALIDATORS[key](parsed, path)
+}
+
+export function validateSharedSaveJsonBlob(key: string, text: unknown): boolean {
+  try {
+    assertCanonicalSaveJsonBlob(key, text)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function canonicalizeSaveJsonBlob(key: SharedSaveJsonKey, text: unknown, path: string): string {
+  const parsed = parseCanonicalSaveJsonBlob(text, path)
+  const canonical = key === 'island'
+    ? filterIslandCanonicalState(parsed, path)
+    : parsed
+  if (key !== 'island') SHARED_SAVE_JSON_BLOB_VALIDATORS[key](canonical, path)
+  return stableStringify(canonical)
+}
+
+/** Filters legacy SaveData blobs to canonical shared content, dropping known presentation-only blobs. */
+export function filterSharedSaveJsonData(
+  saveJsonData: Record<string, string>,
+): Partial<Record<SharedSaveJsonKey, string>> {
+  requireRecord(saveJsonData, '$.shared.saveJsonData')
+  const output: Partial<Record<SharedSaveJsonKey, string>> = {}
+  for (const [key, text] of Object.entries(saveJsonData)) {
+    if (isPresentationOnlySaveJsonKey(key)) continue
+    if (isSharedSaveJsonKey(key) === false) {
+      failSchema('forbidden_field', '$.shared.saveJsonData.' + key, 'unknown saveJsonData blob')
+    }
+    if (typeof text !== 'string') failSchema('invalid_schema', '$.shared.saveJsonData.' + key, 'expected a JSON string')
+    output[key] = canonicalizeSaveJsonBlob(key, text, '$.shared.saveJsonData.' + key)
+  }
+  return output
+}

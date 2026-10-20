@@ -1,3 +1,4 @@
+import { snapshotJsonValue } from '../pet-runtime/serialization'
 import type { JsonObject, JsonValue } from '../pet-runtime/types'
 
 export type SchemaErrorCode =
@@ -6,6 +7,7 @@ export type SchemaErrorCode =
   | 'unsupported_format'
   | 'forbidden_field'
   | 'missing_field'
+  | 'identity_mismatch'
 
 export class SchemaError extends Error {
   readonly code: SchemaErrorCode
@@ -30,7 +32,13 @@ export function assertSchema(condition: unknown, path: string, message: string):
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && Array.isArray(value) === false
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  try {
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+  } catch {
+    return false
+  }
 }
 
 export function requireRecord(value: unknown, path: string): asserts value is Record<string, unknown> {
@@ -38,20 +46,12 @@ export function requireRecord(value: unknown, path: string): asserts value is Re
 }
 
 export function isJsonValue(value: unknown): value is JsonValue {
-  const ancestors = new Set<object>()
-  const visit = (current: unknown): boolean => {
-    if (current === null || typeof current === 'string' || typeof current === 'boolean') return true
-    if (typeof current === 'number') return Number.isFinite(current)
-    if (typeof current !== 'object') return false
-    if (ancestors.has(current)) return false
-    ancestors.add(current)
-    const valid = Array.isArray(current)
-      ? current.every(entry => visit(entry))
-      : Object.keys(current).every(key => visit((current as Record<string, unknown>)[key]))
-    ancestors.delete(current)
-    return valid
+  try {
+    snapshotJsonValue(value)
+    return true
+  } catch {
+    return false
   }
-  return visit(value)
 }
 
 export function requireJsonValue(value: unknown, path: string): asserts value is JsonValue {
@@ -112,20 +112,33 @@ export function requireNonNegativeInteger(value: unknown, path: string): asserts
   if (isNonNegativeInteger(value) === false) failSchema('invalid_schema', path, 'expected a non-negative safe integer')
 }
 
+function strictJsonArray(value: unknown): JsonValue[] | null {
+  try {
+    const snapshot = snapshotJsonValue(value)
+    return Array.isArray(snapshot) ? snapshot : null
+  } catch {
+    return null
+  }
+}
+
 export function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every(entry => typeof entry === 'string')
+  const array = strictJsonArray(value)
+  return array !== null && array.every(entry => typeof entry === 'string')
 }
 
 export function isNonEmptyStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.length > 0 && value.every(entry => typeof entry === 'string' && entry.length > 0)
+  const array = strictJsonArray(value)
+  return array !== null && array.length > 0 && array.every(entry => typeof entry === 'string' && entry.length > 0)
 }
 
 export function isNumberArray(value: unknown): value is number[] {
-  return Array.isArray(value) && value.every(entry => typeof entry === 'number' && Number.isFinite(entry))
+  const array = strictJsonArray(value)
+  return array !== null && array.every(entry => typeof entry === 'number' && Number.isFinite(entry))
 }
 
 export function isNonNegativeIntegerArray(value: unknown): value is number[] {
-  return Array.isArray(value) && value.every(entry => isNonNegativeInteger(entry))
+  const array = strictJsonArray(value)
+  return array !== null && array.every(entry => isNonNegativeInteger(entry))
 }
 
 export function isEnum<const T extends readonly string[]>(value: unknown, allowed: T): value is T[number] {

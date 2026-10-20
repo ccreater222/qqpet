@@ -2,7 +2,7 @@ import type { OrderedEvent } from '../pet-runtime/events'
 import { assertOrderedEventStream } from '../pet-runtime/events'
 import { assertJsonSafe } from '../pet-runtime/serialization'
 import { isCommandKey, parsePetCommand } from './command-validation'
-import { SESSION_ANSWER_KEY_FIELDS, validateSharedSaveData } from './data-boundary'
+import { findForbiddenJsonKey, validateSharedSaveData } from './data-boundary'
 import { validateAuthorityStamp, validatePortablePetBundle, validateWireAuthority } from './portable'
 import type { ClientToServer, ServerToClient, WireCommandResult } from './protocol'
 import { CLIENT_MESSAGE_TYPES, PROTOCOL_VERSION, SAVE_SCHEMA_VERSION, SERVER_MESSAGE_TYPES } from './protocol'
@@ -37,7 +37,6 @@ const REQUEST_CORRELATED = new Set([
   'hello', 'command', 'commandStatus', 'exportBundle', 'resync',
   'welcome', 'commandResult', 'commandStatusResult', 'portableBundle',
 ])
-const SESSION_ANSWER_KEY_SET = new Set<string>(SESSION_ANSWER_KEY_FIELDS)
 const CLOSE_ERROR_CODES = new Set([
   'auth_failed', 'protocol_mismatch', 'unauthorized', 'rate_limited', 'invalid_frame',
   'payload_too_large', 'server_catching_up', 'authority_not_active', 'authority_fork_risk',
@@ -67,7 +66,7 @@ function orderedEvents(value: unknown): value is OrderedEvent[] {
     if (event.commandSeq !== undefined && isNonNegativeInteger(event.commandSeq) === false) return false
     if (isSafeInteger(event.gameTimeMs) === false) return false
     if (typeof event.type !== 'string' || event.type.length === 0) return false
-    if (isJsonObject(event.payload) === false || containsSessionAnswerKey(event.payload)) return false
+    if (isJsonObject(event.payload) === false || containsForbiddenJsonContent(event.payload)) return false
   }
   try {
     assertOrderedEventStream(value as OrderedEvent[])
@@ -90,14 +89,8 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boo
   return keys.every(key => Object.prototype.hasOwnProperty.call(value, key))
 }
 
-function containsSessionAnswerKey(value: unknown): boolean {
-  if (value === null || typeof value !== 'object') return false
-  if (Array.isArray(value)) return value.some(containsSessionAnswerKey)
-  for (const [key, child] of Object.entries(value)) {
-    if (SESSION_ANSWER_KEY_SET.has(key)) return true
-    if (containsSessionAnswerKey(child)) return true
-  }
-  return false
+function containsForbiddenJsonContent(value: unknown, includeSessionAnswerKeys = true): boolean {
+  return findForbiddenJsonKey(value, { includeSessionAnswerKeys }) !== null
 }
 
 function validDeviceInfo(value: unknown): boolean {
@@ -116,7 +109,7 @@ function validDeviceInfo(value: unknown): boolean {
 function validExamQuestionProjection(value: unknown): boolean {
   if (isRecord(value) === false || exactKeys(value, ['questionId', 'prompt', 'options']) === false) return false
   if (isNonEmptyString(value.questionId) === false || typeof value.prompt !== 'string') return false
-  return Array.isArray(value.options) && value.options.every(option => typeof option === 'string') && containsSessionAnswerKey(value) === false
+  return Array.isArray(value.options) && value.options.every(option => typeof option === 'string') && containsForbiddenJsonContent(value) === false
 }
 
 function validExamStartResult(value: Record<string, unknown>): boolean {
@@ -129,14 +122,20 @@ function validIslandQuizResult(value: Record<string, unknown>): boolean {
   if (exactKeys(value, ['sessionToken', 'recordId', 'quizKind', 'prompt', 'options']) === false) return false
   if (isNonEmptyString(value.sessionToken) === false || isNonEmptyString(value.recordId) === false) return false
   if (isNonEmptyString(value.quizKind) === false || typeof value.prompt !== 'string') return false
-  return Array.isArray(value.options) && value.options.every(option => typeof option === 'string') && containsSessionAnswerKey(value) === false
+  return Array.isArray(value.options) && value.options.every(option => typeof option === 'string') && containsForbiddenJsonContent(value) === false
 }
 
 /** Validates typed command result data and blocks answer-key leakage outside the owner export bundle. */
 export function validateCommandResultData(commandType: string, value: unknown): boolean {
   if (value === undefined) return true
   if (isJsonValue(value) === false) return false
-  if (isRecord(value) === false) return containsSessionAnswerKey(value) === false
+  if (commandType === 'admin.exportForDetach') {
+    if (isRecord(value) === false || exactKeys(value, ['authority', 'bundle']) === false) return false
+    if (validateAuthorityStamp(value.authority) === false || validatePortablePetBundle(value.bundle) === false) return false
+    return containsForbiddenJsonContent(value, false) === false
+  }
+  if (containsForbiddenJsonContent(value)) return false
+  if (isRecord(value) === false) return true
   if (commandType === 'device.list') {
     if (exactKeys(value, ['devices']) === false || Array.isArray(value.devices) === false) return false
     return value.devices.every(validDeviceInfo)
@@ -152,11 +151,7 @@ export function validateCommandResultData(commandType: string, value: unknown): 
   }
   if (commandType === 'exam.start') return validExamStartResult(value)
   if (commandType === 'island.startQuiz') return validIslandQuizResult(value)
-  if (commandType === 'admin.exportForDetach') {
-    if (exactKeys(value, ['authority', 'bundle']) === false) return false
-    return validateAuthorityStamp(value.authority) && validatePortablePetBundle(value.bundle)
-  }
-  return containsSessionAnswerKey(value) === false
+  return true
 }
 
 export function validateWireCommandResult(value: unknown): value is WireCommandResult {
@@ -165,6 +160,8 @@ export function validateWireCommandResult(value: unknown): value is WireCommandR
   if (isNonEmptyString(value.requestId) === false || isNonEmptyString(value.opId) === false) return false
   if (isCommandKey(value.commandType) === false) return false
   if (value.status !== 'applied' && value.status !== 'rejected' && value.status !== 'duplicate') return false
+  if (value.status === 'applied' && value.error !== undefined) return false
+  if (value.status === 'rejected' && value.error === undefined) return false
   if (isNonNegativeInteger(value.commandSeq) === false) return false
   if (isNonNegativeInteger(value.revision) === false) return false
   if (isNonNegativeInteger(value.eventSeq) === false) return false
@@ -227,6 +224,8 @@ function snapshotLike(value: Record<string, unknown>, withEvents: boolean): bool
 function commandResult(value: Record<string, unknown>): boolean {
   if (isNonEmptyString(value.opId) === false || isCommandKey(value.commandType) === false) return false
   if (value.status !== 'applied' && value.status !== 'rejected' && value.status !== 'duplicate') return false
+  if (value.status === 'applied' && value.error !== undefined) return false
+  if (value.status === 'rejected' && value.error === undefined) return false
   if (isNonNegativeInteger(value.commandSeq) === false) return false
   if (isNonNegativeInteger(value.revision) === false || isNonNegativeInteger(value.eventSeq) === false) return false
   if (validateCommandResultData(value.commandType, value.result) === false) return false
@@ -241,6 +240,7 @@ function commandResult(value: Record<string, unknown>): boolean {
 function commandStatusResult(value: Record<string, unknown>): boolean {
   if (isNonEmptyString(value.opId) === false) return false
   if (value.status !== 'applied' && value.status !== 'rejected' && value.status !== 'not_applied') return false
+  if (value.status === 'not_applied' && value.result !== undefined) return false
   if (value.result !== undefined) {
     if (validateWireCommandResult(value.result) === false) return false
     if (value.result.opId !== value.opId) return false
@@ -331,6 +331,7 @@ export function parseServerMessage(value: unknown): ProtocolValidationResult<Ser
       if (isNonNegativeInteger(message.fromEventSeq) === false || isNonNegativeInteger(message.toEventSeq) === false) {
         return invalid('invalid_frame', 'invalid replay bounds')
       }
+      if (message.fromEventSeq > message.toEventSeq) return invalid('invalid_frame', 'replay fromEventSeq must not exceed toEventSeq')
       if (orderedEvents(message.events) === false) return invalid('invalid_frame', 'invalid replay events')
       break
     case 'ready':

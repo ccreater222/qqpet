@@ -1,6 +1,6 @@
-import { cloneRngState } from '../pet-runtime/rng'
+import { cloneRngState, createRngState } from '../pet-runtime/rng'
 import { assertJsonSafe, stableStringify } from '../pet-runtime/serialization'
-import { assertTimeZone, isDayKey } from '../pet-runtime/time'
+import { assertTimeZone, dayKeyAt, isDayKey, nextDailyBoundaryMs } from '../pet-runtime/time'
 import { RUNTIME_SCHEMA_VERSION } from '../pet-runtime/types'
 import type {
   CalendarInput,
@@ -15,11 +15,13 @@ import type {
   SessionCoverageInterval,
   WeatherDayRecord,
 } from '../pet-runtime/types'
+import type { SaveData } from '../save'
 import type { DeviceLocalOverlay, SharedSaveData } from './data-boundary'
 import {
   assertDeviceLocalOverlay,
   assertNoNeverUpload,
   assertSharedSaveData,
+  toSharedSaveData,
 } from './data-boundary'
 import {
   assertOnlyKeys,
@@ -29,6 +31,8 @@ import {
   isEnum,
   isNonEmptyString,
   isNonNegativeInteger,
+  isRecord,
+  requireBoolean,
   requireJsonObject,
   requireNonNegativeInteger,
   requireRecord,
@@ -42,6 +46,8 @@ export const LOCAL_DOCUMENT_FORMAT = 'qqpet-local-v2' as const
 export const LOCAL_DOCUMENT_SCHEMA_VERSION = 1 as const
 export const REMOTE_PROJECTION_CACHE_FORMAT = 'qqpet-server-projection-v2' as const
 export const REMOTE_PROJECTION_CACHE_SCHEMA_VERSION = 1 as const
+export const LEGACY_PORTABLE_BUNDLE_FORMAT = 'qqpet-portable-v0' as const
+export const LEGACY_PORTABLE_BUNDLE_SCHEMA_VERSION = 0 as const
 
 export interface AuthorityStamp {
   owner: 'local' | 'server'
@@ -114,6 +120,39 @@ export interface RemoteProjectionCacheV2 {
   device: DeviceLocalOverlay
 }
 
+export type LegacyEngineStateV0 = Omit<
+  EngineState,
+  'schemaVersion' | 'lastProcessedDayBoundaryKey' | 'nextDailyBoundaryMs' | 'importClamped' | 'clockSkippedMs'
+> & {
+  schemaVersion?: 0 | 1
+  lastProcessedDayBoundaryKey?: string
+  nextDailyBoundaryMs?: number
+  importClamped?: boolean
+  clockSkippedMs?: number
+}
+
+export interface LegacyPortablePetBundleV0 {
+  format: typeof LEGACY_PORTABLE_BUNDLE_FORMAT
+  schemaVersion: typeof LEGACY_PORTABLE_BUNDLE_SCHEMA_VERSION
+  exportedAtMs: number
+  authority: AuthorityStamp
+  originLocalDeviceId?: string
+  shared: SharedSaveData
+  engine: LegacyEngineStateV0
+}
+
+export interface LegacySaveMigrationOptions {
+  /** Explicit host wall-clock anchor used for game time and scheduler. */
+  nowMs: number
+  /** Explicit host CSPRNG seed. Zero/malformed seeds are rejected. */
+  seedHex: string
+  authority: AuthorityStamp
+  localDeviceId: string
+  timeZone: string
+  advanceWhileEmpty?: boolean
+  weatherLocation?: string
+}
+
 export const AUTHORITY_STAMP_KEYS = [
   'owner', 'authorityId', 'epoch', 'restoreGeneration', 'revision', 'eventSeq', 'handoffId', 'detachedAtWallMs',
 ] as const
@@ -122,6 +161,12 @@ export const ENGINE_STATE_KEYS = [
   'schemaVersion', 'save', 'gameTimeMs', 'lastSchedulerWallMs', 'timeZone', 'weatherLocation',
   'advanceWhileEmpty', 'rng', 'scheduledJobs', 'nextScheduledJobId', 'gameSessions',
   'sessionCoverage', 'coverageReopen', 'lastProcessedDayBoundaryKey', 'nextDailyBoundaryMs',
+  'importClamped', 'clockSkippedMs', 'environment',
+] as const
+export const ENGINE_REQUIRED_KEYS = [
+  'schemaVersion', 'save', 'gameTimeMs', 'lastSchedulerWallMs', 'timeZone', 'weatherLocation',
+  'advanceWhileEmpty', 'rng', 'scheduledJobs', 'nextScheduledJobId', 'gameSessions',
+  'sessionCoverage', 'lastProcessedDayBoundaryKey', 'nextDailyBoundaryMs',
   'importClamped', 'clockSkippedMs', 'environment',
 ] as const
 
@@ -433,7 +478,7 @@ export function assertEngineState(value: unknown): asserts value is EngineState 
     failSchema('invalid_schema', '$.engine', message)
   }
   requireRecord(value, '$.engine')
-  assertRequiredKeys(value, ENGINE_STATE_KEYS, '$.engine')
+  assertRequiredKeys(value, ENGINE_REQUIRED_KEYS, '$.engine')
   assertOnlyKeys(value, ENGINE_STATE_KEYS, '$.engine')
   assertNoNeverUpload(value, '$.engine')
   assertSchemaVersion(value.schemaVersion, RUNTIME_SCHEMA_VERSION, '$.engine.schemaVersion', 'runtime')
@@ -510,9 +555,167 @@ export function validatePortablePetBundle(value: unknown): value is PortablePetB
   }
 }
 
+const LEGACY_ENGINE_REQUIRED_KEYS = [
+  'save', 'gameTimeMs', 'lastSchedulerWallMs', 'timeZone', 'weatherLocation', 'advanceWhileEmpty',
+  'rng', 'scheduledJobs', 'nextScheduledJobId', 'gameSessions', 'sessionCoverage', 'environment',
+] as const
+
+function legacySaveCandidate(value: unknown): SaveData {
+  requireRecord(value, '$.legacySave')
+  if (isRecord(value.petInfoData)) {
+    const candidate: Record<string, unknown> = { ...value.petInfoData }
+    for (const key of [
+      'havePet', 'isBury', 'saveNum', 'nowTimeLine', 'petInfo', 'petComputedlInfo', 'studyInfo',
+      'activeOption', 'selfGoodDatas', 'selfGoodUseOption', 'gameSaveDatas', 'illustrated',
+      'saveJsonData', 'settings',
+    ] as const) {
+      if (candidate[key] === undefined && value[key] !== undefined) candidate[key] = value[key]
+    }
+    return candidate as unknown as SaveData
+  }
+  return value as unknown as SaveData
+}
+
+/** Deterministic migration of a legacy bare SaveData/config.json into a v1 portable bundle. */
+export function migrateLegacySaveDataToPortableBundle(
+  legacy: unknown,
+  options: LegacySaveMigrationOptions,
+): PortablePetBundleV1 {
+  try {
+    assertJsonSafe(legacy)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'legacy save is not JSON-safe'
+    failSchema('invalid_schema', '$.legacySave', message)
+  }
+  requireRecord(options, '$.legacyMigration.options')
+  requireNonNegativeInteger(options.nowMs, '$.legacyMigration.options.nowMs')
+  if (options.advanceWhileEmpty !== undefined) requireBoolean(options.advanceWhileEmpty, '$.legacyMigration.options.advanceWhileEmpty')
+  assertNonEmptyString(options.localDeviceId, '$.legacyMigration.options.localDeviceId')
+  assertNonEmptyString(options.timeZone, '$.legacyMigration.options.timeZone')
+  try {
+    assertTimeZone(options.timeZone)
+  } catch {
+    failSchema('invalid_schema', '$.legacyMigration.options.timeZone', 'invalid IANA timezone')
+  }
+  assertAuthorityStamp(options.authority, '$.legacyMigration.options.authority')
+  if (options.weatherLocation !== undefined && typeof options.weatherLocation !== 'string') {
+    failSchema('invalid_schema', '$.legacyMigration.options.weatherLocation', 'expected a string')
+  }
+  let rng
+  try {
+    rng = createRngState(options.seedHex)
+  } catch {
+    failSchema('invalid_schema', '$.legacyMigration.options.seedHex', 'invalid non-zero 128-bit RNG seed')
+  }
+  const shared = toSharedSaveData(legacySaveCandidate(legacy))
+  const engine: EngineState = {
+    schemaVersion: RUNTIME_SCHEMA_VERSION,
+    save: shared,
+    gameTimeMs: options.nowMs,
+    lastSchedulerWallMs: options.nowMs,
+    timeZone: options.timeZone,
+    weatherLocation: options.weatherLocation ?? '',
+    advanceWhileEmpty: options.advanceWhileEmpty ?? true,
+    rng,
+    scheduledJobs: [],
+    nextScheduledJobId: 1,
+    gameSessions: [],
+    sessionCoverage: [],
+    lastProcessedDayBoundaryKey: dayKeyAt(options.nowMs, options.timeZone),
+    nextDailyBoundaryMs: nextDailyBoundaryMs(options.nowMs, options.timeZone),
+    importClamped: false,
+    clockSkippedMs: 0,
+    environment: { calendarByDay: {}, weatherByDay: {} },
+  }
+  const bundle: PortablePetBundleV1 = {
+    format: PORTABLE_BUNDLE_FORMAT,
+    schemaVersion: PORTABLE_BUNDLE_SCHEMA_VERSION,
+    exportedAtWallMs: options.nowMs,
+    authority: options.authority,
+    originLocalDeviceId: options.localDeviceId,
+    shared,
+    engine,
+  }
+  assertPortablePetBundle(bundle)
+  return bundle
+}
+
+function migratePortablePetBundleV0(value: Record<string, unknown>): PortablePetBundleV1 {
+  if (value.format !== LEGACY_PORTABLE_BUNDLE_FORMAT) {
+    failSchema('unsupported_format', '$.bundle.format', 'expected ' + LEGACY_PORTABLE_BUNDLE_FORMAT)
+  }
+  assertRequiredKeys(value, ['format', 'schemaVersion', 'exportedAtMs', 'authority', 'shared', 'engine'], '$.bundle')
+  assertOnlyKeys(value, ['format', 'schemaVersion', 'exportedAtMs', 'authority', 'originLocalDeviceId', 'shared', 'engine'], '$.bundle')
+  requireNonNegativeInteger(value.exportedAtMs, '$.bundle.exportedAtMs')
+  assertAuthorityStamp(value.authority, '$.bundle.authority')
+  if (value.originLocalDeviceId !== undefined) assertNonEmptyString(value.originLocalDeviceId, '$.bundle.originLocalDeviceId')
+  assertSharedSaveData(value.shared)
+  requireRecord(value.engine, '$.bundle.engine')
+  assertRequiredKeys(value.engine, LEGACY_ENGINE_REQUIRED_KEYS, '$.bundle.engine')
+  requireNonNegativeInteger(value.engine.gameTimeMs, '$.bundle.engine.gameTimeMs')
+  assertNonEmptyString(value.engine.timeZone, '$.bundle.engine.timeZone')
+  assertTimeZone(value.engine.timeZone)
+  const engine: Record<string, unknown> = {
+    ...value.engine,
+    schemaVersion: RUNTIME_SCHEMA_VERSION,
+    lastProcessedDayBoundaryKey: value.engine.lastProcessedDayBoundaryKey ?? dayKeyAt(value.engine.gameTimeMs as number, value.engine.timeZone),
+    nextDailyBoundaryMs: value.engine.nextDailyBoundaryMs ?? nextDailyBoundaryMs(value.engine.gameTimeMs as number, value.engine.timeZone),
+    importClamped: value.engine.importClamped ?? false,
+    clockSkippedMs: value.engine.clockSkippedMs ?? 0,
+  }
+  const bundle: PortablePetBundleV1 = {
+    format: PORTABLE_BUNDLE_FORMAT,
+    schemaVersion: PORTABLE_BUNDLE_SCHEMA_VERSION,
+    exportedAtWallMs: value.exportedAtMs as number,
+    authority: value.authority,
+    originLocalDeviceId: value.originLocalDeviceId as string | undefined,
+    shared: value.shared,
+    engine: engine as unknown as EngineState,
+  }
+  assertPortablePetBundle(bundle)
+  return bundle
+}
+
+/** Pure migration for legacy local v2 documents carrying a duplicate runtime.localDeviceId. */
+export function migrateLegacyLocalPetDocumentV2(value: unknown): LocalPetDocumentV2 {
+  try {
+    assertJsonSafe(value)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'local document is not JSON-safe'
+    failSchema('invalid_schema', '$.local', message)
+  }
+  requireRecord(value, '$.local')
+  requireRecord(value.device, '$.local.device')
+  assertNonEmptyString(value.device.localDeviceId, '$.local.device.localDeviceId')
+  requireRecord(value.runtime, '$.local.runtime')
+  const runtime: Record<string, unknown> = { ...value.runtime }
+  if (Object.prototype.hasOwnProperty.call(runtime, 'localDeviceId')) {
+    if (runtime.localDeviceId !== value.device.localDeviceId) {
+      failSchema('identity_mismatch', '$.local.runtime.localDeviceId', 'runtime.localDeviceId must match device.localDeviceId')
+    }
+    delete runtime.localDeviceId
+  }
+  const migrated = { ...value, runtime }
+  assertLocalPetDocumentV2(migrated)
+  return migrated as unknown as LocalPetDocumentV2
+}
+
 export function migratePortablePetBundle(value: unknown): PortablePetBundleV1 {
+  try {
+    assertJsonSafe(value)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'portable bundle is not JSON-safe'
+    failSchema('invalid_schema', '$.bundle', message)
+  }
   requireRecord(value, '$.bundle')
-  assertSchemaVersion(value.schemaVersion, PORTABLE_BUNDLE_SCHEMA_VERSION, '$.bundle.schemaVersion', 'portable bundle')
+  if (value.schemaVersion === LEGACY_PORTABLE_BUNDLE_SCHEMA_VERSION) return migratePortablePetBundleV0(value)
+  if (value.schemaVersion !== PORTABLE_BUNDLE_SCHEMA_VERSION) {
+    failSchema(
+      'unsupported_schema_version',
+      '$.bundle.schemaVersion',
+      'unsupported portable bundle schemaVersion: ' + String(value.schemaVersion),
+    )
+  }
   assertPortablePetBundle(value)
   return value as PortablePetBundleV1
 }
@@ -554,6 +757,9 @@ export function assertLocalPetDocumentV2(value: unknown): asserts value is Local
   }
   assertAuthorityStamp(value.authority.stamp, '$.local.authority.stamp')
   assertPortablePetBundle(value.bundle)
+  if (stableStringify(value.authority.stamp) !== stableStringify(value.bundle.authority)) {
+    failSchema('identity_mismatch', '$.local.authority.stamp', 'local authority stamp must exactly match bundle.authority')
+  }
   if (value.revision !== value.bundle.authority.revision || value.eventSeq !== value.bundle.authority.eventSeq) {
     failSchema('invalid_schema', '$.local', 'local revision/eventSeq must match the bundle authority stamp')
   }
@@ -563,8 +769,12 @@ export function assertLocalPetDocumentV2(value: unknown): asserts value is Local
   assertNonEmptyString(value.runtime.appInstanceId, '$.local.runtime.appInstanceId')
   requireNonNegativeInteger(value.runtime.startedAtWallMs, '$.local.runtime.startedAtWallMs')
   assertDeviceLocalOverlay(value.device)
+  const activeLocalAuthority = value.authority.state === 'active'
+  if (activeLocalAuthority && value.bundle.originLocalDeviceId === undefined) {
+    failSchema('missing_field', '$.local.bundle.originLocalDeviceId', 'active local authority requires originLocalDeviceId')
+  }
   if (value.bundle.originLocalDeviceId !== undefined && value.device.localDeviceId !== value.bundle.originLocalDeviceId) {
-    failSchema('invalid_schema', '$.local.device.localDeviceId', 'localDeviceId must match local-origin bundle provenance when present')
+    failSchema('identity_mismatch', '$.local.device.localDeviceId', 'localDeviceId must match bundle originLocalDeviceId')
   }
 }
 
