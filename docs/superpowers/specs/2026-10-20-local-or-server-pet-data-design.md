@@ -303,6 +303,10 @@ export interface GameSessionState {
   cancelReason?: string
 }
 
+export type CoverageSurvivor =
+  | { kind: 'server_connection'; connectionId: string; deviceId: string; authenticatedSessionId?: string }
+  | { kind: 'local_app'; appInstanceId: string; localDeviceId: string }
+
 export interface SessionCoverageInterval {
   coverageId: string
   deviceId: string
@@ -328,7 +332,7 @@ export interface EngineState {
   /** Historical connected intervals used to derive session-clock coverage during catch-up. */
   sessionCoverage: SessionCoverageInterval[]
   /** Durable marker for a reset/import that must reopen survivor coverage after commit. */
-  coverageReopen?: { operationId: string; commitWallMs: number }
+  coverageReopen?: { operationId: string; commitWallMs: number; survivors: CoverageSurvivor[] }
   /** Last daily boundary that actually ran, in the current timezone's day-key form. */
   lastProcessedDayBoundaryKey: string
   /** Next 06:00 boundary in current canonical game time; recomputed on timezone changes. */
@@ -621,9 +625,16 @@ interface PortablePetBundleV1 {
 }
 ```
 
-`EngineState` must include: game time, scheduler anchor, RNG seed/state, scheduled jobs/deadlines, active game/diudiule/exam/island_quiz session records with `actorDeviceId` (local mode uses stable `localDeviceId`) and closed payload/answer key, persisted `sessionCoverage`, timezone, canonical weather location, `advanceWhileEmpty`, last-processed day-boundary key, next day-boundary time, and the per-day environment cache. Device-local settings, position, credentials, AI/search/webhook secrets, and local prose are not included. Active session tokens are opaque and device-bound; after import/detach they remain usable only by the matching originating device, otherwise they are marked abandoned/expired and cannot be rewarded. Exported bundles must be treated as sensitive pet data and never logged in full.
+`EngineState` must include: game time, scheduler anchor, RNG seed/state, scheduled jobs/deadlines, active game/diudiule/exam/island_quiz session records with `actorDeviceId` (local mode uses stable `localDeviceId`) and closed payload/answer key, persisted `sessionCoverage`/`coverageReopen` operation and exact survivors, timezone, canonical weather location, `advanceWhileEmpty`, last-processed day-boundary key, next day-boundary time, and the per-day environment cache. Device-local settings, position, credentials, AI/search/webhook secrets, and local prose are not included. Active session tokens are opaque and device-bound; after import/detach they remain usable only by the matching originating device, otherwise they are marked abandoned/expired and cannot be rewarded. Exported bundles must be treated as sensitive pet data and never logged in full.
 
 ```ts
+interface LocalRuntimeIdentity {
+  localDeviceId: string
+  /** New UUID on every process start; never reused across restart. */
+  appInstanceId: string
+  startedAtWallMs: number
+}
+
 interface LocalPetDocumentV2 {
   format: 'qqpet-local-v2'
   schemaVersion: 1
@@ -634,6 +645,7 @@ interface LocalPetDocumentV2 {
     stamp: AuthorityStamp
   }
   bundle: PortablePetBundleV1
+  runtime: LocalRuntimeIdentity
   device: DeviceLocalOverlay
 }
 ```
@@ -658,7 +670,7 @@ interface RemoteProjectionCacheV2 {
 ```
 
 - Local-mode v2 and remote cache are separate formats; mode switches write the appropriate one and back up the old one.
-- `LocalPetDocumentV2.bundle.engine.gameSessions` serializes every active/settled game/exam/island-quiz session with `actorDeviceId`, closed payload, and answer key; `RuntimeContext.actorDeviceId` supplies the acting device for command grading. `bundle.engine.sessionCoverage` persists local app-active intervals keyed by `device.localDeviceId` for catch-up session-clock derivation. Answer keys are local/server state and must never be projected.
+- `LocalPetDocumentV2.bundle.engine.gameSessions` serializes every active/settled game/exam/island-quiz session with `actorDeviceId`, closed payload, and answer key; `RuntimeContext.actorDeviceId` supplies the acting device for command grading. `bundle.engine.sessionCoverage` persists local app-active intervals keyed by `device.localDeviceId`; `runtime.appInstanceId` (new per process) identifies the local survivor for `coverageReopen`. Answer keys are local/server state and must never be projected.
 - Old bare `SaveData` and original `config.json` imports are normalized into a portable bundle through the migration adapter: preserve shared data where possible, seed deterministic new RNG when absent, reconstruct job/session/day-boundary state, assign a local authority stamp for migrated local data, and back up the original file. A legacy file without a valid authority stamp cannot be imported into an active server authority.
 - Local full closed-app progression: with local `advanceWhileEmpty=true` (default), the next launch runs the full shared runtime from the persisted scheduler anchor through the entire closed interval in bounded catch-up chunks. This advances hunger, growth, illness, random events, death, tasks, jobs, farm/fishing and other game-world effects, not merely task completion. This is an approved deliberate behavior change. Online-session counters/sign-in online-gift countdown accrue only from persisted local coverage; a fully closed interval has none, while an app stall that remained active has coverage. A one-time migration/UX warning and catch-up progress status are required; commands remain unavailable until catch-up completes.
 - With local `advanceWhileEmpty=false`, the next launch resets the scheduler anchor to now and does not backfill the closed interval; pending jobs remain pending and resume relative to game time.
@@ -1200,7 +1212,7 @@ The server is the only authority in server mode:
 - The process must remain running for `advanceWhileEmpty=true` to advance while zero clients; server downtime is recovered by catch-up on restart when the setting is enabled.
 - On startup:
   1. Open SQLite, verify migrations, integrity/quick-check.
-  2. Load pet canonical state, engine state, RNG, per-day environment/weather cache, day-boundary keys, `pet_settings`, pending scheduled jobs, game/exam sessions, and `session_coverage`; repair any interval left open by a crash using heartbeat/grace before scheduling.
+  2. Load pet canonical state, engine state, RNG, per-day environment/weather cache, day-boundary keys, `pet_settings`, pending scheduled jobs, game/exam sessions, `session_coverage`, and pending `coverage_operations`; repair any interval left open by a crash using heartbeat/grace and reconcile pending reopen operations before scheduling.
   3. Validate state/schema/RNG/jobs consistency; fail closed on corruption.
   4. Mark `catchingUp` or `ready`.
   5. If `pet_authority.state='archived'`, do not schedule or accept canonical commands until `admin.resumeServer`; if `state='reset'`, serve only authority-reset/full-snapshot handshakes and do not schedule or accept commands; otherwise if `advanceWhileEmpty=true`, schedule bounded catch-up from persisted `lastSchedulerWallMs`; if false and zero clients, freeze and reset the scheduler anchor to now (no backfill).
@@ -1302,6 +1314,7 @@ CREATE TABLE coverage_operations (
   pet_id TEXT NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
   operation_id TEXT NOT NULL,
   commit_wall_ms INTEGER NOT NULL,
+  survivors_json TEXT NOT NULL, -- immutable exact survivor set captured at commit
   completed_at_ms INTEGER,
   PRIMARY KEY (pet_id, operation_id)
 );
@@ -1367,10 +1380,11 @@ CREATE TABLE pairing_codes (
 - Game/exam/island-quiz session tokens are server-issued, high-entropy, one-use, device-bound (`actor_device_id`), and expire in game time. Their `payload_json` is a closed union (`game`, `diudiule`, `exam`, `island_quiz`); exam/quiz answer keys live only in the server payload and are never projected/logged. A settled/expired/abandoned token can never be rewarded. Session rows are included in portable bundles and restored on import; imported sessions with a mismatched actor/device or expiry are marked abandoned/expired.
 - `advance_while_empty` and `time_zone` are server settings, not gameplay fields. `time_zone` is validated as IANA and persisted at pet initialization.
 - `session_coverage` records every authenticated connection interval. Graceful closes set `disconnected_at_ms`; startup repairs open crash intervals to `min(restartWall, last_heartbeat_at_ms + COVERAGE_CRASH_GRACE_MS)` with `close_reason='crash_repaired'`. Catch-up derives session-clock context by interval overlap, never by the current live socket count.
-- Reset/import coverage transaction: at operation start, close every open destination interval with `close_reason='pet_reset'` for `pet.reset`, `close_reason='import_replaced'` for portable import/resume, or `close_reason='authority_handoff'` for archive; never delete an open interval silently. Then clear/replace the closed coverage according to the reset/import source, write a `coverage_operations` row `(operationId, commitWallMs)`, and commit the canonical reset/import in one `synchronous=FULL` transaction.
-- After commit, reopen exactly one interval for every still-authenticated socket using `connectedAtWallMs=commitWallMs` and deterministic `coverageId=operationId:deviceId:connectionId` (`INSERT OR IGNORE` makes retry idempotent), then mark the operation complete. If the process crashes or the reopen pass fails after commit, the pending operation remains; a same-process repair reopens missing survivor intervals at `commitWallMs`, while a process restart has no old sockets and new sockets open only at their actual reconnect wall time before the operation is completed. No suspended/archived time is retroactively covered.
-- Local mode persists the same pending `coverageReopen {operationId, commitWallMs}` marker in `LocalPetDocumentV2.bundle.engine`; its single active renderer is treated as the survivor and the interval is reopened at commit wall after the local reset/import commits, with the same idempotent repair rule.
-- Coverage retention: keep closed intervals for at least the maximum catch-up/replay/sign-in accounting horizon (default 90 days), compact older closed intervals in bounded maintenance transactions, and never delete an open interval or intervals inside a pending catch-up/reopen operation. Open intervals are closed by graceful shutdown, suspend/archive events, reset/import, or crash repair before compaction.
+- Reset/import coverage transaction: atomically at commit time, capture an immutable `survivors_json` set from currently authenticated sockets/connections (server: `connectionId`, `deviceId`, optional authenticatedSessionId; local: `appInstanceId`, `localDeviceId`). Close every open destination interval with `close_reason='pet_reset'` for `pet.reset`, `close_reason='import_replaced'` for portable import/resume, or `close_reason='authority_handoff'` for archive; never delete an open interval silently. Then clear/replace closed coverage according to the source, write `coverage_operations(operationId, commitWallMs, survivors_json)`, and commit canonical reset/import in one `synchronous=FULL` transaction.
+- After commit, reopen exactly one interval for each **exact persisted survivor** whose same connectionId/deviceId/authenticatedSessionId is still authenticated, using `connectedAtWallMs=commitWallMs` and deterministic `coverageId=operationId:connectionId` (`INSERT OR IGNORE` idempotent), then mark the operation complete. A client connecting between commit and repair is not in `survivors_json`, so it must not be backfilled to commitWall; it opens only at its actual connect wall time.
+- On server startup, load pending `coverage_operations` and reconcile each before scheduling: for each survivor still authenticated in the socket registry, reopen its pending interval; for survivors whose connection is gone, close the pending operation without backfill and mark it completed. A restart has no old survivor sockets, so new sockets open only at actual reconnect time; the pending operation is completed idempotently without retroactive credit.
+- Local mode persists `coverageReopen {operationId, commitWallMs, survivors}` in `LocalPetDocumentV2.bundle.engine`, with `LocalPetDocumentV2.runtime.appInstanceId`/`localDeviceId` as the survivor identity. Same-process retry reopens only the exact persisted `appInstanceId` at commit wall; after an app restart, the new `appInstanceId` is not an old survivor, so it opens coverage at actual app-start wall, completes the pending operation, and never backfills the old process interval.
+- Coverage retention: keep closed intervals for at least the maximum catch-up/replay/sign-in accounting horizon (default 90 days), compact older closed intervals in bounded maintenance transactions, and never delete an open interval, a pending `coverage_operations` row, or intervals inside a pending catch-up/reopen operation. Completed operations and old closed intervals may be compacted only after their retention horizon; open intervals are closed by graceful shutdown, suspend/archive events, reset/import, or crash repair before compaction.
 - `pet_authority` is the canonical authority gate. `epoch` is the last active/source authority and `handoff_epoch` is the next issued epoch; while `state='archived'` or `state='reset'` the scheduler is paused and normal commands are rejected. `admin.exportForDetach`/`admin.resumeServer` and `admin.importPortableBundle` update authority and canonical state in one transaction; no committed handoff may create two active authorities.
 - A command row exists for every accepted/rejected command; its unique `(pet_id, device_id, op_id)` is the idempotency boundary. `commandStatus` is scoped to the authenticated device.
 - A duplicate `op_id` from the same device returns the stored result and performs no state/engine/event mutation. Cross-device `op_id` reuse is not accepted as a lookup key.
@@ -2124,7 +2138,7 @@ The implementation is not accepted unless all of the following are demonstrated 
 27. **Durable commits:** canonical commits use WAL + `synchronous=FULL`; no command success or projection broadcast occurs before the FULL fsync transaction returns.
 28. **Restore authority reset:** backup restore into an older authority uses operator-only `restore --accept-rollback`, mints a new `authorityId`, advances externally recorded `restoreGeneration`, sets reset, closes stale sockets, and serves `authorityResetRequired` then a full snapshot. A client cache newer than the restored authority cannot remain read-only or override the reset; repeated restores never reuse authority/generation values.
 29. **Local session actor identity:** localDocuments persist a stable `localDeviceId`; local game/exam/quiz sessions use it only as provenance. On local→server handoff, owner-approved rebinding to the uploading server device or deterministic cancellation with status/no reward is demonstrated, and localDeviceId never grants server command authority.
-30. **Reset/import coverage continuity:** with clients connected, reset/import first closes old open coverage with `pet_reset`/`import_replaced`, then reopens one survivor interval per authenticated socket at commit wall. Crash-after-commit-before-reopen repair is idempotent; online-time/sign-in accounting is neither double-counted nor undercounted; local mode does the same via `coverageReopen`.
+30. **Reset/import coverage continuity:** with clients connected, reset/import captures `survivors_json` at commit, closes old open coverage with `pet_reset`/`import_replaced`, and reopens only the exact still-authenticated survivor connectionIds at commit wall; newly connected sockets are not backfilled and disconnected survivors are not reopened. Pending operations survive restart/retry, complete idempotently without retroactive credit, and are retained until completion; local mode uses `runtime.appInstanceId` in `coverageReopen` with the same no-backfill rule. Online-time/sign-in accounting is neither double-counted nor undercounted.
 
 ## 16. Test matrix
 
@@ -2191,7 +2205,7 @@ The implementation is not accepted unless all of the following are demonstrated 
 - Restore/reset tests: startup detects an older DB restore from the external generation record and refuses service; client cache authorityId/restoreGeneration newer than restored server; `authorityResetRequired` + full-snapshot recovery; repeated restore with new UUID/generation; crash between generation-record and DB reset; stale socket command rejection; reconnect after reset.
 - Portable bundle JSON round-trip preserves shared SaveData + engine state + authority stamp, including game_sessions actorDeviceId/closed payload/answer key and sessionCoverage; SQLite schema includes game_sessions/pet_authority/session_coverage/jobs/day-boundary/environment metadata; weather records and canonical weather city persist.
 - Coverage lifecycle tests: restart with an open interval repaired by heartbeat/grace; `pet.reset` clears stale coverage; portable import replaces coverage atomically; backup restore uses restored coverage; historical online-time and sign-in online-gift accounting remains correct after each path; old closed coverage compacts without deleting pending/open intervals.
-- Connected-client reset/import tests: with an authenticated socket present, `pet.reset`/portable import close old intervals with `pet_reset`/`import_replaced`, reopen exactly one survivor interval at commit wall, and preserve online-time/sign-in accounting; kill between commit and reopen then retry/restart to prove idempotent repair and no double/undercount; local reset/import uses the same `coverageReopen` rule.
+- Connected-client reset/import/coverage-survivor tests: with an authenticated socket present, `pet.reset`/portable import capture exact `survivors_json`, close old intervals with `pet_reset`/`import_replaced`, reopen only those same connectionIds at commit wall, and preserve online-time/sign-in accounting; a survivor that disconnects between commit and reopen is not reopened/backfilled, and a socket that connects between commit and reopen is not backfilled; same-process retry is idempotent; restart with a pending operation completes it without backfill; retention/compaction cannot delete a pending operation; local reset/import tests cover same appInstanceId retry, app restart (new appInstanceId, no backfill), and accounting.
 - Device pairing TTL/single-use/revocation/role enforcement; token hashes; no plaintext token in DB/log. `device.list` redaction and `device.revoke` last-owner protection.
 - Archived/detach bundle secrecy: player `exportBundle`/detach receives `authority_not_active`/status only, never bundle/answer keys/session tokens/RNG/schedules; owner receives the bundle over WSS only.
 - Revocation closes all live sockets with 4002, broadcasts `deviceRevoked`, rejects a command queued by the revoked device, and fails reconnect authentication.
@@ -2288,7 +2302,7 @@ The implementation is intentionally too large for one change. This sequence is d
 
 ### C5 — Desktop/mobile LocalRepository, portable bundle, local v2 persistence
 
-- Add desktop main and Android/Harmony/iOS bridge LocalRepository hosts, portable-bundle local v2 document with stable localDeviceId/session coverage/`coverageReopen`, connected-client reset/import close-and-reopen, atomic migration from bare save data, local scheduler, command queue, projection/events contract, and per-host native file persistence.
+- Add desktop main and Android/Harmony/iOS bridge LocalRepository hosts, portable-bundle local v2 document with stable localDeviceId/session coverage/`runtime.appInstanceId`/`coverageReopen` exact survivors, connected-client reset/import close-and-reopen, atomic migration from bare save data, local scheduler, command queue, projection/events contract, and per-host native file persistence.
 - Keep legacy local path behind a dev-only runtime flag; never run both in one mode.
 - Add local parity/characterization tests against the headless runtime.
 - Local default still old until the final cutover; no server mode.
@@ -2310,7 +2324,7 @@ The implementation is intentionally too large for one change. This sequence is d
 
 ### C8 — Server package, WAL/FULL durability, auth/revocation, authority/restore reset, sessions, command service
 
-- Add `server/` package, SQLite migrations/transactions (including game_sessions with actor/payload, pet_authority with authorityId/restoreGeneration/reset, session_coverage and coverage_operations, with close-and-reopen survivor semantics) with WAL+`synchronous=FULL`, device registry/pairing/auth plus `device.list`/`device.revoke` socket registry/revocation broadcast/control CLI, restore `--accept-rollback` authority reset, WebSocket sessions, command service/idempotency, snapshot/event storage, weather cache/CLI/config, health/logging.
+- Add `server/` package, SQLite migrations/transactions (including game_sessions with actor/payload, pet_authority with authorityId/restoreGeneration/reset, session_coverage and coverage_operations with `survivors_json`, close-and-reopen exact-survivor semantics, pending-operation startup reconciliation, and retention blocking) with WAL+`synchronous=FULL`, device registry/pairing/auth plus `device.list`/`device.revoke` socket registry/revocation broadcast/control CLI, restore `--accept-rollback` authority reset, WebSocket sessions, command service/idempotency, snapshot/event storage, weather cache/CLI/config, health/logging.
 - Launch the shared runtime host with persisted schedule/RNG and `advanceWhileEmpty` setting; implement server command handlers from the same shared runtime.
 - Add server integration tests for auth, command duplicate/status, transaction rollback, persistence, backups.
 - Server is runnable/testable but not exposed to the desktop app yet.
@@ -2330,13 +2344,13 @@ The implementation is intentionally too large for one change. This sequence is d
 ### C11 — Storage UI, portable import/export, mode switching, weather/timezone, backups, admin flows
 
 - Add storage admin UI: mode choice, server URL/pairing, device list/revoke, status/revision/gameTime/authority epoch/restore generation, unified `setAdvanceWhileEmpty`, timezone, canonical weather city, initial source, owner-only detach/resume handoff with rollback/status, and local actor rebind/cancel reporting.
-- Add portable-bundle export/import UI and backup/authority/clamp reporting, connected-client reset/import coverage-reopen status, restore-generation/reset warning UI, local v1→v2 migration, server first-enable upload/use-server choice, reset/adopt owner commands, admin replacement.
+- Add portable-bundle export/import UI and backup/authority/clamp reporting, connected-client reset/import coverage-reopen/ survivor status, restore-generation/reset warning UI, local v1→v2 migration, server first-enable upload/use-server choice, reset/adopt owner commands, admin replacement.
 - Remove server-mode feature flag; enable both modes.
 - Test migration failures/rollback, secret/local-field denial, backup before overwrite.
 
 ### C12 — E2E (desktop + mobile local), CI, deployment docs, and final gate
 
-- Add two-Electron-instance real-server E2E (detach/resume/authority reset/revocation/coverage-derived catch-up/connected reset-import coverage reopen/local actor rebind) plus mobile bridge/local-runtime parity and build checks.
+- Add two-Electron-instance real-server E2E (detach/resume/authority reset/revocation/coverage-derived catch-up/connected reset-import exact-survivor coverage reopen/startup repair/local actor rebind) plus mobile bridge/local-runtime parity and build checks.
 - Add CI runtime/command/server/scheduler/E2E jobs and release gating.
 - Complete server `README`, Docker Compose, Caddy/Nginx TLS/WebSocket docs, systemd unit, backup/restore and runbook.
 - Run full acceptance matrix; record evidence before human/Lead sign-off.
@@ -2423,7 +2437,7 @@ P0/P1 findings block the commit. P2/P3 findings must be fixed or explicitly acce
 20. **Durability — resolved.** WAL plus `synchronous=FULL`; no success/broadcast before the fsynced commit.
 21. **Device revocation — resolved.** Owner `device.list`/`device.revoke`, per-command checks, live-socket registry closure/broadcast, reconnect denial.
 22. **Authority restore rollback — resolved.** Stable `authority_id` + `restore_generation`, operator `restore --accept-rollback`, reset state, owner/player handshake mismatch handling, cache-discard/full-snapshot recovery, and stale-socket rejection.
-23. **Session coverage and local actor identity — resolved.** Persisted `session_coverage` drives catch-up session clock; stable `localDeviceId` drives local session provenance and owner-approved rebinding/cancellation.
+23. **Session coverage and local actor identity — resolved.** Persisted `session_coverage` drives catch-up session clock; reset/import operations persist exact survivor identities (`survivors_json`/`appInstanceId`) and reconcile pending operations without backfill; stable `localDeviceId` drives local session provenance and owner-approved rebinding/cancellation.
 24. **Typed result and CLI control surface — resolved.** `ResultDataMap`/`JsonValue` type command results; `device.list` returns `{ devices }`. Running-server revocation uses `qqpet-server ctl revoke-device` over an owner-authenticated local control channel; stopped-server revocation uses the documented offline DB path and startup rejection.
 
 ### 19.2 Key scope risks
