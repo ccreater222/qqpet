@@ -57,6 +57,7 @@ const {
   mobileLocalRepositoryCapability,
 } = await import('../../src/mobile/local-repository-bridge.ts')
 const { createLocalRepository } = await import('../../src/main/local-repository.ts')
+const { shouldStartVoice } = await import('../../src/main/voice-startup.ts')
 const { bootRenderer, mountLanVisits } = await import('../../src/renderer/pet/runtime-boot.ts')
 const { runtimeMenuItems } = await import('../../src/renderer/ui/runtime-menu.ts')
 
@@ -475,6 +476,19 @@ function memoryStorage(initial = {}) {
   }
   return { storage, files, failWrites(value) { failWrites = value } }
 }
+
+test('runtime mode leaves the main-process voice watcher and ASR preload off; legacy still honors settings.voice', () => {
+  assert.equal(shouldStartVoice(true, true), false)
+  assert.equal(shouldStartVoice(true, false), false)
+  assert.equal(shouldStartVoice(false, false), false)
+  assert.equal(shouldStartVoice(false, true), true)
+  const mainSource = readFileSync(new URL('../../src/main/index.ts', import.meta.url), 'utf8')
+  const startVoice = mainSource.slice(mainSource.indexOf('const startVoice ='), mainSource.indexOf('const stopVoice ='))
+  assert.ok(startVoice.indexOf('shouldStartVoice(rendererRuntime !== null, getSave().settings.voice)') < startVoice.indexOf('parseHotkey'))
+  assert.ok(startVoice.indexOf('shouldStartVoice(rendererRuntime !== null, getSave().settings.voice)') < startVoice.indexOf('watchHotkey'))
+  assert.ok(startVoice.indexOf('shouldStartVoice(rendererRuntime !== null, getSave().settings.voice)') < startVoice.indexOf('preloadAsr'))
+  assert.match(mainSource, /if \(shouldStartVoice\(rendererRuntime !== null, getSave\(\)\.settings\.voice\)\) startVoice\(\)/)
+})
 
 test('runtime boot with an existing pet starts presentation only, never the legacy loop or LAN visits', () => {
   const calls = []

@@ -123,3 +123,19 @@ test('runtime adoption rejection does not start the legacy or presentation clock
   assert.deepEqual(f.writes, [])
   assert.equal(f.started(), 0)
 })
+
+test('a delayed command result cannot start presentation before the adopted projection', async () => {
+  let resolveCommand
+  const commandPromise = new Promise((resolve) => { resolveCommand = resolve })
+  const f = fixture({
+    projection: true,
+    command: () => commandPromise,
+  })
+  f.choose(0)
+  await f.finish()
+  f.applyProjection()
+  assert.equal(f.started(), 0, 'projection alone cannot complete an unresolved adoption command')
+  resolveCommand({ status: 'applied' })
+  await f.settle()
+  assert.equal(f.started(), 1)
+})

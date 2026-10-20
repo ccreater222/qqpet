@@ -296,23 +296,25 @@ export function bury(done?: () => void): void {
   speak({ c: 'state', s: 'bury' }, 'bury', { start: done })
 }
 
-let lastMood = mood()
-onInfoChange((key, prev) => {
-  if (key === 'growth') {
-    const before = syncLevel()
-    const now = save.petComputedlInfo.level
-    if (now === before) return
-    const first = (now === 5 && before === 4) || (now === 10 && before === 9)
-    speak({ c: first ? `first${now === 5 ? 1 : 2}` : 'levUp', now: true }, first ? 'first' : 'levUp')
-  } else if (key === 'health') {
-    healthChanged(prev as number)
-  } else if (key === 'mood' && mood() !== lastMood) {
-    lastMood = mood()
-    if (stage() === 'Adult') speak({ c: 'mood', s: lastMood, now: true }, 'speak')
-  } else if (key === 'hunger' || key === 'clean' || key === 'yb') {
-    maybeLead()
-  }
-})
+if (runtimeProjectionMode === false) {
+  let lastMood = mood()
+  onInfoChange((key, prev) => {
+    if (key === 'growth') {
+      const before = syncLevel()
+      const now = save.petComputedlInfo.level
+      if (now === before) return
+      const first = (now === 5 && before === 4) || (now === 10 && before === 9)
+      speak({ c: first ? `first${now === 5 ? 1 : 2}` : 'levUp', now: true }, first ? 'first' : 'levUp')
+    } else if (key === 'health') {
+      healthChanged(prev as number)
+    } else if (key === 'mood' && mood() !== lastMood) {
+      lastMood = mood()
+      if (stage() === 'Adult') speak({ c: 'mood', s: lastMood, now: true }, 'speak')
+    } else if (key === 'hunger' || key === 'clean' || key === 'yb') {
+      maybeLead()
+    }
+  })
+}
 
 function healthChanged(prev: number): void {
   const h = info.health

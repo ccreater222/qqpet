@@ -25,6 +25,7 @@ import { DEFAULT_HOTKEY, parseHotkey, watchHotkey, type KeyWatcher } from './hot
 import { preloadAsr, transcribe } from './asr'
 import { DesktopRendererRuntime, installRendererRuntimeIpc } from './renderer-runtime'
 import { desktopStartupAuthority, LOCAL_V2_DOCUMENT_NAME } from './renderer-runtime-flags'
+import { shouldStartVoice } from './voice-startup'
 
 // A test sidecar (QQPET_USER_DATA) runs beside the real pet: own save, own id, own lock.
 if (process.env.QQPET_USER_DATA) app.setPath('userData', process.env.QQPET_USER_DATA)
@@ -175,7 +176,7 @@ app.whenReady().then(async () => {
   })
   let talkKey: KeyWatcher | undefined
   const startVoice = (): void => {
-    if (rendererRuntime !== null) return
+    if (shouldStartVoice(rendererRuntime !== null, getSave().settings.voice) === false) return
     if (talkKey) return
     const hot = parseHotkey(DEFAULT_HOTKEY)
     if (!hot) return
@@ -191,7 +192,7 @@ app.whenReady().then(async () => {
     talkKey?.stop()
     talkKey = undefined
   }
-  if (getSave().settings.voice) startVoice()
+  if (shouldStartVoice(rendererRuntime !== null, getSave().settings.voice)) startVoice()
   let lanOn = false
   const startLan = (): void => {
     if (rendererRuntime !== null) return
