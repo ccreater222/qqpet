@@ -198,9 +198,14 @@ test('default legacy path stays untouched unless the explicit local repository f
   assert.equal(startLocalRepositoryIfEnabled(options, {}), null)
   assert.equal(existsSync(join(dir, 'save.json')), false)
   assert.equal(localRepositoryCapability({}, false).canActivate, false)
-  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1' }, true).reason, 'legacy_authority_active')
-  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1' }, false).canActivate, true)
+  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1' }, false).reason, 'c6_activation_missing')
+  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }, false).reason, 'renderer_capability_missing')
+  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }, true, true).reason, 'legacy_authority_active')
+  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }, false, true).canActivate, true)
   assert.equal(startLocalRepositoryIfEnabled({ ...options, legacyAuthorityActive: true }, { QQPET_LOCAL_REPOSITORY_V2: '1' }), null)
+  const activated = startLocalRepositoryIfEnabled({ ...options, rendererCapability: true }, { QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' })
+  assert.ok(activated)
+  await activated.stop()
 })
 
 test('suspend/resume closes exact segment without counting suspended time; malformed documents fail read-only', async () => {
@@ -242,7 +247,7 @@ test('lifecycle starts only on ready when flagged; quit flushes and stops', asyn
   assert.equal(registerLocalRepositoryLifecycle(repoOptions(dir, clock), hooks, {}), null)
   assert.equal(ready.length, 0)
   assert.equal(quit.length, 0)
-  const repo = registerLocalRepositoryLifecycle(repoOptions(dir, clock), hooks, { QQPET_LOCAL_REPOSITORY_V2: '1' })
+  const repo = registerLocalRepositoryLifecycle({ ...repoOptions(dir, clock), rendererCapability: true }, hooks, { QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' })
   assert.ok(repo)
   assert.equal(existsSync(join(dir, 'save.json')), false)
   await ready[0]()
@@ -574,4 +579,56 @@ test('local document schema validates full OpIdCache and event history shape', (
   badHistory.eventHistory = [{ eventSeq: 2, type: 'x', payload: {} }]
   badHistory.eventSeq = 1
   assert.equal(validateLocalPetDocumentV2(badHistory), false)
+  const badCommand = JSON.parse(JSON.stringify(base))
+  badCommand.idempotency.records[0].commandType = 'not-a-command'
+  assert.equal(validateLocalPetDocumentV2(badCommand), false)
+  const badOpId = JSON.parse(JSON.stringify(base))
+  badOpId.idempotency.records[0].opId = 'bad op id'
+  assert.equal(validateLocalPetDocumentV2(badOpId), false)
+  const badKeys = JSON.parse(JSON.stringify(base))
+  badKeys.eventHistory = [{ eventSeq: 1, type: 'pet.statsChanged', payload: {}, extra: true }]
+  assert.equal(validateLocalPetDocumentV2(badKeys), false)
+})
+
+test('stop/export/suspend/resume preserve prior scheduler, status and coverage on persist failure', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  let failWrite = false
+  let starts = 0
+  const startTimer = () => { starts++; return () => {} }
+  const repo = new LocalRepository(repoOptions(dir, clock, {
+    autoScheduler: true, startTimer,
+    writeDocument: (file, text) => { if (failWrite) throw new Error('write failed'); writeFileSync(file, text) },
+  }))
+  await repo.start()
+  const originalCoverage = repo.getDocument().bundle.engine.sessionCoverage
+  failWrite = true
+  await assert.rejects(repo.stop())
+  assert.equal(repo.getStatus().state, 'ready')
+  assert.equal(repo.isSchedulerRunning(), true)
+  assert.deepEqual(repo.getDocument().bundle.engine.sessionCoverage, originalCoverage)
+  await assert.rejects(repo.exportForDetach())
+  assert.equal(repo.getStatus().state, 'ready')
+  assert.equal(repo.isSchedulerRunning(), true)
+  assert.deepEqual(repo.getDocument().bundle.engine.sessionCoverage, originalCoverage)
+  await assert.rejects(repo.suspend())
+  assert.equal(repo.getStatus().state, 'ready')
+  assert.equal(repo.isSchedulerRunning(), true)
+  assert.deepEqual(repo.getDocument().bundle.engine.sessionCoverage, originalCoverage)
+  failWrite = false
+  await repo.suspend()
+  assert.equal(repo.getStatus().state, 'suspended')
+  assert.equal(repo.isSchedulerRunning(), false)
+  const suspendedCoverage = repo.getDocument().bundle.engine.sessionCoverage
+  failWrite = true
+  await assert.rejects(repo.resume())
+  assert.equal(repo.getStatus().state, 'suspended')
+  assert.equal(repo.isSchedulerRunning(), false)
+  assert.deepEqual(repo.getDocument().bundle.engine.sessionCoverage, suspendedCoverage)
+  failWrite = false
+  await repo.resume()
+  assert.equal(repo.getStatus().state, 'ready')
+  assert.equal(repo.isSchedulerRunning(), true)
+  await repo.stop()
 })

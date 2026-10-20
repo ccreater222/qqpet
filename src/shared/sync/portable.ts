@@ -17,6 +17,7 @@ import type {
 } from '../pet-runtime/types'
 import type { OpIdCache } from '../pet-runtime/idempotency'
 import type { OrderedDomainEvent } from '../pet-runtime/events'
+import { isCommandKey } from './command-validation'
 import type { SaveData } from '../save'
 import type { DeviceLocalOverlay, SharedSaveData } from './data-boundary'
 import {
@@ -758,6 +759,10 @@ export function deserializePortablePetBundle(serialized: string): PortablePetBun
   return migratePortablePetBundle(parsed)
 }
 
+const LOCAL_OP_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/
+function assertLocalBoundedString(value: unknown, path: string): asserts value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 256) failSchema('invalid_schema', path, 'expected a non-empty bounded string')
+}
 function assertLocalIdempotencyCache(value: unknown, path: string): void {
   requireRecord(value, path)
   assertOnlyKeys(value, ['schemaVersion', 'records'], path)
@@ -769,10 +774,10 @@ function assertLocalIdempotencyCache(value: unknown, path: string): void {
     assertRequiredKeys(record, ['petId', 'deviceId', 'opId', 'commandType', 'resultPresent'], path + '.records[]')
     assertOnlyKeys(record, ['petId', 'deviceId', 'opId', 'commandType', 'resultPresent', 'result', 'error'], path + '.records[]')
 
-    assertNonEmptyString(record.petId, path + '.records[].petId')
-    assertNonEmptyString(record.deviceId, path + '.records[].deviceId')
-    assertNonEmptyString(record.opId, path + '.records[].opId')
-    if (typeof record.commandType !== 'string' || record.commandType.length === 0) failSchema('invalid_schema', path + '.records[].commandType', 'expected command type')
+    assertLocalBoundedString(record.petId, path + '.records[].petId')
+    assertLocalBoundedString(record.deviceId, path + '.records[].deviceId')
+    if (typeof record.opId !== 'string' || LOCAL_OP_ID_PATTERN.test(record.opId) === false) failSchema('invalid_schema', path + '.records[].opId', 'invalid opId')
+    if (typeof record.commandType !== 'string' || isCommandKey(record.commandType) === false) failSchema('invalid_schema', path + '.records[].commandType', 'unknown command type')
     if (typeof record.resultPresent !== 'boolean') failSchema('invalid_schema', path + '.records[].resultPresent', 'expected boolean')
     const hasResult = Object.prototype.hasOwnProperty.call(record, 'result')
     const hasError = Object.prototype.hasOwnProperty.call(record, 'error')
@@ -842,10 +847,12 @@ export function assertLocalPetDocumentV2(value: unknown): asserts value is Local
     for (const event of value.eventHistory) {
       requireRecord(event, '$.local.eventHistory[]')
       assertRequiredKeys(event, ['eventSeq', 'type', 'payload'], '$.local.eventHistory[]')
+      assertOnlyKeys(event, ['eventSeq', 'type', 'payload'], '$.local.eventHistory[]')
       requireNonNegativeInteger(event.eventSeq, '$.local.eventHistory[].eventSeq')
-      if (event.eventSeq <= previousEventSeq) failSchema('invalid_schema', '$.local.eventHistory', 'event sequence must increase')
+      if (event.eventSeq <= previousEventSeq || event.eventSeq <= 0) failSchema('invalid_schema', '$.local.eventHistory', 'event sequence must increase')
       previousEventSeq = event.eventSeq
       if (typeof event.type !== 'string' || event.type.length === 0) failSchema('invalid_schema', '$.local.eventHistory[].type', 'expected event type')
+      requireRecord(event.payload, '$.local.eventHistory[].payload')
     }
     if (previousEventSeq > value.eventSeq) failSchema('invalid_schema', '$.local.eventHistory', 'event history exceeds document eventSeq')
   }
