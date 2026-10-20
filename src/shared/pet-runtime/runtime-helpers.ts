@@ -315,6 +315,16 @@ export function defaultIsland(gameTimeMs: number): IslandState {
 
 export function readIsland(save: SharedSaveData, gameTimeMs: number): IslandState {
   const parsed = readSharedBlob<Partial<IslandState>>(save, 'island', {})
+  if (parsed.newsFacts !== undefined) {
+    if (Array.isArray(parsed.newsFacts) === false || parsed.newsFacts.some(fact =>
+      Array.isArray(fact) === false || fact.length !== 2 ||
+      typeof fact[0] !== 'string' || typeof fact[1] !== 'string',
+    )) reject('invalid_payload', 'malformed island newsFacts')
+  }
+  if (parsed.newsDay !== undefined &&
+      (typeof parsed.newsDay !== 'number' || Number.isSafeInteger(parsed.newsDay) === false || parsed.newsDay < 0)) {
+    reject('invalid_payload', 'malformed island newsDay')
+  }
   return {
     day: parsed.day ?? Math.floor(gameTimeMs / 1000),
     sent: parsed.sent ?? 0,

@@ -156,20 +156,12 @@ function rollErrands(rng: HandlerContext['rng'], state: HandlerContext['state'])
   }
 
   const made: IslandErrand[] = []
-  const available = rng.shuffle(Object.keys(ISLAND.folk).filter(name => written.some(errand => errand.from === name) === false))
+  const available = rng.shuffle(Object.keys(ISLAND.folk).filter(name => written.some(errand => errand.from === name) === false)).slice(0, 2)
   for (const from of available) {
-    if (made.length >= 2) break
-    const kinds = rng.shuffle(ROLLED_KINDS.filter(kind =>
-      written.some(errand => errand.kind === kind) === false &&
-      made.some(errand => errand.kind === kind) === false,
-    ))
-    for (const kind of kinds) {
-      const to = rollValue(kind, from, state, rng)
-      if (to !== null) {
-        made.push({ from, kind, to, got: 0, took: false })
-        break
-      }
-    }
+    const kind = rng.pickOne(ROLLED_KINDS)
+    if (kind === null) continue
+    const to = rollValue(kind, from, state, rng)
+    if (to !== null) made.push({ from, kind, to, got: 0, took: false })
   }
 
   return [...written, ...made]

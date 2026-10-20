@@ -30,6 +30,7 @@ const {
 } = await import('../../src/shared/pet-runtime/content/index.ts')
 const { COMMAND_TYPES } = await import('../../src/shared/sync/command-validation.ts')
 const { validateEngineState } = await import('../../src/shared/sync/portable.ts')
+const { validateSharedSaveJsonBlob, filterIslandCanonicalState } = await import('../../src/shared/sync/data-boundary.ts')
 const { createRuntimeRng, currentBoundarySeconds } = await import('../../src/shared/pet-runtime/runtime-helpers.ts')
 const {
   DAY_KEY,
@@ -541,7 +542,10 @@ test('C4a fishing, farm and island content tables drift-check against renderer/S
     const row = attrs(match[1])
     if (row.object && row.name) fertilizerNames[row.object] = row.name
   }
-  assert.deepEqual(FARM_FERTILIZERS.map(item => ({ item: item.item, name: fertilizerNames[item.item], duration: fertilizerDurations[item.item] })), FARM_FERTILIZERS)
+  const expectedFertilizers = Object.entries(fertilizerDurations).map(([item, duration]) => ({ item, name: fertilizerNames[item], duration }))
+  assert.deepEqual(FARM_FERTILIZERS, expectedFertilizers)
+  assert.throws(() => assert.deepEqual(FARM_FERTILIZERS, [...expectedFertilizers, { item: 'FertilizerSynthetic', name: '合成化肥', duration: 123 }]), assert.AssertionError)
+  assert.throws(() => assert.deepEqual([...FARM_FERTILIZERS, { item: 'RuntimeOnly', name: '仅运行时', duration: 1 }], expectedFertilizers), assert.AssertionError)
 })
 
 test('game and diudiule sessions remain server-authoritative in Group E', () => {
@@ -567,7 +571,7 @@ test('island daily roll mirrors the 6+2, can-filtered, sold-want renderer path',
   const island = blob(refreshed.state, 'island')
   assert.equal(island.errands.length, 8)
   assert.equal(new Set(island.errands.map(errand => errand.from)).size, 8)
-  assert.equal(new Set(island.errands.map(errand => errand.kind)).size, 8)
+  assert.ok(new Set(island.errands.map(errand => errand.kind)).size < 8, 'made kinds may repeat written/made kinds')
   const written = island.errands.slice(0, 6)
   for (const errand of written) {
     assert.equal(ISLAND.errands.some(([from, kind, to]) => from === errand.from && kind === errand.kind && to === errand.to), true)
@@ -620,4 +624,29 @@ test('island refreshNews persists canonical facts and is idempotent until the ne
   const repeat = ok(nextDay.state, 'island.refreshNews', { dayKey: nextKey })
   assert.equal(repeat.result.cached, true)
   assert.equal(repeat.state.rng.draws, nextDraws)
+})
+
+
+test('canonical island news fields reject malformed shapes without crashing refresh', () => {
+  assert.equal(validateSharedSaveJsonBlob('island', JSON.stringify({ newsFacts: [['a', 'b']], newsDay: 1 })), true)
+  assert.equal(validateSharedSaveJsonBlob('island', JSON.stringify({ newsFacts: 'bad' })), false)
+  assert.equal(validateSharedSaveJsonBlob('island', JSON.stringify({ newsFacts: [['a']] })), false)
+  assert.equal(validateSharedSaveJsonBlob('island', JSON.stringify({ newsFacts: [[1, 2]] })), false)
+  assert.equal(validateSharedSaveJsonBlob('island', JSON.stringify({ newsDay: 'bad' })), false)
+  assert.equal(validateSharedSaveJsonBlob('island', JSON.stringify({ newsDay: -1 })), false)
+  assert.equal(validateSharedSaveJsonBlob('island', JSON.stringify({ newsDay: 1.5 })), false)
+  assert.throws(() => filterIslandCanonicalState({ newsFacts: 'bad' }))
+  assert.throws(() => filterIslandCanonicalState({ newsDay: 'bad' }))
+
+  const malformedFacts = baseState()
+  malformedFacts.save.saveJsonData.island = JSON.stringify({ newsFacts: 'bad', newsDay: 1 })
+  const factsOutcome = execute(malformedFacts, 'island.refreshNews', { dayKey: dayKeyAt(GAME_TIME_MS, 'Asia/Shanghai') })
+  assert.equal(factsOutcome.ok, false)
+  assert.equal(factsOutcome.error.code, 'invalid_payload')
+
+  const malformedDay = baseState()
+  malformedDay.save.saveJsonData.island = JSON.stringify({ newsFacts: [], newsDay: 'bad' })
+  const dayOutcome = execute(malformedDay, 'island.refreshNews', { dayKey: dayKeyAt(GAME_TIME_MS, 'Asia/Shanghai') })
+  assert.equal(dayOutcome.ok, false)
+  assert.equal(dayOutcome.error.code, 'invalid_payload')
 })

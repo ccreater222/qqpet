@@ -745,6 +745,14 @@ function assertIslandCanonical(value: unknown, path: string): void {
   assertOptionalNonNegativeIntegerField(value, 'tier', path)
   assertOptionalNonNegativeIntegerField(value, 'pieces', path)
   assertOptionalNonNegativeIntegerField(value, 'wins', path)
+  assertOptionalNonNegativeIntegerField(value, 'newsDay', path)
+  if (value.newsFacts !== undefined) {
+    assertBlobArray(value.newsFacts, path + '.newsFacts')
+    value.newsFacts.forEach((fact, index) => {
+      const factPath = path + '.newsFacts[' + index + ']'
+      if (isStringArray(fact) === false || fact.length !== 2) failSchema('invalid_schema', factPath, 'expected [heading, fact]')
+    })
+  }
   if (value.lit !== undefined && isStringArray(value.lit) === false) failSchema('invalid_schema', path + '.lit', 'expected string list')
   if (value.fought !== undefined && isStringArray(value.fought) === false) failSchema('invalid_schema', path + '.fought', 'expected string list')
   if (value.lamps !== undefined && isNonNegativeIntegerArray(value.lamps) === false) {
