@@ -1,5 +1,5 @@
 import type { DomainEvent } from './events'
-import { sessionActivityForInterval } from './coverage'
+import { sessionActivityForInterval, type SessionActivity } from './coverage'
 import { cloneEngine, reject } from './runtime-helpers'
 import { advanceMinuteInPlace } from './tick'
 import { wholeFixedTicksBetween, GAME_MINUTE_MS } from './time'
@@ -14,6 +14,10 @@ export interface SchedulerAdvanceOptions {
   maxChunkTicks?: number
   /** Actual live authenticated clients; defaults to ctx.activeClientCount. */
   liveActiveClientCount?: number
+  /** Per-minute live client count hook for mid-catch-up connects/disconnects. */
+  liveActiveClientCountAtWallMs?: (wallMs: number) => number
+  /** Per-minute coverage override for hosts that update coverage as catch-up proceeds. */
+  coverageAtWallMs?: (fromWallMs: number, toWallMs: number) => SessionActivity
 }
 
 export interface SchedulerAdvanceOutcome {
@@ -63,7 +67,7 @@ export function advanceSchedulerChunk(
     }
   }
 
-  if (candidate.advanceWhileEmpty === false && liveClients === 0) {
+  if (candidate.advanceWhileEmpty === false && liveClients === 0 && options.liveActiveClientCountAtWallMs === undefined) {
     candidate.lastSchedulerWallMs = targetWallMs
     return {
       ok: true, state: candidate, events: [], ticks: 0,
@@ -74,10 +78,21 @@ export function advanceSchedulerChunk(
   const due = wholeFixedTicksBetween(anchor, targetWallMs)
   const ticks = Math.min(due, maxChunkTicks)
   const events: DomainEvent[] = []
+  let completed = 0
   for (let index = 0; index < ticks; index++) {
     const fromWallMs = anchor + index * GAME_MINUTE_MS
     const toWallMs = fromWallMs + GAME_MINUTE_MS
-    const activity = sessionActivityForInterval(candidate.sessionCoverage, fromWallMs, toWallMs)
+    const liveAtMinute = options.liveActiveClientCountAtWallMs?.(fromWallMs) ?? liveClients
+    nonNegativeInteger(liveAtMinute, 'liveActiveClientCountAtWallMs')
+    const activity = options.coverageAtWallMs?.(fromWallMs, toWallMs) ??
+      sessionActivityForInterval(candidate.sessionCoverage, fromWallMs, toWallMs)
+    if (candidate.advanceWhileEmpty === false && liveAtMinute === 0 && activity.activeClientCount === 0) {
+      candidate.lastSchedulerWallMs = fromWallMs
+      return {
+        ok: true, state: candidate, events, ticks: completed,
+        targetWallMs, catchingUp: false, frozen: true,
+      }
+    }
     const tickCtx: RuntimeContext = {
       ...ctx,
       gameTimeMs: candidate.gameTimeMs,
@@ -86,15 +101,16 @@ export function advanceSchedulerChunk(
       actorDeviceId: null,
     }
     events.push(...advanceMinuteInPlace(candidate, tickCtx))
+    completed++
   }
-  candidate.lastSchedulerWallMs = ticks < due ? anchor + ticks * GAME_MINUTE_MS : targetWallMs
+  candidate.lastSchedulerWallMs = completed < due ? anchor + completed * GAME_MINUTE_MS : targetWallMs
   return {
     ok: true,
     state: candidate,
     events,
-    ticks,
+    ticks: completed,
     targetWallMs,
-    catchingUp: ticks < due,
+    catchingUp: completed < due,
     frozen: false,
   }
 }

@@ -385,7 +385,6 @@ test('scheduled farm and fishing jobs tick canonical world state in due/id order
 test('full renderer mutation gate classifies every canonical mutation/site to runtime groups', () => {
   const runtimeCommands = new Set([...C3_COMMAND_TYPES, ...C4A_COMMAND_TYPES, ...C4B_COMMAND_TYPES])
   const mapping = {
-    'src/renderer/main.ts': [],
     'src/renderer/pet/activity.ts': ['job.startWork', 'job.startStudy', 'job.startTravel', 'activity.stop'],
     'src/renderer/pet/album.ts': ['job.startTravel'],
     'src/renderer/pet/fishing.ts': C4A_COMMAND_TYPES.filter(command => command.startsWith('fishing.')),
@@ -399,10 +398,8 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
     'src/renderer/pet/tasks.ts': ['task.claim'],
     'src/renderer/pet/vip.ts': ['vip.buyPinkDiamond', 'vip.clearPinkDiamond', 'vip.buySweetheart', 'vip.setSweetheart'],
     'src/renderer/pet/weather.ts': ['server.setWeatherCity'],
-    'src/renderer/swf/sol.ts': [],
     'src/renderer/ui/adopt.ts': ['pet.adopt'],
-    'src/renderer/ui/chat.ts': [],
-    'src/renderer/ui/community.ts': [],
+    'src/renderer/ui/chat.ts': ['admin.grantCheat'],
     'src/renderer/ui/diudiule.ts': ['diudiule.startSession', 'diudiule.reward'],
     'src/renderer/ui/email.ts': ['mail.claim', 'mail.claimAll', 'mail.delete', 'mail.deleteAll'],
     'src/renderer/ui/face.ts': ['pet.pokeFace', 'pet.cheer'],
@@ -410,24 +407,53 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
     'src/renderer/ui/fishing.ts': C4A_COMMAND_TYPES.filter(command => command.startsWith('fishing.')),
     'src/renderer/ui/games.ts': ['game.startSession', 'game.reward', 'game.abandonSession'],
     'src/renderer/ui/island.ts': C4A_COMMAND_TYPES.filter(command => command.startsWith('island.')),
-    'src/renderer/ui/menu.ts': [],
     'src/renderer/ui/petinfo.ts': ['pet.adopt', 'pet.reset', 'pet.bury', 'pet.rename', 'pet.setPaused', 'pet.pokeFace', 'pet.cheer'],
-    'src/renderer/ui/setup.ts': ['settings.setShared', 'server.setWeatherCity'],
+    'src/renderer/ui/setup.ts': ['settings.setShared', 'server.setWeatherCity', 'admin.grantCheat', 'admin.grantRandomGoods'],
     'src/renderer/ui/smallgame.ts': ['game.startSession', 'game.reward', 'game.abandonSession'],
-    'src/renderer/ui/state.ts': [],
+    'src/renderer/ui/state.ts': ['vip.setSweetheart'],
     'src/renderer/ui/travel.ts': ['travel.completeCollection'],
-    'src/renderer/ui/update.ts': [],
     'src/renderer/ui/visit.ts': ['social.completeLanVisit'],
-    'src/renderer/ui/float.ts': [],
-    'src/renderer/ui/talk.ts': [],
-    'src/renderer/swf/player.ts': [],
+  }
+  const presentationOnly = {
+    'src/renderer/main.ts': 'window placement and local settings only',
+    'src/renderer/swf/sol.ts': 'local SharedObject scratch storage only',
+    'src/renderer/ui/community.ts': 'local community point/presentation blob and saveSpot',
+    'src/renderer/ui/menu.ts': 'local tray/menu settings only',
+    'src/renderer/ui/update.ts': 'local update-check timestamp only',
+    'src/renderer/ui/float.ts': 'visual float/presentation only',
+    'src/renderer/ui/talk.ts': 'voice/presentation only',
+    'src/renderer/swf/player.ts': 'SWF player presentation wrapper only',
+  }
+  const sharedRuntimeCommands = {
+    'src/shared/pet-runtime/farm-runtime.ts': C4A_COMMAND_TYPES.filter(command => command.startsWith('farm.')),
+    'src/shared/pet-runtime/fishing-runtime.ts': C4A_COMMAND_TYPES.filter(command => command.startsWith('fishing.')),
+    'src/shared/pet-runtime/handlers-b.ts': C3_COMMAND_TYPES.filter(command => command.startsWith('inventory.') || command.startsWith('medical.') || command.startsWith('vip.') || command === 'travel.completeCollection'),
+    'src/shared/pet-runtime/handlers-d.ts': C3_COMMAND_TYPES.filter(command => command.startsWith('signin.') || command.startsWith('mail.')),
+    'src/shared/pet-runtime/handlers-server.ts': C4B_COMMAND_TYPES,
+    'src/shared/pet-runtime/island-runtime.ts': C4A_COMMAND_TYPES.filter(command => command === 'social.completeLanVisit' || command.startsWith('island.')),
+    'src/shared/pet-runtime/runtime-helpers.ts': C3_COMMAND_TYPES,
+    'src/shared/pet-runtime/travel.ts': ['job.startTravel', 'activity.stop'],
+  }
+  const sharedRuntimeOnly = {
+    'src/shared/pet-runtime/self-care.ts': 'passive tick engine, no client command surface',
+    'src/shared/pet-runtime/tick.ts': 'scheduler/minute engine, no client command surface',
+  }
+  const requiredSites = {
+    'src/renderer/ui/setup.ts|addInfo|yb': ['admin.grantCheat'],
+    'src/renderer/ui/setup.ts|addInfo|growth': ['admin.grantCheat'],
+    'src/renderer/ui/setup.ts|give|': ['admin.grantRandomGoods'],
+    'src/renderer/ui/chat.ts|addInfo|': ['admin.grantCheat'],
+    'src/renderer/ui/chat.ts|setInfo|': ['admin.grantCheat'],
+    'src/renderer/ui/state.ts|setInfo|sweetHeart': ['vip.setSweetheart'],
+    'src/renderer/pet/mail.ts|writeMails|': ['mail.claim', 'mail.claimAll', 'mail.delete', 'mail.deleteAll'],
+    'src/renderer/ui/email.ts|writeMails|': ['mail.claim', 'mail.claimAll', 'mail.delete', 'mail.deleteAll'],
   }
   for (const [file, commands] of Object.entries(mapping)) {
     for (const command of commands) {
       assert.equal(runtimeCommands.has(command), true, file + ' maps to unimplemented ' + command)
     }
   }
-  const mutationPattern = /(?:update|setInfo|setActivity|earnYb|takeGood|give|addInfo|addGood|startTimedGood|writeSol)\s*\(|\.callback\s*\(|ExternalInterface\.addCallback|pondCommand\s*\(/
+  const mutationPattern = new RegExp(String.raw`\b(?:update|setInfo|setActivity|earnYb|takeGood|give|addInfo|addGood|startTimedGood|startTimed|writeSol|writeMails|saveSpot|store)\s*\(|\.callback\s*\(|ExternalInterface\.addCallback|pondCommand\s*\(`)
   const flagged = []
   function walk(directory) {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -437,7 +463,13 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
     }
   }
   walk('src/renderer')
-  const unmapped = flagged.filter(path => Object.prototype.hasOwnProperty.call(mapping, path) === false)
+  walk('src/shared')
+  const unmapped = flagged.filter(path =>
+    Object.prototype.hasOwnProperty.call(mapping, path) === false &&
+    Object.prototype.hasOwnProperty.call(presentationOnly, path) === false &&
+    Object.prototype.hasOwnProperty.call(sharedRuntimeCommands, path) === false &&
+    Object.prototype.hasOwnProperty.call(sharedRuntimeOnly, path) === false,
+  )
   assert.deepEqual(unmapped, [], 'renderer mutation files without a command/runtime classification')
   assert.equal(flagged.length > 0, true)
 
@@ -470,7 +502,56 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
   ])
   for (const target of updateTargets) assert.equal(storeTargets.has(target), true, 'unclassified update target: ' + target)
   for (const target of setInfoTargets) assert.equal(infoTargets.has(target), true, 'unclassified setInfo target: ' + target)
-  for (const file of mutationFiles) assert.equal(mapping[file] !== undefined, true, 'unclassified mutation file: ' + file)
+  for (const file of mutationFiles) {
+    assert.equal(mapping[file] !== undefined || presentationOnly[file] !== undefined || sharedRuntimeCommands[file] !== undefined || sharedRuntimeOnly[file] !== undefined, true, 'unclassified mutation file: ' + file)
+  }
+
+  const helperSites = new Set()
+  function walkHelpers(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) walkHelpers(path)
+      else if (entry.name.endsWith('.ts')) {
+        const source = readFileSync(path, 'utf8')
+        for (const match of source.matchAll(/\b(update|setInfo|setActivity|earnYb|takeGood|give|addInfo|addGood|startTimedGood|startTimed|writeMails|saveSpot|store)\s*\(\s*(?:['"]([^'"]+)['"])?/g)) {
+          helperSites.add(path + '|' + match[1] + '|' + (match[2] ?? ''))
+          helperSites.add(path + '|' + match[1] + '|')
+        }
+      }
+    }
+  }
+  walkHelpers('src/renderer')
+  walkHelpers('src/shared')
+  for (const [site, commands] of Object.entries(requiredSites)) {
+    assert.equal(helperSites.has(site), true, 'required mutation site is missing: ' + site)
+    for (const command of commands) {
+      assert.equal(runtimeCommands.has(command), true, site + ' requires unimplemented ' + command)
+      assert.equal(mapping[site.split('|')[0]].includes(command), true, site + ' command is not in its file mapping')
+    }
+  }
+  for (const [file, commands] of Object.entries(sharedRuntimeCommands)) {
+    for (const command of commands) assert.equal(runtimeCommands.has(command), true, file + ' maps to unimplemented ' + command)
+    assert.equal(readFileSync(file, 'utf8').length > 0, true)
+  }
+  for (const file of Object.keys(sharedRuntimeOnly)) assert.equal(flagged.includes(file), true, 'stale shared-runtime classification: ' + file)
+  assert.equal(helperSites.has('src/renderer/ui/community.ts|saveSpot|'), true, 'saveSpot helper must be scanned')
+  assert.ok(presentationOnly['src/renderer/ui/community.ts'].length > 0)
+  for (const file of Object.keys(presentationOnly)) {
+    assert.ok(presentationOnly[file].length > 0)
+    assert.equal(flagged.includes(file), true, 'presentation-only classification is stale: ' + file)
+  }
+
+  for (const helper of ['update', 'setInfo', 'setActivity', 'addInfo', 'earnYb', 'give', 'takeGood', 'addGood', 'startTimedGood', 'startTimed', 'writeMails', 'saveSpot', 'writeSol', 'store']) {
+    assert.equal(mutationPattern.test(' ' + helper + "('x')"), true, 'mutation gate does not match helper ' + helper)
+  }
+  function gateAccepts(file, source) {
+    return mutationPattern.test(source) === false || Object.prototype.hasOwnProperty.call(mapping, file) ||
+      Object.prototype.hasOwnProperty.call(presentationOnly, file) ||
+      Object.prototype.hasOwnProperty.call(sharedRuntimeCommands, file) ||
+      Object.prototype.hasOwnProperty.call(sharedRuntimeOnly, file)
+  }
+  assert.equal(gateAccepts('src/renderer/new-unmapped.ts', "update('petInfo', {})"), false)
+  assert.equal(gateAccepts('src/renderer/pet/pet.ts', "update('petInfo', {})"), true)
 })
 
 test('every normative command is classified as runtime-handled or host-only', () => {
@@ -502,4 +583,101 @@ test('server/settings/admin C4b handlers apply only validated canonical changes'
   assert.equal(granted.state.save.petInfo.yb, city.state.save.petInfo.yb + 25)
   const goods = ok(granted.state, 'admin.grantRandomGoods', { type: 'food', quantity: 2 }, { actorRole: 'owner' })
   assert.ok(goods.result.goods.length >= 1)
+})
+
+test('advanceWhileEmpty=false stops at the first mid-chunk coverage gap without post-gap effects', () => {
+  const state = baseState()
+  state.lastSchedulerWallMs = WALL_TIME_MS
+  state.gameTimeMs = GAME_TIME_MS
+  state.advanceWhileEmpty = false
+  state.sessionCoverage = []
+  state.scheduledJobs = [{ id: 1, type: 'other', dueAtGameMs: GAME_TIME_MS + 120000, payload: {}, status: 'pending' }]
+  state.nextScheduledJobId = 2
+  const firstMinute = WALL_TIME_MS + 60000
+  const target = WALL_TIME_MS + 3 * 60000
+  const result = advanceSchedulerChunk(state, context(state, { activeClientCount: 1 }), target, {
+    liveActiveClientCountAtWallMs: wallMs => wallMs < firstMinute ? 1 : 0,
+    coverageAtWallMs: (fromWallMs, toWallMs) => ({
+      activeClientCount: fromWallMs < firstMinute && toWallMs > WALL_TIME_MS ? 1 : 0,
+      sessionActive: fromWallMs < firstMinute && toWallMs > WALL_TIME_MS,
+    }),
+  })
+  assert.equal(result.ticks, 1)
+  assert.equal(result.frozen, true)
+  assert.equal(result.state.gameTimeMs, GAME_TIME_MS + 60000)
+  assert.equal(result.state.lastSchedulerWallMs, firstMinute)
+  assert.equal(result.state.scheduledJobs[0].status, 'pending')
+  assert.equal(result.events.some(event => event.type === 'pet.statsChanged'), true)
+})
+
+test('per-minute coverage hook credits only post-connect minutes', () => {
+  const state = baseState()
+  state.lastSchedulerWallMs = WALL_TIME_MS
+  state.gameTimeMs = GAME_TIME_MS
+  state.advanceWhileEmpty = true
+  state.sessionCoverage = []
+  const connectAt = WALL_TIME_MS + 60000
+  const target = WALL_TIME_MS + 3 * 60000
+  const observed = []
+  const result = advanceSchedulerChunk(state, context(state), target, {
+    liveActiveClientCountAtWallMs: wallMs => {
+      observed.push(wallMs)
+      return wallMs >= connectAt ? 1 : 0
+    },
+    coverageAtWallMs: (fromWallMs, toWallMs) => {
+      const active = fromWallMs >= connectAt && toWallMs > connectAt
+      return { activeClientCount: active ? 1 : 0, sessionActive: active }
+    },
+  })
+  assert.equal(result.ticks, 3)
+  assert.deepEqual(observed, [WALL_TIME_MS, WALL_TIME_MS + 60000, WALL_TIME_MS + 120000])
+  assert.equal(result.state.save.petInfo.onLineTime, 2)
+})
+
+test('paused game-session time is shifted so only active minutes are rewarded', () => {
+  const paused = baseState()
+  paused.gameSessions = [{ ...fixtures.gameSession, sessionToken: 'paused-session', startedAtGameMs: GAME_TIME_MS, expiresAtGameMs: GAME_TIME_MS + 60 * 60000, status: 'active' }]
+  paused.save.settings.paused = true
+  paused.lastSchedulerWallMs = WALL_TIME_MS
+  paused.gameTimeMs = GAME_TIME_MS
+  const pausedRun = advanceSchedulerChunk(paused, context(paused), WALL_TIME_MS + 10 * 60000)
+  assert.equal(pausedRun.ticks, 10)
+  assert.equal(pausedRun.state.gameSessions[0].startedAtGameMs, GAME_TIME_MS + 10 * 60000)
+  assert.equal(pausedRun.state.gameSessions[0].expiresAtGameMs, GAME_TIME_MS + 70 * 60000)
+  pausedRun.state.save.settings.paused = false
+  const activeRun = advanceSchedulerChunk(pausedRun.state, context(pausedRun.state), WALL_TIME_MS + 11 * 60000)
+  const rewarded = ok(activeRun.state, 'game.reward', { sessionToken: 'paused-session' })
+  assert.equal(rewarded.result.minutes, 1)
+})
+
+test('weather city changes invalidate current/future weather cache but keep past records', () => {
+  const state = baseState()
+  const template = fixtures.engine.environment.weatherByDay[DAY_KEY]
+  state.environment.weatherByDay = {
+    '2026-10-19': { ...template, dayKey: '2026-10-19' },
+    '2026-10-20': { ...template, dayKey: '2026-10-20' },
+    '2026-10-21': { ...template, dayKey: '2026-10-21' },
+  }
+  const changed = ok(state, 'server.setWeatherCity', { city: 'Beijing' }, { actorRole: 'owner' })
+  assert.equal(changed.state.weatherLocation, 'Beijing')
+  assert.equal(Object.prototype.hasOwnProperty.call(changed.state.environment.weatherByDay, '2026-10-19'), true)
+  assert.equal(Object.prototype.hasOwnProperty.call(changed.state.environment.weatherByDay, '2026-10-20'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(changed.state.environment.weatherByDay, '2026-10-21'), false)
+})
+
+test('server/admin commands enforce owner authority and repeated settings stay canonical', () => {
+  const state = baseState()
+  rejected(state, 'server.setTimeZone', { timeZone: 'America/New_York' }, {}, 'unauthorized')
+  rejected(state, 'server.setAdvanceWhileEmpty', { enabled: false }, {}, 'unauthorized')
+  rejected(state, 'server.setWeatherCity', { city: 'Beijing' }, {}, 'unauthorized')
+  rejected(state, 'admin.grantCheat', { stat: 'yb', amount: 1 }, {}, 'unauthorized')
+  rejected(state, 'admin.grantRandomGoods', { type: 'food', quantity: 1 }, {}, 'unauthorized')
+  const once = ok(state, 'server.setAdvanceWhileEmpty', { enabled: false }, { actorRole: 'owner' })
+  const twice = ok(once.state, 'server.setAdvanceWhileEmpty', { enabled: false }, { actorRole: 'owner' })
+  assert.equal(twice.state.advanceWhileEmpty, false)
+  assert.equal(stableStringify(once.state), stableStringify(twice.state))
+  const zoneOnce = ok(twice.state, 'server.setTimeZone', { timeZone: 'Asia/Shanghai' }, { actorRole: 'owner' })
+  const zoneTwice = ok(zoneOnce.state, 'server.setTimeZone', { timeZone: 'Asia/Shanghai' }, { actorRole: 'owner' })
+  assert.equal(stableStringify(zoneOnce.state), stableStringify(zoneTwice.state))
+  rejected(zoneTwice.state, 'settings.setShared', { key: 'difficulty', value: 'invalid' }, {}, 'invalid_payload')
 })

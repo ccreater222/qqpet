@@ -3,7 +3,7 @@ import { allGoods, type GoodType } from './content/index'
 import { domainEvent, type DomainEvent } from './events'
 import type { HandlerContext, HandlerResult } from './handler-types'
 import { addGood, reject, recomputePetComputed } from './runtime-helpers'
-import { reconcileTimeZone } from './time'
+import { dayKeyAt, reconcileTimeZone } from './time'
 import type { JsonObject, JsonValue } from './types'
 
 function json<T>(value: T): JsonValue {
@@ -54,10 +54,15 @@ export function serverSetTimeZone(context: HandlerContext, payload: CommandPaylo
 
 export function serverSetWeatherCity(context: HandlerContext, payload: CommandPayloadMap['server.setWeatherCity']): HandlerResult {
   const previous = context.state.weatherLocation
+  const currentDay = dayKeyAt(context.state.gameTimeMs, context.state.timeZone)
+  const weatherByDay = Object.fromEntries(
+    Object.entries(context.state.environment.weatherByDay).filter(([dayKey]) => dayKey < currentDay),
+  )
   context.state.weatherLocation = payload.city
+  context.state.environment = { ...context.state.environment, weatherByDay }
   return {
-    result: json({ previousWeatherCity: previous, weatherCity: payload.city }),
-    events: [event('server.changed', { key: 'weatherCity', value: payload.city })],
+    result: json({ previousWeatherCity: previous, weatherCity: payload.city, invalidatedFromDayKey: currentDay }),
+    events: [event('server.changed', { key: 'weatherCity', value: payload.city, invalidatedFromDayKey: currentDay })],
   }
 }
 

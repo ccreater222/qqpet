@@ -390,7 +390,10 @@ export function advanceMinuteInPlace(state: EngineState, ctx: RuntimeContext): D
       }
     }
     for (const session of state.gameSessions) {
-      if (session.status === 'active') session.expiresAtGameMs += GAME_MINUTE_MS
+      if (session.status === 'active') {
+        session.startedAtGameMs += GAME_MINUTE_MS
+        session.expiresAtGameMs += GAME_MINUTE_MS
+      }
     }
     state.nextDailyBoundaryMs += GAME_MINUTE_MS
     syncActivityProjection(state)
