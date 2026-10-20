@@ -1,7 +1,9 @@
 import type { SharedSaveData } from '../sync/data-boundary'
+import type { CalendarInput } from './types'
 import { DAILY_TASK_TEMPLATES, STATIC_TASKS, parseGoodCode, type StaticTaskTemplate } from './content/index'
 import {
   addTaskCount,
+  localDate,
   currentBoundarySeconds,
   lootGoods,
   readTaskProgress,
@@ -24,25 +26,74 @@ function entryFor(template: StaticTaskTemplate, rng: RuntimeRng): TaskEntry {
   return { take: false, good: rewardGoods(template, rng) }
 }
 
-function dailyDefinition(template: (typeof DAILY_TASK_TEMPLATES)[number], num: number, rng: RuntimeRng): TaskDefinition {
-  const msgIndex = rng.randIntInclusive(0, 1)
-  return {
-    label: template.label.replace('{n}', String(num)),
-    msg: template.msg[msgIndex],
-    obj: template.obj,
-    num,
-    reroll: 1,
-    good: ['_yb*' + String(rng.randIntInclusive(2, 5) * 10)],
+function isWeekend(gameTimeMs: number, timeZone: string): boolean {
+  const date = localDate(gameTimeMs, timeZone)
+  const weekday = new Date(Date.UTC(date.year, date.month - 1, date.day)).getUTCDay()
+  return weekday === 0 || weekday === 6
+}
+
+export function dailyTaskIsOff(gameTimeMs: number, timeZone: string, calendarDay?: CalendarInput): boolean {
+  if (calendarDay?.holiday) return calendarDay.holiday.off
+  return isWeekend(gameTimeMs, timeZone)
+}
+
+export function dailyTaskNeeded(template: (typeof DAILY_TASK_TEMPLATES)[number], save: SharedSaveData, off: boolean): boolean {
+  const caps = save.petComputedlInfo
+  switch (template.needsKind) {
+    case 'hungerLow': return save.petInfo.hunger < caps.hungerMax / 2
+    case 'cleanLow': return save.petInfo.clean < caps.cleanMax / 2
+    case 'moodLow': return save.petInfo.mood < 500
+    case 'ybLow': return save.petInfo.yb < 500
+    case 'studyDay': return off === false
+    case 'dayOff': return off === true
   }
 }
 
-export function rollDailyTasks(save: SharedSaveData, gameTimeMs: number, timeZone: string, rng: RuntimeRng): TaskDefinition[] {
-  const templates = rng.shuffle(DAILY_TASK_TEMPLATES).slice(0, 3)
+export function dailyTaskCandidates(save: SharedSaveData): (typeof DAILY_TASK_TEMPLATES)[number][] {
+  return DAILY_TASK_TEMPLATES.filter(template =>
+    template.hasCan === false || (template.canLevelTwo === true && save.petComputedlInfo.level >= 2),
+  )
+}
+
+export function dailyTaskPool(save: SharedSaveData, off: boolean): (typeof DAILY_TASK_TEMPLATES)[number][] {
+  return dailyTaskCandidates(save).flatMap(template =>
+    Array.from({ length: dailyTaskNeeded(template, save, off) ? 3 : 1 }, () => template),
+  )
+}
+
+export function rollDailyTasks(
+  save: SharedSaveData,
+  gameTimeMs: number,
+  timeZone: string,
+  rng: RuntimeRng,
+  calendarDay?: CalendarInput,
+): TaskDefinition[] {
+  const off = dailyTaskIsOff(gameTimeMs, timeZone, calendarDay)
+  const pool = dailyTaskPool(save, off)
   const daily: TaskDefinition[] = []
-  for (let index = 0; index < templates.length; index++) {
-    const template = templates[index]
+  while (daily.length < 4) {
+    const template = pool[rng.randIntInclusive(0, pool.length - 1)]
     const num = rng.randIntInclusive(template.num[0], template.num[1])
-    daily.push(dailyDefinition(template, num, rng))
+    if (daily.some(task => task.obj === template.obj)) continue
+    daily.push({
+      label: template.label.replace('{n}', String(num)),
+      msg: template.msg[dailyTaskNeeded(template, save, off) ? 0 : 1],
+      obj: template.obj,
+      num,
+      reroll: 1,
+      good: ['_yb*' + String(rng.randIntInclusive(2, 5) * 10)],
+    })
+  }
+  const holiday = calendarDay?.holiday
+  if (holiday?.off) {
+    daily.push({
+      label: holiday.name + '快乐',
+      msg: '过节啦，陪我玩5次玩具一起庆祝吧~',
+      obj: 'Toy',
+      num: 5,
+      reroll: 2,
+      good: ['_yb*100'],
+    })
   }
   const progress = readTaskProgress(save)
   progress.daily = daily
@@ -61,6 +112,7 @@ export function resetDailyTasks(
   gameTimeMs: number,
   timeZone: string,
   rng: RuntimeRng,
+  calendarDay?: CalendarInput,
 ): { previous: TaskProgress; next: TaskProgress; daily: TaskDefinition[] } {
   const previous = readTaskProgress(save)
   const next: TaskProgress = {
@@ -104,7 +156,7 @@ export function resetDailyTasks(
     })
   }
   writeTaskProgress(save, next)
-  const daily = rollDailyTasks(save, gameTimeMs, timeZone, rng)
+  const daily = rollDailyTasks(save, gameTimeMs, timeZone, rng, calendarDay)
   return { previous, next: readTaskProgress(save), daily }
 }
 

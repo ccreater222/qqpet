@@ -18,3 +18,5 @@ export {
   sessionPublicSummary,
 } from './sessions'
 export * from './content/index'
+export * from './travel'
+export * from './self-care'

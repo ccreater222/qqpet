@@ -10,10 +10,8 @@ import {
   currentGrowthPerMinute,
   earnYb,
   findSession,
-  grantGoods,
   isBusy,
   localDate,
-  lootGoods,
   mailGoods,
   mailSlot,
   readMails,
@@ -25,10 +23,12 @@ import {
   writeSignIn,
   type RuntimeRng,
 } from './runtime-helpers'
-import { fatigue } from './stats'
+import { fatigue, luck } from './stats'
 import { resolveWeatherForDay, weatherStrain, withWeatherDay } from './environment'
 import { dayKeyAt, nextDailyBoundaryMs } from './time'
-import { STUDY_GOODS, TRAVEL_PROVINCES, WORK_GOODS } from './content/index'
+import { STUDY_GOODS, WORK_GOODS } from './content/index'
+import { applyTravelCompletion } from './travel'
+import { selfCare } from './self-care'
 import { resetDailyTasks } from './runtime-tasks'
 import { resetFishLimits, settlePinkDiamond } from './handlers-b'
 import type { EngineState, JsonObject, RuntimeContext } from './types'
@@ -116,10 +116,10 @@ function settleVipAtBoundary(save: SharedSaveData, boundaryMs: number): void {
 
 function runDailyBoundary(state: EngineState, boundaryMs: number, dayKey: string, rng: RuntimeRng): DomainEvent[] {
   const events: DomainEvent[] = []
-  resetDailyTasks(state.save, boundaryMs, state.timeZone, rng)
+  settleVipAtBoundary(state.save, boundaryMs)
+  resetDailyTasks(state.save, boundaryMs, state.timeZone, rng, state.environment.calendarByDay?.[dayKey])
   resetSignInAtBoundary(state.save)
   resetFishLimits(state.save)
-  settleVipAtBoundary(state.save, boundaryMs)
   events.push(event('task.progress', { dailyReset: true, dayKey }))
   events.push(event('signin.changed', { dailyReset: true, dayKey }))
   events.push(event('fishing.changed', { dailyReset: true, dayKey }))
@@ -129,7 +129,7 @@ function runDailyBoundary(state: EngineState, boundaryMs: number, dayKey: string
   return events
 }
 
-function completeActivityJob(state: EngineState, job: EngineState['scheduledJobs'][number], rng: RuntimeRng): DomainEvent[] {
+function completeActivityJob(state: EngineState, job: EngineState['scheduledJobs'][number]): DomainEvent[] {
   const save = state.save
   const events: DomainEvent[] = []
   const kind = job.payload.activityKind
@@ -155,26 +155,12 @@ function completeActivityJob(state: EngineState, job: EngineState['scheduledJobs
     }
     save.activeOption.study = null
     events.push(event('activity.completed', { kind: 'study', activityId, early: job.payload.early === 1 }))
-  } else if (kind === 'travel' && typeof activityId === 'string') {
-    const province = TRAVEL_PROVINCES.find(candidate => candidate.name === activityId)
-    if (province !== undefined) {
-      const existing = save.gameSaveDatas.travel_china.find(entry => entry.name === province.name)
-      if (existing === undefined) save.gameSaveDatas.travel_china.push({ name: province.name, value: 1 })
-      else existing.value += 1
-      addTaskCount(save, 'Travel1', 1)
-      save.petInfo.mood = Math.min(save.petComputedlInfo.moodMax, save.petInfo.mood + 20)
-      const souvenir = lootGoods(rng, 1, existing === undefined ? 1 : 2)
-      grantGoods(save, souvenir)
-      events.push(event('reward.granted', { source: 'travel', destination: province.name, count: souvenir.length }))
-    }
-    save.activeOption.trip = null
-    events.push(event('activity.completed', { kind: 'travel', activityId }))
   }
   writeSharedBlob(save, 'activity', 0)
   return events
 }
 
-function processDueJobs(state: EngineState, nowMs: number, rng: RuntimeRng): DomainEvent[] {
+function processDueJobs(state: EngineState, nowMs: number): DomainEvent[] {
   const events: DomainEvent[] = []
   const due = state.scheduledJobs
     .filter(job => job.status === 'pending' && job.dueAtGameMs <= nowMs)
@@ -191,9 +177,10 @@ function processDueJobs(state: EngineState, nowMs: number, rng: RuntimeRng): Dom
       }
       continue
     }
-    if (job.type === 'work' || job.type === 'study' || job.type === 'travel') {
+    if (job.type === 'travel') continue
+    if (job.type === 'work' || job.type === 'study') {
       job.status = 'completed'
-      events.push(...completeActivityJob(state, job, rng))
+      events.push(...completeActivityJob(state, job))
       continue
     }
     job.status = 'completed'
@@ -201,12 +188,37 @@ function processDueJobs(state: EngineState, nowMs: number, rng: RuntimeRng): Dom
   return events
 }
 
-function updateActivityProjection(save: SharedSaveData, grown: number): void {
-  if (isBusy(save) === false) return
+function updateActivityProjection(save: SharedSaveData, grown: number): number | null {
+  if (isBusy(save) === false) return null
   const raw = save.saveJsonData.activity
   const current = raw === undefined ? 0 : Number(raw)
   const next = Number.isFinite(current) ? current + grown : grown
-  writeSharedBlob(save, 'activity', String(Number(next.toFixed(5))))
+  const value = Number(next.toFixed(5))
+  writeSharedBlob(save, 'activity', value)
+  return value
+}
+
+function travelLuck(save: SharedSaveData): number {
+  const tired = fatigue({
+    health: save.petInfo.health,
+    mood: save.petInfo.mood,
+    moodMax: save.petComputedlInfo.moodMax,
+    clean: save.petInfo.clean,
+    cleanMax: save.petComputedlInfo.cleanMax,
+    hunger: save.petInfo.hunger,
+    hungerMax: save.petComputedlInfo.hungerMax,
+    busy: true,
+    strong: save.petInfo.strong,
+    level: save.petComputedlInfo.level,
+  })
+  return luck({
+    pinkDiamond: save.petInfo.pinkDiamond,
+    PDiamondLevel: save.petInfo.PDiamondLevel,
+    sweetHeart: save.petInfo.sweetHeart,
+    charm: save.petInfo.charm,
+    intel: save.petInfo.intel,
+    fatigue: tired,
+  })
 }
 
 function tickTimedGoods(save: SharedSaveData, elapsed: number, events: DomainEvent[]): void {
@@ -294,7 +306,27 @@ function passiveMinute(state: EngineState, ctx: RuntimeContext, weather: ReturnT
   save.petInfo.hunger = Math.max(save.petInfo.hunger - hungerRate, 0)
   save.petInfo.clean = Math.max(save.petInfo.clean - cleanRate, 0)
   save.petInfo.growth = Number((save.petInfo.growth + currentGrowthPerMinute(save) * grown).toFixed(8))
-  updateActivityProjection(save, grown)
+  events.push(...selfCare(state))
+  const activityMinutes = updateActivityProjection(save, grown)
+  if (save.activeOption.trip !== null && activityMinutes !== null) {
+    const destination = typeof save.activeOption.trip === 'string' ? save.activeOption.trip : ''
+    const job = state.scheduledJobs.find(candidate =>
+      candidate.status === 'pending' &&
+      candidate.type === 'travel' &&
+      candidate.payload.activityKind === 'travel' &&
+      candidate.payload.activityId === destination,
+    )
+    if (job !== undefined) {
+      const early = activityMinutes > 55
+        ? rng.randIntInclusive(0, Math.max(0, 1000 - travelLuck(save) * 10)) <= 10
+        : false
+      if (early || activityMinutes >= 60) {
+        job.status = 'completed'
+        job.payload.early = early ? 1 : 0
+        events.push(...applyTravelCompletion(state, destination, early, state.gameTimeMs, rng))
+      }
+    }
+  }
   tickTimedGoods(save, grown, events)
   events.push(...sessionClockTick(state, ctx))
   events.push(...illnessTick(state, weather, rng))
@@ -341,7 +373,7 @@ export function advanceMinuteInPlace(state: EngineState, ctx: RuntimeContext): D
     }
     state.nextDailyBoundaryMs = nextDailyBoundaryMs(state.nextDailyBoundaryMs, state.timeZone)
   }
-  events.push(...processDueJobs(state, nextGameTimeMs, rng))
+  events.push(...processDueJobs(state, nextGameTimeMs))
   events.push(...passiveMinute(state, ctx, weather, rng))
   state.rng = rng.state
   return events

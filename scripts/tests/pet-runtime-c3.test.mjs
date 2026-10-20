@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { readRendererTaskTables } from './pet-task-source.mjs'
 import { registerHooks } from 'node:module'
 import test from 'node:test'
 
@@ -26,6 +27,8 @@ const {
   serializeRuntimeState,
   deserializeRuntimeState,
   fallbackWeatherForDay,
+  applyTravelCompletion,
+  travelInventoryTotal,
   sessionActivityForInterval,
   stableStringify,
   rebindSessionActor,
@@ -34,7 +37,15 @@ const {
 } = await import('../../src/shared/pet-runtime/index.ts')
 const { validateEngineState } = await import('../../src/shared/sync/portable.ts')
 const { COMMAND_TYPES } = await import('../../src/shared/sync/command-validation.ts')
-const { goodOf, TRAVEL_PROVINCES } = await import('../../src/shared/pet-runtime/content/index.ts')
+const { goodOf, TRAVEL_PROVINCES, DAILY_TASK_TEMPLATES, STATIC_TASKS, EXAM_BANK } = await import('../../src/shared/pet-runtime/content/index.ts')
+const {
+  dailyTaskCandidates,
+  dailyTaskIsOff,
+  dailyTaskNeeded,
+  dailyTaskPool,
+  rollDailyTasks,
+} = await import('../../src/shared/pet-runtime/runtime-tasks.ts')
+const { createRuntimeRng } = await import('../../src/shared/pet-runtime/runtime-helpers.ts')
 const {
   DAY_KEY,
   GAME_TIME_MS,
@@ -175,6 +186,13 @@ test('group A: lifecycle, reset/adopt, direct interaction and pause', () => {
   assert.deepEqual(reset.state.sessionCoverage, [])
   assert.equal(reset.state.rng.draws, 0)
   assert.equal(original.save.havePet, true)
+  const advancedRng = baseState()
+  advancedRng.rng = { ...advancedRng.rng, draws: 17 }
+  assert.equal(validateEngineState(advancedRng), true)
+  const rngReset = ok(advancedRng, 'pet.reset', {}, { actorRole: 'owner' })
+  assert.equal(rngReset.state.rng.draws, 0)
+  assert.equal(rngReset.state.rng.seedHex, SEED)
+  assert.equal(rngReset.state.rng.stateHex, SEED)
 
   rejected(reset.state, 'pet.adopt', { sex: 'MM' }, { actorRole: 'player' }, 'unauthorized')
   const adopted = ok(reset.state, 'pet.adopt', { sex: 'MM' }, { actorRole: 'owner' })
@@ -511,6 +529,14 @@ test('actor-bound game and diudiule sessions reject replay, expiry, wrong device
   rejected(startedA.state, 'game.reward', { sessionToken: token }, { actorDeviceId: OTHER_DEVICE_ID }, 'unauthorized')
   rejected(startedA.state, 'game.reward', { sessionToken: 'fabricated-token' }, {}, 'not_available')
 
+  const zero = ok(base, 'game.startSession', { gameId: 'smallgame-zero', kind: 'small' })
+  const zeroReward = ok(zero.state, 'game.reward', { sessionToken: zero.result.sessionToken })
+  assert.equal(zeroReward.result.minutes, 0)
+  assert.equal(zeroReward.result.gameRound, 0)
+  assert.equal(blob(zeroReward.state, 'task').doNums?.GameRound, undefined)
+  const zeroSession = zeroReward.state.gameSessions.find(session => session.sessionToken === zero.result.sessionToken)
+  assert.equal(zeroSession.status, 'settled')
+
   const fiveMinutesLater = startedA.state.gameTimeMs + 5 * 60000
   const rewarded = ok(startedA.state, 'game.reward', { sessionToken: token }, { gameTimeMs: fiveMinutesLater })
   assert.equal(rewarded.result.minutes, 5)
@@ -572,6 +598,28 @@ test('exam and island-quiz sessions are actor-bound, one-use and answer-key-free
     errands: [{ from: 'npc-1', kind: 'quiz', to: 'xx-chinese', got: 0, took: false }],
     fought: [], wins: 0,
   })
+  const pausedQuiz = clone(quiz)
+  pausedQuiz.save.settings.paused = true
+  rejected(pausedQuiz, 'island.startQuiz', { npcId: 'npc-1', errandId: 'quiz' }, {}, 'paused')
+  const busyQuiz = clone(quiz)
+  busyQuiz.save.activeOption.work = 'bz'
+  rejected(busyQuiz, 'island.startQuiz', { npcId: 'npc-1', errandId: 'quiz' }, {}, 'busy')
+
+  const bankLength = EXAM_BANK['xx-chinese'].length
+  const dayOne = clone(quiz)
+  const dayOneIsland = blob(dayOne, 'island')
+  dayOneIsland.day = 86400
+  dayOne.save.saveJsonData.island = JSON.stringify(dayOneIsland)
+  const dayOneQuiz = ok(dayOne, 'island.startQuiz', { npcId: 'npc-1', errandId: 'quiz' })
+  assert.equal(dayOneQuiz.result.recordId, 'xx-chinese:' + String(Math.floor(86400 / 86400) % bankLength))
+  const dayTwo = clone(quiz)
+  const dayTwoIsland = blob(dayTwo, 'island')
+  dayTwoIsland.day = 2 * 86400
+  dayTwo.save.saveJsonData.island = JSON.stringify(dayTwoIsland)
+  const dayTwoQuiz = ok(dayTwo, 'island.startQuiz', { npcId: 'npc-1', errandId: 'quiz' })
+  assert.equal(dayTwoQuiz.result.recordId, 'xx-chinese:' + String(Math.floor((2 * 86400) / 86400) % bankLength))
+  assert.equal(dayOneQuiz.result.recordId === dayTwoQuiz.result.recordId, false)
+
   const quizStarted = ok(quiz, 'island.startQuiz', { npcId: 'npc-1', errandId: 'quiz' })
   assert.equal(JSON.stringify(quizStarted.result).includes('answerIndex'), false)
   assert.equal(quizStarted.result.sessionToken.length, 32)
@@ -580,6 +628,14 @@ test('exam and island-quiz sessions are actor-bound, one-use and answer-key-free
   rejected(quizStarted.state, 'island.answerQuiz', {
     sessionToken: quizStarted.result.sessionToken, optionIndex: quizSession.payload.answerIndex,
   }, { actorDeviceId: OTHER_DEVICE_ID }, 'unauthorized')
+  const identityChanged = clone(quizStarted.state)
+  const changedIsland = blob(identityChanged, 'island')
+  changedIsland.errands[0].to = 'xx-mathematics'
+  identityChanged.save.saveJsonData.island = JSON.stringify(changedIsland)
+  rejected(identityChanged, 'island.answerQuiz', {
+    sessionToken: quizStarted.result.sessionToken, optionIndex: quizSession.payload.answerIndex,
+  }, {}, 'not_available')
+
   const wrongIndex = (quizSession.payload.answerIndex + 1) % quizSession.payload.options.length
   const wrongQuiz = ok(quizStarted.state, 'island.answerQuiz', {
     sessionToken: quizStarted.result.sessionToken, optionIndex: wrongIndex,
@@ -636,8 +692,47 @@ test('local actor rebind helpers preserve, rebind or abandon imported sessions e
   })
   const cancelled = cancelledImport.gameSessions.find(session => session.sessionToken === token)
   assert.equal(cancelled.status, 'abandoned')
-  assert.equal(cancelled.cancelReason, 'import_actor_unavailable')
+  assert.equal(cancelled.cancelReason, 'actor_rebind_failed')
   assert.equal(cancelledImport.scheduledJobs.find(job => job.payload.sessionToken === token).status, 'cancelled')
+
+  const multi = clone(started.state)
+  const sessionTemplate = multi.gameSessions[0]
+  multi.gameSessions = [
+    { ...sessionTemplate, sessionToken: 'local-session', actorDeviceId: LOCAL_DEVICE_ID },
+    { ...sessionTemplate, sessionToken: 'upload-session', actorDeviceId: OTHER_DEVICE_ID, payload: { kind: 'diudiule' } },
+    { ...sessionTemplate, sessionToken: 'foreign-session', actorDeviceId: 'foreign-device', payload: { kind: 'diudiule' } },
+  ]
+  multi.scheduledJobs = ['local-session', 'upload-session', 'foreign-session'].map((sessionToken, index) => ({
+    id: index + 1,
+    type: 'game-session',
+    dueAtGameMs: multi.gameTimeMs + 60000,
+    payload: { sessionToken, kind: 'diudiule' },
+    status: 'pending',
+  }))
+  multi.nextScheduledJobId = 4
+  const imported = rebindOrCancelImportedSessions(multi, {
+    localActorDeviceId: LOCAL_DEVICE_ID,
+    newActorDeviceId: OTHER_DEVICE_ID,
+    rebindLocalSessions: true,
+    nowMs: multi.gameTimeMs,
+  })
+  assert.equal(imported.gameSessions.find(session => session.sessionToken === 'local-session').actorDeviceId, OTHER_DEVICE_ID)
+  assert.equal(imported.gameSessions.find(session => session.sessionToken === 'upload-session').status, 'active')
+  const foreign = imported.gameSessions.find(session => session.sessionToken === 'foreign-session')
+  assert.equal(foreign.status, 'abandoned')
+  assert.equal(foreign.cancelReason, 'actor_rebind_failed')
+  assert.equal(imported.scheduledJobs.find(job => job.payload.sessionToken === 'foreign-session').status, 'cancelled')
+  assert.equal(imported.scheduledJobs.find(job => job.payload.sessionToken === 'upload-session').status, 'pending')
+
+  const noRebind = rebindOrCancelImportedSessions(multi, {
+    localActorDeviceId: LOCAL_DEVICE_ID,
+    newActorDeviceId: OTHER_DEVICE_ID,
+    rebindLocalSessions: false,
+    nowMs: multi.gameTimeMs,
+  })
+  assert.equal(noRebind.gameSessions.find(session => session.sessionToken === 'local-session').cancelReason, 'actor_rebind_failed')
+  assert.equal(noRebind.gameSessions.find(session => session.sessionToken === 'upload-session').status, 'active')
+  assert.equal(noRebind.scheduledJobs.find(job => job.payload.sessionToken === 'local-session').status, 'cancelled')
 })
 
 test('timed activities complete from scheduled game-time jobs without client timers', () => {
@@ -694,6 +789,19 @@ test('daily VIP settlement and timed-good expiry are boundary/tick driven', () =
   assert.equal(tick.state.save.petInfo.sweetHeartOverTime, 0)
   assert.equal(tick.state.save.selfGoodUseOption.food, null)
   assert.equal(tick.events.some(event => event.type === 'item.consumed' && event.payload.expired === true), true)
+
+  const expiring = baseState()
+  expiring.gameTimeMs = NEXT_BOUNDARY_MS - 60000
+  expiring.nextDailyBoundaryMs = NEXT_BOUNDARY_MS
+  expiring.lastProcessedDayBoundaryKey = DAY_KEY
+  expiring.save.petInfo.pinkDiamond = true
+  expiring.save.petInfo.PDiamondLevel = 3
+  expiring.save.petInfo.PDiamondExpirationDate = Math.floor(NEXT_BOUNDARY_MS / 1000)
+  expiring.save.saveJsonData.fishs = JSON.stringify({ PD: { allvipcnt: 6, canusecnt: 6 }, fishs: [] })
+  const expired = advanceMinute(expiring, context(expiring, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(expired.ok, true, JSON.stringify(expired.ok ? expired.result : expired.error))
+  assert.equal(expired.state.save.petInfo.pinkDiamond, false)
+  assert.deepEqual(blob(expired.state, 'fishs').PD, { allvipcnt: 2, canusecnt: 0 })
 })
 
 test('numeric inventory use and doctor revival use canonical content effects', () => {
@@ -789,7 +897,7 @@ test('C3 command slice covers every A-D and actor-bound session command', () => 
 
 
 test('runtime content copies remain byte-identical to the renderer extraction sources', () => {
-  for (const file of ['goods.json', 'pool.json', 'travel.json', 'exam.json']) {
+  for (const file of ['goods.json', 'pool.json', 'travel.json', 'exam.json', 'album.json']) {
     const runtime = readFileSync(new URL(`../../src/shared/pet-runtime/content/${file}`, import.meta.url), 'utf8')
     const renderer = readFileSync(new URL(`../../src/renderer/pet/data/${file}`, import.meta.url), 'utf8')
     assert.equal(runtime, renderer, file)
@@ -797,4 +905,192 @@ test('runtime content copies remain byte-identical to the renderer extraction so
   const runtimeIlls = readFileSync(new URL('../../src/shared/pet-runtime/content/ills.ts', import.meta.url), 'utf8')
   const rendererIlls = readFileSync(new URL('../../src/renderer/pet/data/ills.ts', import.meta.url), 'utf8')
   assert.equal(runtimeIlls, rendererIlls)
+})
+
+test('task tables drift guard matches renderer TASKS/KINDS exactly', () => {
+  const renderer = readRendererTaskTables()
+  assert.deepEqual(STATIC_TASKS, renderer.tasks)
+  assert.deepEqual(
+    DAILY_TASK_TEMPLATES.map(template => ({
+      obj: template.obj,
+      label: template.label,
+      num: template.num,
+      msg: template.msg,
+      needsKind: template.needsKind,
+      canLevelTwo: template.canLevelTwo,
+      hasCan: template.hasCan,
+    })),
+    renderer.kinds,
+  )
+  assert.equal(DAILY_TASK_TEMPLATES.some(template => template.obj === 'Game'), true)
+  assert.equal(DAILY_TASK_TEMPLATES.some(template => template.obj === 'GameRound'), true)
+})
+
+test('daily tasks use weighted needs, four unique tasks, Work availability and holiday extras', () => {
+  const hungry = baseState()
+  hungry.save.petInfo.hunger = 100
+  hungry.save.petInfo.clean = 1000
+  hungry.save.petInfo.mood = 1000
+  hungry.save.petInfo.yb = 5000
+  const pool = dailyTaskPool(hungry.save, false)
+  assert.equal(pool.filter(template => template.obj === 'Eat').length, 3)
+  assert.equal(pool.filter(template => template.obj === 'Study').length, 3)
+  assert.equal(pool.filter(template => template.obj === 'Game').length, 1)
+
+  const lowLevel = baseState()
+  lowLevel.save.petComputedlInfo.level = 1
+  lowLevel.save.petInfo.yb = 0
+  assert.equal(dailyTaskCandidates(lowLevel.save).some(template => template.obj === 'Work'), false)
+  const highLevel = baseState()
+  highLevel.save.petInfo.yb = 0
+  assert.equal(dailyTaskCandidates(highLevel.save).some(template => template.obj === 'Work'), true)
+
+  const save = baseState()
+  const daily = rollDailyTasks(save.save, GAME_TIME_MS, 'Asia/Shanghai', createRuntimeRng(createRngState(SEED)))
+  assert.equal(daily.length, 4)
+  assert.equal(new Set(daily.map(task => task.obj)).size, 4)
+  const off = dailyTaskIsOff(GAME_TIME_MS, 'Asia/Shanghai')
+  for (const task of daily) {
+    const template = DAILY_TASK_TEMPLATES.find(candidate => candidate.obj === task.obj)
+    assert.ok(template, task.obj)
+    assert.equal(task.label, template.label.replace('{n}', String(task.num)))
+    assert.equal(task.msg, template.msg[dailyTaskNeeded(template, save.save, off) ? 0 : 1])
+  }
+
+  const holidayCalendar = {
+    date: '2026-10-20', lunar: '九月初一', term: null, holiday: { name: '测试节', off: true },
+  }
+  const holidaySave = baseState()
+  const holidayDaily = rollDailyTasks(holidaySave.save, GAME_TIME_MS, 'Asia/Shanghai', createRuntimeRng(createRngState(SEED)), holidayCalendar)
+  assert.equal(holidayDaily.length, 5)
+  assert.deepEqual(holidayDaily[4], {
+    label: '测试节快乐',
+    msg: '过节啦，陪我玩5次玩具一起庆祝吧~',
+    obj: 'Toy',
+    num: 5,
+    reroll: 2,
+    good: ['_yb*100'],
+  })
+})
+
+test('daily task messages follow the need branch and Game is in the daily pool', () => {
+  function findTaskWithObj(start, obj, attemptLimit = 200) {
+    for (let attempt = 1; attempt <= attemptLimit; attempt++) {
+      const save = clone(start.save)
+      const seed = attempt.toString(16).padStart(32, '0')
+      const daily = rollDailyTasks(save, GAME_TIME_MS, 'Asia/Shanghai', createRuntimeRng(createRngState(seed)))
+      const task = daily.find(candidate => candidate.obj === obj)
+      if (task) return { task, save, off: dailyTaskIsOff(GAME_TIME_MS, 'Asia/Shanghai') }
+    }
+    throw new Error('could not generate requested daily task: ' + obj)
+  }
+  const hungry = baseState()
+  hungry.save.petInfo.hunger = 100
+  const hungryEat = findTaskWithObj(hungry, 'Eat')
+  const hungryTemplate = DAILY_TASK_TEMPLATES.find(template => template.obj === 'Eat')
+  assert.equal(hungryEat.task.msg, hungryTemplate.msg[0])
+  assert.equal(dailyTaskNeeded(hungryTemplate, hungryEat.save, hungryEat.off), true)
+
+  const full = baseState()
+  full.save.petInfo.hunger = 1000
+  const fullEat = findTaskWithObj(full, 'Eat')
+  assert.equal(fullEat.task.msg, hungryTemplate.msg[1])
+  assert.equal(dailyTaskNeeded(hungryTemplate, fullEat.save, fullEat.off), false)
+
+  const gamePool = dailyTaskPool(full.save, dailyTaskIsOff(GAME_TIME_MS, 'Asia/Shanghai'))
+  assert.ok(gamePool.some(template => template.obj === 'Game'))
+})
+
+test('travel completion matches early souvenir and always-photo/mail branches', () => {
+  const destination = TRAVEL_PROVINCES[0].name
+  function applyBranch(early) {
+    const state = baseState()
+    state.save.activeOption.trip = destination
+    const before = travelInventoryTotal(state.save)
+    const events = applyTravelCompletion(state, destination, early, state.gameTimeMs, createRuntimeRng(createRngState(SEED)))
+    return {
+      state,
+      events,
+      before,
+      after: travelInventoryTotal(state.save),
+      album: blob(state, 'album'),
+      mails: blob(state, 'email'),
+      completion: events.find(event => event.type === 'activity.completed'),
+    }
+  }
+  const normal = applyBranch(false)
+  assert.equal(normal.completion.payload.early, false)
+  assert.equal(normal.completion.payload.souvenirs, 0)
+  assert.equal(normal.after, normal.before)
+  assert.equal(normal.album.length, 1)
+  assert.equal(normal.album[0].city, destination)
+  assert.equal(Object.values(normal.mails).some(mail => mail.p === normal.album[0].id), true)
+  assert.equal(normal.state.save.activeOption.trip, null)
+  assert.equal(normal.state.save.gameSaveDatas.travel_china[0].name, destination)
+  assert.equal(blob(normal.state, 'task').doNums.Travel1, 1)
+
+  const early = applyBranch(true)
+  assert.equal(early.completion.payload.early, true)
+  assert.equal(early.completion.payload.souvenirs, 1)
+  assert.equal(early.after, early.before + 1)
+  assert.equal(early.album.length, 1)
+  assert.equal(Object.values(early.mails).some(mail => mail.p === early.album[0].id), true)
+})
+
+test('normal 60-minute travel does not add a souvenir and early roll does', () => {
+  function run(seed) {
+    const state = baseState()
+    state.rng = createRngState(seed)
+    const started = ok(state, 'job.startTravel')
+    const before = travelInventoryTotal(started.state.save)
+    const ticked = advanceMinutes(started.state, context(started.state, { sessionActive: false, activeClientCount: 0 }), 60)
+    assert.equal(ticked.ok, true, JSON.stringify(ticked.ok ? ticked.result : ticked.error))
+    const completion = ticked.events.find(event => event.type === 'activity.completed' && event.payload.kind === 'travel')
+    assert.ok(completion)
+    return {
+      early: completion.payload.early === true,
+      souvenirDelta: travelInventoryTotal(ticked.state.save) - before,
+      album: blob(ticked.state, 'album'),
+      mails: blob(ticked.state, 'email'),
+      jobStatus: ticked.state.scheduledJobs.find(job => job.type === 'travel')?.status,
+    }
+  }
+  let normal = null
+  let early = null
+  for (let attempt = 1; attempt <= 200 && (normal === null || early === null); attempt++) {
+    const seed = attempt.toString(16).padStart(32, '0')
+    const result = run(seed)
+    if (result.early) early = result
+    else normal = result
+  }
+  assert.ok(normal, 'expected a normal 60-minute travel branch')
+  assert.ok(early, 'expected an early travel branch')
+  assert.equal(normal.souvenirDelta, 0)
+  assert.equal(early.souvenirDelta, 1)
+  assert.equal(normal.album.length, 1)
+  assert.equal(early.album.length, 1)
+  assert.ok(Object.keys(normal.mails).length > 0)
+  assert.ok(Object.keys(early.mails).length > 0)
+  assert.equal(normal.jobStatus, 'completed')
+  assert.equal(early.jobStatus, 'completed')
+})
+
+
+test('sweetheart passive self-care consumes owned goods and records canonical task effects', () => {
+  const state = baseState()
+  state.save.petInfo.sweetHeart = true
+  state.save.petInfo.sweetHeartOverTime = Math.floor(GAME_TIME_MS / 1000) + 7 * 86400
+  state.save.petInfo.hunger = 200
+  state.save.petInfo.clean = 1000
+  state.save.petInfo.mood = 1000
+  state.save.selfGoodDatas.food = ['_10013006*5']
+  const ticked = advanceMinutes(state, context(state, { sessionActive: false, activeClientCount: 0 }), 8)
+  assert.equal(ticked.ok, true, JSON.stringify(ticked.ok ? ticked.result : ticked.error))
+  assert.equal(ticked.state.save.selfGoodDatas.food.find(entry => entry.startsWith('_10013006*')), '_10013006*2')
+  assert.equal(blob(ticked.state, 'task').doNums.Eat, 3)
+  assert.ok(ticked.state.save.petInfo.hunger > 600)
+  const careEvents = ticked.events.filter(event => event.type === 'item.consumed' && event.payload.source === 'sweetheart' && event.payload.type === 'food')
+  assert.equal(careEvents.length, 3)
+  assert.ok(ticked.events.some(event => event.type === 'item.consumed' && event.payload.source === 'sweetheart' && event.payload.type === 'clean'))
+  assert.equal(ticked.events.filter(event => event.type === 'task.progress' && event.payload.counter === 'Eat').length, 3)
 })

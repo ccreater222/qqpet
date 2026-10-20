@@ -82,9 +82,12 @@ function executeHandler(
   handler: (context: HandlerContext) => HandlerResult,
 ): RuntimeOutcome {
   const candidate = cloneEngine(state)
+  const initialRngReference = candidate.rng
   const rng = createRuntimeRng(candidate.rng)
   const handlerResult = handler({ state: candidate, ctx, rng })
-  candidate.rng = rng.state
+  // A handler may explicitly replace engine RNG (pet.reset). Only copy the
+  // cursor back when the handler did not intentionally reset the engine state.
+  if (candidate.rng === initialRngReference) candidate.rng = rng.state
   return toOutcome(candidate, handlerResult.events, handlerResult.result, ctx.gameTimeMs)
 }
 

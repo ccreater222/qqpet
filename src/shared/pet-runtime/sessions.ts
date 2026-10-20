@@ -128,6 +128,15 @@ export function rewardGameSession(
   const actor = requireActor(ctx)
   const session = requireActiveSession(state, payload.sessionToken, actor, 'game', ctx.gameTimeMs)
   const minutes = Math.min(60, Math.max(0, Math.floor((ctx.gameTimeMs - session.startedAtGameMs) / 60_000)))
+  if (minutes < 1) {
+    session.status = 'settled'
+    session.rewardKey = 'game-zero'
+    cancelSessionJob(state, session.sessionToken)
+    return {
+      result: json({ minutes: 0, yb: 0, growth: 0, mood: 0, gameRound: 0 }),
+      events: [event('game.sessionSettled', { gameId: session.payload.kind === 'game' ? session.payload.gameId : '', minutes: 0, yb: 0, growth: 0 })],
+    }
+  }
   const task = readTaskProgress(state.save)
   const remaining = Math.max(0, 60 - (task.doNums.Game ?? 0))
   const effectiveMinutes = Math.min(minutes, remaining)
@@ -286,13 +295,15 @@ export function startIslandQuiz(
 ): SessionHandlerOutcome {
   requireLivingPet(state)
   requireActor(ctx)
+  if (state.save.settings.paused) reject('paused', 'the pet is paused')
+  if (isBusy(state.save)) reject('busy', 'the pet is busy')
   const { island, index } = findQuizErrand(state, payload.npcId, payload.errandId)
   const errand = island.errands[index]
   if (errand.kind !== 'quiz') reject('wrong_phase', 'this errand is not a quiz')
   if (errand.got > 0 || errand.took) reject('already_claimed', 'the quiz errand is already complete')
   const bank = EXAM_BANK[errand.to]
   if (bank === undefined || bank.length === 0) reject('not_available', 'no quiz bank for this errand')
-  const questionIndex = Math.floor((Math.floor(ctx.gameTimeMs / 1000)) / 86_400) % bank.length
+  const questionIndex = Math.floor(island.day / 86_400) % bank.length
   const question = bank[questionIndex]
   const options = rng.shuffle(question.options)
   const answerIndex = options.indexOf(question.answer)
@@ -304,7 +315,14 @@ export function startIslandQuiz(
     prompt: question.title,
     options,
     answerIndex,
-    metadata: { npcId: payload.npcId, errandId: payload.errandId, islandErrandIndex: index },
+    metadata: {
+      npcId: payload.npcId,
+      errandId: payload.errandId,
+      islandErrandIndex: index,
+      errandFrom: errand.from,
+      errandKind: errand.kind,
+      errandTo: errand.to,
+    },
   }
   const session = startSession(state, ctx, rng, payloadSession, ISLAND_QUIZ_SESSION_MS)
   return {
@@ -328,17 +346,30 @@ export function answerIslandQuiz(
   const island = readIsland(state.save, ctx.gameTimeMs)
   const index = Number(quiz.metadata.islandErrandIndex ?? -1)
   const errand = Number.isSafeInteger(index) ? island.errands[index] : undefined
-  let goods: RuntimeGood[] = []
-  if (errand !== undefined) {
-    errand.took = true
-    if (correct) {
-      errand.got = Math.max(errand.got, 1)
-      goods = [goodOf('nums', 'yb', rng.randIntInclusive(5, 15) * 10)]
-      if (rng.chance(0.3)) goods.push(...lootGoods(rng, 1))
-      grantGoods(state.save, goods)
-    }
-    writeIsland(state.save, island)
+  const expectedFrom = quiz.metadata.errandFrom
+  const expectedKind = quiz.metadata.errandKind
+  const expectedTo = quiz.metadata.errandTo
+  if (
+    errand === undefined ||
+    typeof expectedFrom !== 'string' ||
+    typeof expectedKind !== 'string' ||
+    typeof expectedTo !== 'string' ||
+    errand.from !== expectedFrom ||
+    errand.kind !== expectedKind ||
+    errand.to !== expectedTo ||
+    errand.kind !== 'quiz'
+  ) {
+    reject('not_available', 'the stored island errand identity no longer matches')
   }
+  errand.took = true
+  let goods: RuntimeGood[] = []
+  if (correct) {
+    errand.got = Math.max(errand.got, 1)
+    goods = [goodOf('nums', 'yb', rng.randIntInclusive(5, 15) * 10)]
+    if (rng.chance(0.3)) goods.push(...lootGoods(rng, 1))
+    grantGoods(state.save, goods)
+  }
+  writeIsland(state.save, island)
   session.status = 'settled'
   session.rewardKey = correct ? 'island-quiz-pass' : 'island-quiz-fail'
   cancelSessionJob(state, session.sessionToken)
@@ -404,7 +435,7 @@ export function rebindSessionActor(
   return candidate
 }
 
-/** Applies the portable-import actor policy: rebind matching local sessions or cancel them without reward. */
+/** Portable import policy: keep uploader-owned sessions, rebind local-actor sessions when allowed, and cancel every other active session without reward. */
 export function rebindOrCancelImportedSessions(
   state: EngineState,
   options: { localActorDeviceId: string; newActorDeviceId: string; rebindLocalSessions: boolean; nowMs: number },
@@ -418,14 +449,14 @@ export function rebindOrCancelImportedSessions(
       cancelSessionJob(candidate, session.sessionToken)
       continue
     }
-    if (session.actorDeviceId !== options.localActorDeviceId) continue
-    if (options.rebindLocalSessions) {
+    if (session.actorDeviceId === options.newActorDeviceId) continue
+    if (session.actorDeviceId === options.localActorDeviceId && options.rebindLocalSessions) {
       session.actorDeviceId = options.newActorDeviceId
-    } else {
-      session.status = 'abandoned'
-      session.cancelReason = 'import_actor_unavailable'
-      cancelSessionJob(candidate, session.sessionToken)
+      continue
     }
+    session.status = 'abandoned'
+    session.cancelReason = 'actor_rebind_failed'
+    cancelSessionJob(candidate, session.sessionToken)
   }
   return candidate
 }
