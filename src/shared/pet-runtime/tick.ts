@@ -180,11 +180,10 @@ function processDueJobs(state: EngineState, nowMs: number, rng: RuntimeRng): Dom
     if (job.type === 'travel') {
       const startedAt = typeof job.payload.startedAtGameMs === 'number' ? job.payload.startedAtGameMs : job.dueAtGameMs - 60 * 60_000
       const elapsed = (nowMs - startedAt) / 60_000
-      if (elapsed > 60) {
-        job.status = 'completed'
-        const destination = typeof job.payload.activityId === 'string' ? job.payload.activityId : ''
-        events.push(...applyTravelCompletion(state, destination, false, nowMs, rng))
-      }
+      const early = elapsed > 55 ? travelEarlyRoll(state.save, rng) : false
+      job.status = 'completed'
+      const destination = typeof job.payload.activityId === 'string' ? job.payload.activityId : ''
+      events.push(...applyTravelCompletion(state, destination, early, nowMs, rng))
       continue
     }
     if (job.type === 'work' || job.type === 'study') {
@@ -329,16 +328,15 @@ function passiveMinute(state: EngineState, ctx: RuntimeContext, weather: ReturnT
   const travelJob = state.scheduledJobs.find(job =>
     job.status === 'pending' && job.type === 'travel',
   )
-  if (travelJob !== undefined) {
+  if (travelJob !== undefined && state.gameTimeMs < travelJob.dueAtGameMs) {
     const destination = typeof travelJob.payload.activityId === 'string' ? travelJob.payload.activityId : ''
     const startedAt = typeof travelJob.payload.startedAtGameMs === 'number'
       ? travelJob.payload.startedAtGameMs
       : travelJob.dueAtGameMs - 60 * 60_000
     const elapsed = (state.gameTimeMs - startedAt) / 60_000
-    const early = elapsed > 55 ? travelEarlyRoll(save, rng) : false
-    if (early || elapsed >= 60 || state.gameTimeMs >= travelJob.dueAtGameMs) {
+    if (elapsed > 55 && travelEarlyRoll(save, rng)) {
       travelJob.status = 'completed'
-      events.push(...applyTravelCompletion(state, destination, early, state.gameTimeMs, rng))
+      events.push(...applyTravelCompletion(state, destination, true, state.gameTimeMs, rng))
     }
   }
   tickTimedGoods(save, grown, events)

@@ -1444,3 +1444,76 @@ test('rounded renderer draws remain rounded outside lootGoods item selection', (
   assert.equal(mailGift.length, 6)
   assert.equal(mailRng.calls.every(call => call[0] === 'rand'), true)
 })
+
+test('mixed due travel/study jobs process in dueAt then jobId order without passive fallback', () => {
+  const state = baseState()
+  const destination = TRAVEL_PROVINCES[0].name
+  const dueAt = state.gameTimeMs + 60000
+  state.save.activeOption.trip = 'stale-travel'
+  state.save.activeOption.study = 'stale-study'
+  state.scheduledJobs = [
+    {
+      id: 1,
+      type: 'travel',
+      dueAtGameMs: dueAt,
+      payload: { activityKind: 'travel', activityId: destination, startedAtGameMs: dueAt - 60 * 60000, plannedMinutes: 60 },
+      status: 'pending',
+    },
+    {
+      id: 2,
+      type: 'study',
+      dueAtGameMs: dueAt,
+      payload: { activityKind: 'study', activityId: 'xx-chinese', startedAtGameMs: dueAt - 45 * 60000, early: 0 },
+      status: 'pending',
+    },
+  ]
+  state.nextScheduledJobId = 3
+  const ticked = advanceMinute(state, context(state, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(ticked.ok, true, JSON.stringify(ticked.ok ? ticked.result : ticked.error))
+  assert.equal(ticked.state.scheduledJobs[0].status, 'completed')
+  assert.equal(ticked.state.scheduledJobs[1].status, 'completed')
+  assert.equal(ticked.state.save.studyInfo.chinese, 1)
+  assert.equal(ticked.state.save.gameSaveDatas.travel_china.filter(entry => entry.name === destination).length, 1)
+  assert.equal(blob(ticked.state, 'album').length, 1)
+  assert.equal(Object.values(blob(ticked.state, 'email')).filter(mail => typeof mail.p === 'string').length, 1)
+  const completions = ticked.events.filter(event => event.type === 'activity.completed')
+  const travelCompletion = completions.findIndex(event => event.payload.kind === 'travel')
+  const studyCompletion = completions.findIndex(event => event.payload.kind === 'study')
+  assert.equal(travelCompletion >= 0, true)
+  assert.equal(studyCompletion >= 0, true)
+  assert.equal(travelCompletion < studyCompletion, true)
+  assert.equal(completions.filter(event => event.payload.kind === 'travel').length, 1)
+  assert.equal(ticked.state.save.activeOption.trip, null)
+  assert.equal(ticked.state.save.activeOption.study, null)
+  assert.equal(blob(ticked.state, 'activity'), 0)
+})
+
+test('overdue travel completes once in the scheduled-job phase and never rewards twice', () => {
+  const state = baseState()
+  const destination = TRAVEL_PROVINCES[0].name
+  const dueAt = state.gameTimeMs - 10 * 60000
+  state.save.activeOption.trip = 'stale-projection'
+  state.save.saveJsonData.activity = '123'
+  state.scheduledJobs = [{
+    id: 1,
+    type: 'travel',
+    dueAtGameMs: dueAt,
+    payload: { activityKind: 'travel', activityId: destination, startedAtGameMs: dueAt - 60 * 60000, plannedMinutes: 60 },
+    status: 'pending',
+  }]
+  state.nextScheduledJobId = 2
+  const ticked = advanceMinute(state, context(state, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(ticked.ok, true, JSON.stringify(ticked.ok ? ticked.result : ticked.error))
+  assert.equal(ticked.state.scheduledJobs[0].status, 'completed')
+  assert.equal(ticked.events.filter(event => event.type === 'activity.completed' && event.payload.kind === 'travel').length, 1)
+  assert.equal(ticked.state.save.gameSaveDatas.travel_china.length, 1)
+  assert.equal(blob(ticked.state, 'album').length, 1)
+  assert.equal(Object.values(blob(ticked.state, 'email')).filter(mail => typeof mail.p === 'string').length, 1)
+
+  const nextTick = advanceMinute(ticked.state, context(ticked.state, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(nextTick.ok, true, JSON.stringify(nextTick.ok ? nextTick.result : nextTick.error))
+  assert.equal(nextTick.events.filter(event => event.type === 'activity.completed' && event.payload.kind === 'travel').length, 0)
+  assert.equal(nextTick.state.save.gameSaveDatas.travel_china.length, 1)
+  assert.equal(blob(nextTick.state, 'album').length, 1)
+  assert.equal(Object.values(blob(nextTick.state, 'email')).filter(mail => typeof mail.p === 'string').length, 1)
+})
