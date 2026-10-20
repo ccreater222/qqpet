@@ -16,6 +16,7 @@ import {
   mailSlot,
   readMails,
   readSignIn,
+  readIsland,
   recomputePetComputed,
   reject,
   writeMails,
@@ -29,6 +30,9 @@ import { dayKeyAt, nextDailyBoundaryMs } from './time'
 import { STUDY_GOODS, WORK_GOODS } from './content/index'
 import { applyTravelCompletion, travelEarlyRoll } from './travel'
 import { selfCare } from './self-care'
+import { materializeIslandDay } from './island-runtime'
+import { tickFarmState } from './farm-runtime'
+import { tickFishingState } from './fishing-runtime'
 import { resetDailyTasks } from './runtime-tasks'
 import { resetFishLimits, settlePinkDiamond } from './handlers-b'
 import type { EngineState, JsonObject, RuntimeContext } from './types'
@@ -120,6 +124,14 @@ function runDailyBoundary(state: EngineState, boundaryMs: number, dayKey: string
   resetDailyTasks(state.save, boundaryMs, state.timeZone, rng, state.environment.calendarByDay?.[dayKey])
   resetSignInAtBoundary(state.save)
   resetFishLimits(state.save)
+  const islandCtx = {
+    gameTimeMs: boundaryMs,
+    environment: state.environment,
+    activeClientCount: 0,
+    sessionActive: false,
+    actorDeviceId: null,
+  }
+  materializeIslandDay(state, islandCtx, rng, readIsland(state.save, boundaryMs), true)
   events.push(event('task.progress', { dailyReset: true, dayKey }))
   events.push(event('signin.changed', { dailyReset: true, dayKey }))
   events.push(event('fishing.changed', { dailyReset: true, dayKey }))
@@ -189,6 +201,16 @@ function processDueJobs(state: EngineState, nowMs: number, rng: RuntimeRng): Dom
     if (job.type === 'work' || job.type === 'study') {
       job.status = 'completed'
       events.push(...completeActivityJob(state, job))
+      continue
+    }
+    if (job.type === 'farm') {
+      job.status = 'completed'
+      events.push(...tickFarmState(state, rng, nowMs))
+      continue
+    }
+    if (job.type === 'fishing') {
+      job.status = 'completed'
+      events.push(...tickFishingState(state, nowMs))
       continue
     }
     job.status = 'completed'
@@ -342,6 +364,8 @@ function passiveMinute(state: EngineState, ctx: RuntimeContext, weather: ReturnT
   tickTimedGoods(save, grown, events)
   events.push(...sessionClockTick(state, ctx))
   events.push(...illnessTick(state, weather, rng))
+  events.push(...tickFarmState(state, rng, state.gameTimeMs))
+  events.push(...tickFishingState(state, state.gameTimeMs))
   events.push(event('pet.statsChanged', {
     hunger: save.petInfo.hunger,
     clean: save.petInfo.clean,

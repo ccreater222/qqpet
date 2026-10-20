@@ -12,6 +12,7 @@ import {
   type FishState,
   type PondState,
 } from './runtime-helpers'
+import { stableStringify } from './serialization'
 import type { JsonObject, JsonValue } from './types'
 
 const FEED_PRICE = 10
@@ -174,4 +175,17 @@ export function fishingSpeedUp(context: HandlerContext): HandlerResult {
     result: json({ used: pond.PD.allvipcnt - pond.PD.canusecnt, remaining: pond.PD.canusecnt }),
     events: [changed(context, pond, 'speedUp', { remaining: pond.PD.canusecnt })],
   }
+}
+
+/** Minute-scheduler hook for pond maturity; no-op until a canonical pond blob exists. */
+export function tickFishingState(state: import('./types').EngineState, nowMs: number): DomainEvent[] {
+  const raw = state.save.saveJsonData.fishs
+  if (raw === undefined || raw === '{}') return []
+  const pond = readPond(state.save)
+  if (pond.fishs.length === 0) return []
+  const before = stableStringify(pond)
+  settle(pond, Math.floor(nowMs / 1000))
+  writePond(state.save, pond)
+  if (stableStringify(pond) === before) return []
+  return [event('fishing.changed', { action: 'tick', fishCount: pond.fishs.length })]
 }

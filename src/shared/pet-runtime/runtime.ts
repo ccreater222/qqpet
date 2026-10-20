@@ -84,7 +84,20 @@ import {
   farmPlant,
   farmSellProduce,
 } from './farm-runtime'
+import {
+  adminGrantCheat,
+  adminGrantRandomGoods,
+  serverSetAdvanceWhileEmpty,
+  serverSetTimeZone,
+  serverSetWeatherCity,
+  settingsSetShared,
+} from './handlers-server'
 import { advanceMinute as advanceMinuteBatch, advanceRuntimeMinutes } from './tick'
+import {
+  advanceSchedulerChunk,
+  type SchedulerAdvanceOptions,
+  type SchedulerAdvanceOutcome,
+} from './scheduler'
 
 /** Commands implemented by the C3 groups A-D plus actor-bound session slice. */
 export const C3_COMMAND_TYPES = [
@@ -118,6 +131,12 @@ export const GROUP_F_COMMAND_TYPES = [
 ] as const satisfies readonly CommandKey[]
 
 export const C4A_COMMAND_TYPES = [...GROUP_E_COMMAND_TYPES, ...GROUP_F_COMMAND_TYPES] as const satisfies readonly CommandKey[]
+
+/** C4b shared-runtime settings/admin surface; host-only authority commands remain outside. */
+export const C4B_COMMAND_TYPES = [
+  'settings.setShared', 'server.setAdvanceWhileEmpty', 'server.setTimeZone', 'server.setWeatherCity',
+  'admin.grantCheat', 'admin.grantRandomGoods',
+] as const satisfies readonly CommandKey[]
 
 function toOutcome(state: EngineState, events: DomainEvent[], result: JsonValue | undefined, nowMs: number): RuntimeOutcome {
   recomputePetComputed(state.save)
@@ -228,6 +247,12 @@ export function executeCommand(
       case 'farm.clear': return executeHandler(state, ctx, context => farmClear(context, command.payload as never))
       case 'farm.buySeed': return executeHandler(state, ctx, context => farmBuySeed(context, command.payload as never))
       case 'farm.sellProduce': return executeHandler(state, ctx, context => farmSellProduce(context, command.payload as never))
+      case 'settings.setShared': return executeHandler(state, ctx, context => settingsSetShared(context, command.payload as never))
+      case 'server.setAdvanceWhileEmpty': return executeHandler(state, ctx, context => serverSetAdvanceWhileEmpty(context, command.payload as never))
+      case 'server.setTimeZone': return executeHandler(state, ctx, context => serverSetTimeZone(context, command.payload as never))
+      case 'server.setWeatherCity': return executeHandler(state, ctx, context => serverSetWeatherCity(context, command.payload as never))
+      case 'admin.grantCheat': return executeHandler(state, ctx, context => adminGrantCheat(context, command.payload as never))
+      case 'admin.grantRandomGoods': return executeHandler(state, ctx, context => adminGrantRandomGoods(context, command.payload as never))
       default:
         return unsupportedCommand(command.type)
     }
@@ -290,6 +315,7 @@ export interface HeadlessRuntime {
   execute(command: PetCommand, ctx: RuntimeCommandContext): RuntimeOutcome
   tick(ctx: RuntimeContext): RuntimeOutcome
   advance(ctx: RuntimeContext, minutes: number): RuntimeOutcome
+  scheduler(wallNowMs: number, ctx: RuntimeContext, options?: SchedulerAdvanceOptions): SchedulerAdvanceOutcome
 }
 
 /** Stateful convenience wrapper used by headless hosts/tests; the pure functions remain authoritative. */
@@ -313,6 +339,11 @@ export function createHeadlessRuntime(initialState: EngineState, options: Headle
     advance(ctx: RuntimeContext, minutes: number): RuntimeOutcome {
       const outcome = advanceMinutes(state, ctx, minutes, options.maxBatchMinutes)
       if (outcome.ok) state = outcome.state
+      return outcome
+    },
+    scheduler(wallNowMs: number, ctx: RuntimeContext, schedulerOptions: SchedulerAdvanceOptions = {}): SchedulerAdvanceOutcome {
+      const outcome = advanceSchedulerChunk(state, ctx, wallNowMs, schedulerOptions)
+      state = outcome.state
       return outcome
     },
   }

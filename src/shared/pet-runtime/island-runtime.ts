@@ -173,11 +173,12 @@ export function materializeIslandDay(
   ctx: HandlerContext['ctx'],
   rng: HandlerContext['rng'],
   island: IslandState,
+  force = false,
 ): IslandState {
   const boundary = currentBoundarySeconds(ctx.gameTimeMs, state.timeZone)
   const currentSeconds = Math.floor(ctx.gameTimeMs / 1000)
-  if (island.day === boundary) return island
-  if (island.day === currentSeconds && island.errands.length > 0) return island
+  if (force === false && island.day === boundary) return island
+  if (force === false && island.day === currentSeconds && island.errands.length > 0) return island
   island.day = boundary
   island.sent = 0
   island.letter = ''

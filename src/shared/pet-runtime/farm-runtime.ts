@@ -3,7 +3,9 @@ import { FARM_CROPS, FARM_FERTILIZERS, FARM_SEEDS, type FarmCropDefinition, type
 import { domainEvent, type DomainEvent } from './events'
 import type { HandlerContext, HandlerResult } from './handler-types'
 import { earnYb, payYb, readSharedBlob, reject, requireLivingPet, writeSharedBlob } from './runtime-helpers'
-import type { JsonObject, JsonValue } from './types'
+import { stableStringify } from './serialization'
+import type { EngineState, JsonObject, JsonValue } from './types'
+import type { RuntimeRng } from './runtime-helpers'
 
 const PEST_TIME = 14400
 const PEST_LOSS = 2
@@ -67,8 +69,8 @@ function nowSeconds(context: HandlerContext): number {
   return Math.floor(context.ctx.gameTimeMs / 1000)
 }
 
-function readFarm(context: HandlerContext): FarmState {
-  const parsed = readSharedBlob<Partial<FarmState>>(context.state.save, 'farm', {})
+function readFarmFromState(state: EngineState): FarmState {
+  const parsed = readSharedBlob<Partial<FarmState>>(state.save, 'farm', {})
   const fresh = freshFarm()
   return {
     ...fresh,
@@ -79,10 +81,18 @@ function readFarm(context: HandlerContext): FarmState {
   }
 }
 
+function readFarm(context: HandlerContext): FarmState {
+  return readFarmFromState(context.state)
+}
+
+function writeFarmToState(state: EngineState, farm: FarmState): void {
+  farm.wealth = String(state.save.petInfo.yb)
+  farm.username = state.save.petInfo.name
+  writeSharedBlob(state.save, 'farm', farm)
+}
+
 function writeFarm(context: HandlerContext, farm: FarmState): void {
-  farm.wealth = String(context.state.save.petInfo.yb)
-  farm.username = context.state.save.petInfo.name
-  writeSharedBlob(context.state.save, 'farm', farm)
+  writeFarmToState(context.state, farm)
 }
 
 function pests(land: FarmLand): number {
@@ -108,19 +118,18 @@ function growLand(land: FarmLand, now: number, rng: HandlerContext['rng']): void
   }
 }
 
-function settleFarm(context: HandlerContext, farm: FarmState): void {
-  const now = nowSeconds(context)
+function settleFarm(rng: RuntimeRng, farm: FarmState, now: number): void {
   const previous = farm.checked === undefined ? now : Number(farm.checked)
   const chance = 1 - Math.exp(-(now - previous) / PEST_TIME)
   for (let index = 0; index < farm.farmland.length; index++) {
     const land = farm.farmland[index]
     if (land.crop === undefined || land.harvest !== undefined) continue
     if (Number(land.state ?? 0) < 5) {
-      if (land.grass === undefined && context.rng.chance(chance)) land.grass = 1
-      if (land.worm === undefined && context.rng.chance(chance)) land.worm = 1
-      if (land.farmland === 'FarmlandS' && context.rng.chance(chance)) land.farmland = 'FarmlandG'
+      if (land.grass === undefined && rng.chance(chance)) land.grass = 1
+      if (land.worm === undefined && rng.chance(chance)) land.worm = 1
+      if (land.farmland === 'FarmlandS' && rng.chance(chance)) land.farmland = 'FarmlandG'
     }
-    growLand(land, now, context.rng)
+    growLand(land, now, rng)
   }
   farm.checked = now
 }
@@ -130,7 +139,7 @@ function requireFarmReady(context: HandlerContext): FarmState {
   if (context.ctx.actorDeviceId === null) reject('unauthorized', 'an authenticated actor is required')
   if (context.state.save.settings.paused) reject('paused', 'the pet is paused')
   const farm = readFarm(context)
-  settleFarm(context, farm)
+  settleFarm(context.rng, farm, nowSeconds(context))
   return farm
 }
 
@@ -343,6 +352,18 @@ export function farmSellProduce(context: HandlerContext, payload: CommandPayload
     result: json({ itemId: payload.itemId, quantity: payload.quantity, yb }),
     events: [farmChanged(context, farm, 'sellProduce', { itemId: payload.itemId, quantity: payload.quantity, yb })],
   }
+}
+
+/** Minute-scheduler hook for farm growth/pests; no-op until a canonical farm blob exists. */
+export function tickFarmState(state: EngineState, rng: RuntimeRng, nowMs: number): DomainEvent[] {
+  const raw = state.save.saveJsonData.farm
+  if (raw === undefined || raw === '{}') return []
+  const farm = readFarmFromState(state)
+  const before = stableStringify(farm)
+  settleFarm(rng, farm, Math.floor(nowMs / 1000))
+  writeFarmToState(state, farm)
+  if (stableStringify(farm) === before) return []
+  return [event('farm.changed', { action: 'tick', checked: farm.checked ?? 0 })]
 }
 
 export function farmStateForTest(context: HandlerContext): FarmState {
