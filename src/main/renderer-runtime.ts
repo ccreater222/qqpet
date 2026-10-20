@@ -1,15 +1,19 @@
-import { ipcMain, type BrowserWindow } from 'electron'
+import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { IPC } from '../shared/ipc'
 import type { SaveData, SavePatch } from '../shared/save'
 import type { OrderedEvent } from '../shared/pet-runtime/events'
 import {
+  assertBooleanIpcInput,
+  assertCommandIpcInput,
   classifyProjectionDelivery,
   createRendererProjection,
   createRendererStatus,
   legacyRendererStatus,
+  orderedEventsFromHistory,
   rejectedCommandResult,
+  requirePortableImportProjection,
   toCommandResult,
   type ProjectionCursor,
   type RendererProjection,
@@ -31,7 +35,7 @@ import {
   type LocalPetProjection,
   type LocalRepository,
 } from './local-repository'
-import { desktopRendererRuntimeCapability } from './renderer-runtime-flags'
+import { desktopRendererRuntimeCapability, LOCAL_V2_DOCUMENT_NAME } from './renderer-runtime-flags'
 import { flushSave, setSaveView } from './save'
 
 export interface DesktopRendererRuntimeOptions {
@@ -70,7 +74,7 @@ export class DesktopRendererRuntime {
     if (capability.canActivate === false) {
       throw new Error('desktop renderer runtime v2 unavailable: ' + (capability.reason ?? 'capability_missing'))
     }
-    this.documentPath = join(options.userDataPath, 'save.v2.json')
+    this.documentPath = join(options.userDataPath, LOCAL_V2_DOCUMENT_NAME)
     this.legacySavePath = join(options.userDataPath, 'save.json')
     this.repository = createLocalRepository({
       documentPath: this.documentPath,
@@ -108,6 +112,10 @@ export class DesktopRendererRuntime {
     window.on('closed', () => { this.window = null })
   }
 
+  acceptsSender(sender: unknown): boolean {
+    return this.window !== null && sender === this.window.webContents
+  }
+
   onView(listener: (save: SaveData) => void): () => void {
     this.viewListeners.add(listener)
     return () => this.viewListeners.delete(listener)
@@ -124,6 +132,12 @@ export class DesktopRendererRuntime {
 
   getStatus(): RendererRepositoryStatus {
     return createRendererStatus(this.repository.getStatus(), this.currentProjection)
+  }
+
+  /** Forces a full snapshot through the resync channel after a renderer gap. */
+  requestResync(): void {
+    if (this.currentProjection === null) return
+    this.send(IPC.resync, clone(this.currentProjection), [])
   }
 
   loadLocalSettings(): DeviceLocalOverlay {
@@ -197,7 +211,10 @@ export class DesktopRendererRuntime {
   }
 
   async importPortableBundleJson(text: string): Promise<void> {
-    await this.repository.importPortableBundle(text)
+    requirePortableImportProjection(
+      await this.repository.importPortableBundle(text),
+      this.repository.getStatus().error,
+    )
   }
 
   async reset(): Promise<void> {
@@ -242,15 +259,10 @@ export class DesktopRendererRuntime {
 
   private deltaEvents(projection: LocalPetProjection): OrderedEvent[] {
     const after = this.cursor?.eventSeq ?? 0
-    return this.repository.getRecentEvents()
-      .filter(event => event.eventSeq > after)
-      .map(event => ({
-        eventSeq: event.eventSeq,
-        revision: projection.revision,
-        gameTimeMs: projection.gameTimeMs,
-        type: event.type,
-        payload: event.payload,
-      }))
+    return orderedEventsFromHistory(
+      this.repository.getRecentEvents().filter(event => event.eventSeq > after),
+      { revision: projection.revision, gameTimeMs: projection.gameTimeMs },
+    )
   }
 
   private onRepositoryProjection(projection: LocalPetProjection): void {
@@ -277,31 +289,57 @@ export class DesktopRendererRuntime {
 
 /** Registers the unified renderer IPC handlers, including fail-closed legacy stubs. */
 export function installRendererRuntimeIpc(runtime: DesktopRendererRuntime | null): void {
-  ipcMain.handle(IPC.runtimeInfo, () => runtime?.info() ?? {
-    localRepositoryV2: false,
-    serverMode: false,
-    reason: 'local_runtime_v2_disabled',
-  } satisfies RendererRuntimeInfo)
-  ipcMain.handle(IPC.command, (_event, command: PetCommand, options?: { opId?: string }) => {
-    if (runtime === null) return rejectedCommandResult(command, options?.opId ?? randomUUID())
-    return runtime.command(command, options)
+  const requireTrustedSender = (event: IpcMainInvokeEvent): void => {
+    if (runtime !== null && runtime.acceptsSender(event.sender) === false) {
+      throw new Error('unauthorized: unknown renderer')
+    }
+  }
+  ipcMain.handle(IPC.runtimeInfo, (event) => {
+    requireTrustedSender(event)
+    return runtime?.info() ?? {
+      localRepositoryV2: false,
+      serverMode: false,
+      reason: 'local_runtime_v2_disabled',
+    } satisfies RendererRuntimeInfo
   })
-  ipcMain.handle(IPC.setAdvanceWhileEmpty, async (_event, enabled: boolean) => {
+  ipcMain.handle(IPC.command, (event, command: unknown, options?: unknown) => {
+    requireTrustedSender(event)
+    assertCommandIpcInput(command, options)
+    const typedOptions = options as { opId?: string } | undefined
+    if (runtime === null) return rejectedCommandResult(command, typedOptions?.opId ?? randomUUID())
+    return runtime.command(command, typedOptions)
+  })
+  ipcMain.handle(IPC.setAdvanceWhileEmpty, async (event, enabled: unknown) => {
+    requireTrustedSender(event)
+    assertBooleanIpcInput(enabled, 'advanceWhileEmpty')
     if (runtime === null) throw new Error('local runtime v2 is not active')
     await runtime.setAdvanceWhileEmpty(enabled)
   })
-  ipcMain.handle(IPC.localSettingsLoad, () => {
+  ipcMain.handle(IPC.localSettingsLoad, (event) => {
+    requireTrustedSender(event)
     if (runtime === null) throw new Error('local runtime v2 is not active')
     return runtime.loadLocalSettings()
   })
-  ipcMain.handle(IPC.localSettingsUpdate, async (_event, patch: unknown) => {
+  ipcMain.handle(IPC.localSettingsUpdate, async (event, patch: unknown) => {
+    requireTrustedSender(event)
     if (runtime === null) throw new Error('local runtime v2 is not active')
     return runtime.updateLocalSettings(patch)
   })
-  ipcMain.handle(IPC.flush, async () => {
+  ipcMain.handle(IPC.flush, async (event) => {
+    requireTrustedSender(event)
     if (runtime !== null) return runtime.flush()
     flushSave()
   })
-  ipcMain.handle(IPC.getProjection, () => runtime?.getProjection() ?? null)
-  ipcMain.handle(IPC.getStatus, () => runtime?.getStatus() ?? legacyRendererStatus())
+  ipcMain.handle(IPC.getProjection, (event) => {
+    requireTrustedSender(event)
+    return runtime?.getProjection() ?? null
+  })
+  ipcMain.handle(IPC.getStatus, (event) => {
+    requireTrustedSender(event)
+    return runtime?.getStatus() ?? legacyRendererStatus()
+  })
+  ipcMain.handle(IPC.requestResync, (event) => {
+    requireTrustedSender(event)
+    runtime?.requestResync()
+  })
 }

@@ -29,6 +29,7 @@ export const IPC = {
   commandResult: 'pet:command-result',
   syncStatus: 'pet:sync-status',
   resync: 'pet:resync',
+  requestResync: 'pet:request-resync',
   openGame: 'game:open',
   calendar: 'app:calendar',
   gamePlayed: 'game:played',
@@ -257,6 +258,8 @@ export interface QQPetApi {
   onCommandResult(listener: (result: CommandResult) => void): void
   onSyncStatus(listener: (status: RendererRepositoryStatus) => void): void
   onResync(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): void
+  /** Requests a full authoritative snapshot after an ordered-event gap. */
+  requestResync(): Promise<void>
   getProjection?(): RendererProjection | null | Promise<RendererProjection | null>
   getStatus?(): RendererRepositoryStatus | Promise<RendererRepositoryStatus>
   /** Buries the pet and relaunches into egg selection, or straight into a newborn of `sex`. */

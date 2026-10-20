@@ -11,8 +11,20 @@ export async function bootstrap(): Promise<void> {
     console.error('QQPet runtime capability query failed:', error)
     window.__qqpetRuntimeV2 = window.qqpet.capabilities?.localRepositoryV2 === true
   }
-  const initial: SaveData = await window.qqpet.load()
+  if (window.__qqpetRuntimeV2) {
+    // Subscribe before load/import so a tick or command committed while the
+    // eager module graph is initializing cannot fall between the initial
+    // snapshot and store listener registration.
+    const buffered: NonNullable<Window['__qqpetBufferedProjections']> = []
+    window.__qqpetBufferedProjections = buffered
+    window.qqpet.onProjection((projection, events) => buffered.push({ kind: 'projection', projection, events }))
+    window.qqpet.onResync((projection, events) => buffered.push({ kind: 'resync', projection, events }))
+  }
+  const loaded: SaveData = await window.qqpet.load()
   const initialProjection = await window.qqpet.getProjection?.() ?? null
+  // If the scheduler advanced between load() and getProjection(), the head
+  // snapshot and cursor must describe the same state.
+  const initial: SaveData = initialProjection?.save ?? loaded
   window.__qqpetInitialProjectionCursor = initialProjection === null
     ? null
     : {

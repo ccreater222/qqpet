@@ -32,6 +32,7 @@ let projectionCursor: ProjectionCursor | null = window.__qqpetInitialProjectionC
 let localSettingsQueue: Promise<void> = Promise.resolve()
 let pendingLocalSettings: DeviceLocalOverlayPatch | null = null
 let localSettingsTimer = 0
+let resyncRequested = false
 
 /** Settings-dependent views can refit without waiting for a viewport resize. */
 export function onSettingsChange(listener: (change: Partial<Settings>) => void): () => void {
@@ -132,10 +133,20 @@ function receiveProjection(projection: RendererProjection, events: OrderedEvent[
   if (runtimeProjectionMode === false) return
   const classification = classifyProjectionDelivery(projectionCursor, projection, events)
   if (classification.kind === 'stale') return
-  // A gap on the ordered channel is not applied speculatively; the repository
-  // must deliver a full resync through onResync first.
-  if (requestedResync === false && classification.kind === 'resync') return
+  // A gap on the ordered channel is not applied speculatively; request a full
+  // resync and wait for the authoritative snapshot on onResync.
+  if (requestedResync === false && classification.kind === 'resync') {
+    if (resyncRequested === false) {
+      resyncRequested = true
+      void window.qqpet.requestResync().catch((error: unknown) => {
+        resyncRequested = false
+        console.error('Projection resync request failed:', error)
+      })
+    }
+    return
+  }
   const full = requestedResync || classification.kind === 'resync'
+  if (requestedResync) resyncRequested = false
   const result: SaveHydrationResult = hydrateSaveProjection(save, projection)
   projectionCursor = {
     revision: projection.revision,
@@ -350,6 +361,11 @@ if (runtimeProjectionMode === false) {
 }
 
 if (runtimeProjectionMode) {
+  const buffered = window.__qqpetBufferedProjections ?? []
+  const replayFromUnknownHead = projectionCursor === null
+  window.__qqpetBufferedProjections = []
+  // Replace the bootstrap listeners first, then drain the captured queue. The
+  // handoff stays synchronous, so a delivery cannot fall between the steps.
   window.qqpet.onProjection((projection, events) => receiveProjection(projection, events, false))
   window.qqpet.onResync((projection, events) => receiveProjection(projection, events, true))
   window.qqpet.onCommandResult((result) => {
@@ -358,4 +374,7 @@ if (runtimeProjectionMode) {
   window.qqpet.onSyncStatus((status) => {
     for (const listener of syncStatusListeners) listener(status)
   })
+  for (const delivery of buffered) {
+    receiveProjection(delivery.projection, delivery.events, replayFromUnknownHead || delivery.kind === 'resync')
+  }
 }

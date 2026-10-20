@@ -1,4 +1,5 @@
-import { setInfo, update } from '../pet/store'
+import { onProjectionApplied, save, setInfo, update } from '../pet/store'
+import type { Sex } from '../../shared/save'
 import { SwfPlayer } from '../swf/player'
 import { openBox } from './box'
 import { button, div } from './dom'
@@ -6,8 +7,29 @@ import { windowView } from './window-view'
 
 let open = false
 
-/** Egg selection (reset/Adopt.swf). Closing the box leaves no pet; the tray reopens it. */
-export function adopt(done: () => void): void {
+type CommitAdoption = (sex: Sex, done: () => void, fail: (message: string) => void) => void
+
+/** The pet is usable only after the adopted snapshot has been hydrated into the store. */
+function waitForPetProjection(timeoutMs = 5000): Promise<boolean> {
+  if (save.havePet) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    let settled = false
+    let timer = 0
+    const stop = (value: boolean): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      off()
+      resolve(value)
+    }
+    const off = onProjectionApplied(() => {
+      if (save.havePet) stop(true)
+    })
+    timer = setTimeout(() => stop(false), timeoutMs)
+  })
+}
+
+function openAdoption(done: () => void, commit: CommitAdoption): void {
   if (open) return
   open = true
   // No pet to replace yet, so unlike the setup page's import this needs no confirmation.
@@ -23,13 +45,47 @@ export function adopt(done: () => void): void {
       // The SWF owns the current call. Dispose it after ExternalInterface returns,
       // as for the other SWF windows that close themselves from a callback.
       setTimeout(() => {
-        if (!host.isConnected) return
-        setInfo('sex', n === 0 ? 'GG' : 'MM')
-        update('havePet', true)
-        close()
-        open = false
-        done()
+        if (host.isConnected === false) return
+        commit(n === 0 ? 'GG' : 'MM', () => {
+          close()
+          open = false
+          done()
+        }, (message) => {
+          choosing = false
+          close()
+          open = false
+          windowView({ title: '领养失败', msg: message })
+        })
       })
     },
   }
+}
+
+/** Legacy local adoption writes SaveData directly; only valid while the runtime flag is off. */
+export function adopt(done: () => void): void {
+  openAdoption(done, (sex, finish) => {
+    setInfo('sex', sex)
+    update('havePet', true)
+    finish()
+  })
+}
+
+/**
+ * C6a projection boot path: adopt through the semantic command, then start
+ * presentation only after the repository projection has created the pet.
+ */
+export function adoptProjection(done: () => void): void {
+  openAdoption(done, (sex, finish, fail) => {
+    void window.qqpet.command({ type: 'pet.adopt', payload: { sex } }).then(async (result) => {
+      if (result.status === 'applied' || (result.status === 'duplicate' && result.original === 'applied')) {
+        if (await waitForPetProjection()) finish()
+        else fail('领养投影超时，请重试')
+        return
+      }
+      const message = result.status === 'rejected' ? result.error.message : '领养命令未生效'
+      fail(message)
+    }, (error: unknown) => {
+      fail(error instanceof Error ? error.message : String(error))
+    })
+  })
 }

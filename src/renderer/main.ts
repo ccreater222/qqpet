@@ -5,7 +5,7 @@ import { machine, speak, startPet } from './pet/pet'
 import { applyEdge, info, onInfoChange, petSize, save, setInfo, stage, update } from './pet/store'
 import type { DesktopCursor } from '../shared/ipc'
 import { pageZoom, setDesktopSize, viewportSize } from './ui/viewport'
-import { adopt } from './ui/adopt'
+import { adopt, adoptProjection } from './ui/adopt'
 import { catchDiudiule, releaseDiudiule } from './ui/diudiule'
 import { scheduleHide, showControl } from './ui/control'
 import { div, pageX, pageY, touch } from './ui/dom'
@@ -20,7 +20,11 @@ import { initWebhook } from './ui/webhook'
 import { initMemory } from './ui/chat'
 import { initVoice } from './ui/voice'
 import { resizePetPosition } from '../shared/layout'
+import { bootRenderer, mountLanVisits } from './pet/runtime-boot'
 import { hitCover, type Box } from '../mobile/overlay'
+
+/** Mirrors the store flag; kept local so legacy source-level renderer tests can run without the full graph. */
+const projectionMode = window.__qqpetRuntimeV2 === true
 
 let lastPlatformError = ''
 let lastPlatformErrorAt = -Infinity
@@ -243,7 +247,7 @@ window.addEventListener('qqpet-hidden-change', () => {
 if (window.qqpet.setDragging) void window.qqpet.setDragging(false).then(syncDesktop)
 
 petEl.addEventListener('contextmenu', (e) => {
-  if (overPet(pageX(e), pageY(e))) openMenu({ x: pageX(e), y: pageY(e), pet: true }, adoptPet)
+  if (overPet(pageX(e), pageY(e))) openMenu({ x: pageX(e), y: pageY(e), pet: true }, startAdoption)
 })
 
 let releaseDomInput = (): void => {}
@@ -255,14 +259,14 @@ const petInput = createPetInput({
   begin: () => {
     clearFacePoints()
     closeMenu()
-    if (save.settings.petBar) showControl()
+    if (projectionMode === false && save.settings.petBar) showControl()
     catchDiudiule()
   },
   active: (on) => {
     dragging = on
     if (!on) { dragLifted = false; releaseDomInput() }
   },
-  hold: (x, y) => openMenu({ x, y, pet: true }, adoptPet),
+  hold: (x, y) => openMenu({ x, y, pet: true }, startAdoption),
   lift: (s, align) => {
     dragLifted = true
     if (stage() === 'Adult') {
@@ -431,7 +435,18 @@ const begin = (): void => {
   petEl.hidden = false
   startPet()
 }
+
+/** Projection mode owns all game rules; only the SWF pose/clock runs locally. */
+const beginProjection = (): void => {
+  petEl.hidden = false
+  machine.start()
+}
 const adoptPet = (): void => adopt(begin)
+const adoptProjectionPet = (): void => adoptProjection(beginProjection)
+const startAdoption = (): void => {
+  if (projectionMode) adoptProjectionPet()
+  else adoptPet()
+}
 
 // Linux trays report no position; open at the top right, under the menu bar.
 window.qqpet.onTrayClick((c) => {
@@ -442,11 +457,12 @@ window.qqpet.onTrayClick((c) => {
   const y = c.y ?? 0
   if (c.kind === 'menu') {
     closeState()
-    openMenu({ x, y, pet: false }, adoptPet)
+    openMenu({ x, y, pet: false }, startAdoption)
   } else if (save.havePet) {
     closeMenu()
-    openState(x, y, c.autoClose, c.focusTaken)
-  } else adoptPet()
+    if (projectionMode) openMenu({ x, y, pet: false }, startAdoption)
+    else openState(x, y, c.autoClose, c.focusTaken)
+  } else startAdoption()
 })
 
 const CLIP_MAX = 60
@@ -457,10 +473,12 @@ window.qqpet.onClipboard((text) => {
 })
 
 // Friend LAN presence moved into initLanVisit (one registration per channel).
-initLanVisit()
-initWebhook()
+// Runtime projection mode has no converted social/visit commands yet, so do
+// not mount an unsolicited LAN action path that could attempt canonical writes.
+if (mountLanVisits(projectionMode)) initLanVisit()
+if (projectionMode === false) initWebhook()
 initMemory()
-initVoice()
+if (projectionMode === false) initVoice()
 
 window.qqpet.onPresence((gone) => {
   if (!save.havePet) return
@@ -486,8 +504,13 @@ setInterval(() => {
   note(/[A-Za-z]/.test(front) ? `主人在用「${front}」` : `主人在${front}`)
 }, 15_000)
 
-if (save.havePet) {
-  resumeTask()
-  begin()
-} else adoptPet()
+bootRenderer(projectionMode, save.havePet, {
+  startProjectionPresentation: beginProjection,
+  startLegacy: () => {
+    resumeTask()
+    begin()
+  },
+  startProjectionAdoption: adoptProjectionPet,
+  startAdoption: adoptPet,
+})
 startAutoUpdate()

@@ -7,7 +7,8 @@ import {
   type SharedSaveData,
 } from './sync/data-boundary'
 import type { CommandKey, CommandResult, PetCommand, WireAuthority } from './sync/protocol'
-import type { AuthorityStamp } from './sync/portable'
+import { isCommandKey, validateCommandPayload } from './sync/command-validation'
+import type { AuthorityStamp, LocalEventHistoryEntry } from './sync/portable'
 
 /** The ordered data contract every renderer host receives, local or remote. */
 export interface RendererProjection {
@@ -318,4 +319,70 @@ export function rejectedCommandResult<K extends CommandKey>(
       error: { code: 'authority_not_active', message, refreshProjection: true },
     },
   })
+}
+
+const COMMAND_OP_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/
+
+export class RendererIpcValidationError extends Error {
+  readonly code = 'invalid_payload' as const
+  constructor(message: string) {
+    super('invalid_payload: ' + message)
+    this.name = 'RendererIpcValidationError'
+  }
+}
+
+/** Rejects malformed renderer IPC before it reaches the repository command queue. */
+export function assertCommandIpcInput(command: unknown, options?: unknown): asserts command is PetCommand {
+  if (typeof command !== 'object' || command === null || Array.isArray(command)) {
+    throw new RendererIpcValidationError('command must be an object')
+  }
+  const record = command as Record<string, unknown>
+  if (Object.keys(record).some(key => key !== 'type' && key !== 'payload')) {
+    throw new RendererIpcValidationError('command has unknown fields')
+  }
+  if (typeof record.type !== 'string' || isCommandKey(record.type) === false) {
+    throw new RendererIpcValidationError('unknown command type')
+  }
+  if (validateCommandPayload(record.type, record.payload) === false) {
+    throw new RendererIpcValidationError('malformed command payload')
+  }
+  if (options === undefined) return
+  if (typeof options !== 'object' || options === null || Array.isArray(options)) {
+    throw new RendererIpcValidationError('command options must be an object')
+  }
+  const optionRecord = options as Record<string, unknown>
+  if (Object.keys(optionRecord).some(key => key !== 'opId')) {
+    throw new RendererIpcValidationError('command options have unknown fields')
+  }
+  if (optionRecord.opId !== undefined && (
+    typeof optionRecord.opId !== 'string'
+    || COMMAND_OP_ID_PATTERN.test(optionRecord.opId) === false
+  )) {
+    throw new RendererIpcValidationError('opId must be 1-128 safe characters')
+  }
+}
+
+export function assertBooleanIpcInput(value: unknown, name: string): asserts value is boolean {
+  if (typeof value !== 'boolean') throw new RendererIpcValidationError(name + ' must be a boolean')
+}
+
+/** Reconstructs wire events without flattening their committed revision/game-time/commandSeq. */
+export function orderedEventsFromHistory(
+  events: readonly LocalEventHistoryEntry[],
+  fallback: { revision: number; gameTimeMs: number },
+): OrderedEvent[] {
+  return events.map(event => ({
+    eventSeq: event.eventSeq,
+    revision: event.revision ?? fallback.revision,
+    ...(event.commandSeq === undefined ? {} : { commandSeq: event.commandSeq }),
+    gameTimeMs: event.gameTimeMs ?? fallback.gameTimeMs,
+    type: event.type,
+    payload: event.payload,
+  }))
+}
+
+/** Import must fail explicitly when the repository returns no active projection. */
+export function requirePortableImportProjection<T>(projection: T | null, error?: string): T {
+  if (projection === null) throw new Error(error ?? 'portable bundle import failed')
+  return projection
 }

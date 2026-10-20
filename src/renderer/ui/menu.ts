@@ -1,6 +1,6 @@
 import { bury, machine, rest, speak } from '../pet/pet'
 import type { TrayMenuItem } from '../../shared/ipc'
-import { info, save, setPaused, setTray, update } from '../pet/store'
+import { info, runtimeProjectionMode, save, setPaused, setTray, update } from '../pet/store'
 import { openChat } from './chat'
 import { openGoods } from './control'
 import './css/menu.css'
@@ -13,6 +13,7 @@ import { openState } from './state'
 import { sendLetter } from './lan-visit'
 import { visitFriend } from './visit'
 import { windowView } from './window-view'
+import { runtimeMenuItems } from './runtime-menu'
 
 const ditu = (n: number): string => `pet/Menu/ditu0${n}.png`
 
@@ -42,6 +43,7 @@ export function closeMenu(): void {
 
 function quit(): void {
   closeMenu()
+  if (runtimeProjectionMode) return window.qqpet.quit()
   if (!save.havePet || info.health === 0) return window.qqpet.quit()
   machine.play({ a: 'exit', s: () => setTray('leave'), e: () => window.qqpet.quit() })
 }
@@ -70,6 +72,7 @@ function togglePaused(): void {
 
 function items(adopt: () => void): Item[] {
   const leave = { label: '退出宠物', run: quit }
+  if (runtimeProjectionMode) return runtimeMenuItems(save.havePet, adopt, quit)
   if (!save.havePet) return [{ label: '选择宠物', run: adopt }, leave]
   if (save.isBury) {
     const title = '点击将会清空当前宠物数据，并且重置为未领养状态，请慎重选择'

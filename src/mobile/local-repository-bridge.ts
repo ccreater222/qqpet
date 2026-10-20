@@ -155,6 +155,7 @@ export interface MobileLocalRepositoryBridge {
   onResync(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): void
   onCommandResult(listener: (result: CommandResult) => void): void
   onSyncStatus(listener: (status: RendererRepositoryStatus) => void): void
+  requestResync(): void
 }
 
 export function webCryptoAvailable(): boolean {
@@ -385,9 +386,15 @@ export function createMobileLocalRepositoryBridge(
       return createRendererStatus(repository.getStatus(), projection === null ? null : toRenderer(projection))
     },
     getRecentEvents: () => repository.getRecentEvents(),
-    onProjection(listener) { projectionListeners.push(listener) },
-    onResync(listener) { resyncListeners.push(listener) },
-    onCommandResult(listener) { resultListeners.push(listener) },
-    onSyncStatus(listener) { statusListeners.push(listener) },
+    onProjection(listener) { projectionListeners.length = 0; projectionListeners.push(listener) },
+    onResync(listener) { resyncListeners.length = 0; resyncListeners.push(listener) },
+    onCommandResult(listener) { resultListeners.length = 0; resultListeners.push(listener) },
+    onSyncStatus(listener) { statusListeners.length = 0; statusListeners.push(listener) },
+    requestResync() {
+      const current = repository.getProjection()
+      if (current === null) return
+      const renderer = toRenderer(current)
+      for (const listener of resyncListeners) listener(renderer, [])
+    },
   }
 }

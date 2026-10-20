@@ -18,3 +18,21 @@ export function desktopRendererRuntimeCapability(env: NodeJS.ProcessEnv = proces
 export function desktopRendererRuntimeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return desktopRendererRuntimeCapability(env).canActivate
 }
+
+export const LOCAL_V2_DOCUMENT_NAME = 'save.v2.json'
+
+/** Legacy mode must never write next to an existing v2 authority document. */
+export function legacyStartupBlockedByV2(v2DocumentExists: boolean, env: NodeJS.ProcessEnv = process.env): boolean {
+  return v2DocumentExists && desktopRendererRuntimeEnabled(env) === false
+}
+
+export type DesktopStartupAuthority = 'runtime' | 'legacy' | 'blocked'
+
+/** Chooses exactly one desktop writer before either loader touches disk. */
+export function desktopStartupAuthority(
+  v2DocumentExists: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): DesktopStartupAuthority {
+  if (desktopRendererRuntimeEnabled(env)) return 'runtime'
+  return v2DocumentExists ? 'blocked' : 'legacy'
+}

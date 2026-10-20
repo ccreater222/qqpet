@@ -29,6 +29,7 @@ import {
   petSize,
   playingDesk,
   refreshTray,
+  runtimeProjectionMode,
   save,
   setActivity,
   setInfo,
@@ -52,6 +53,9 @@ const petSwf = new PetSwf(document.getElementById('pet')!)
 export const applyPetSound = (): void => petSwf.applySound()
 
 export const machine = new Machine(petSwf, (over, next) => {
+  // Projection mode owns all gameplay. Pose transitions remain visual, but no
+  // idle timer, rest/gameplay callback or action hook may run in the renderer.
+  if (runtimeProjectionMode) return
   clearTimeout(idleTimer)
   // Anything else (drag, click, a queued action) ends the rest.
   if (next.a !== 'liedown' && next.a !== 'lying') endRest()

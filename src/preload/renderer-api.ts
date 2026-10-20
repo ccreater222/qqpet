@@ -40,6 +40,7 @@ export interface RendererRuntimePreloadSurface {
   onCommandResult(listener: (result: CommandResult) => void): void
   onSyncStatus(listener: (status: RendererRepositoryStatus) => void): void
   onResync(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): void
+  requestResync(): Promise<void>
 }
 
 function replaceListener<T extends unknown[]>(
@@ -77,6 +78,7 @@ export function createRendererRuntimePreload(ipc: ElectronIpcLike): RendererRunt
     onCommandResult: (listener) => replaceListener<[CommandResult]>(ipc, IPC.commandResult, listener),
     onSyncStatus: (listener) => replaceListener<[RendererRepositoryStatus]>(ipc, IPC.syncStatus, listener),
     onResync: (listener) => replaceListener<[RendererProjection, OrderedEvent[]]>(ipc, IPC.resync, listener),
+    requestResync: () => ipc.invoke(IPC.requestResync) as Promise<void>,
   }
 }
 

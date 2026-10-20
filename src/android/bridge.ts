@@ -293,6 +293,7 @@ const api: QQPetApi = {
   onCommandResult() {},
   onSyncStatus() {},
   onResync() {},
+  async requestResync() {},
   getProjection: () => null,
   getStatus: () => legacyRendererStatus(),
   async load() {
@@ -418,6 +419,7 @@ if (localRuntime !== null) {
   }
   api.onProjection = listener => runtime.onProjection(listener)
   api.onResync = listener => runtime.onResync(listener)
+  api.requestResync = async () => runtime.requestResync()
   api.onCommandResult = listener => runtime.onCommandResult(listener)
   api.onSyncStatus = listener => runtime.onSyncStatus(listener)
   api.getProjection = () => runtime.getProjection()

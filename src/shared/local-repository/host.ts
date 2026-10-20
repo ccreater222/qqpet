@@ -586,6 +586,7 @@ export class LocalRepositoryHost {
       ) {
         throw new Error('authority_not_active: local repository authority is not active')
       }
+      const priorState = this.state
       const cached = this.findCachedCommands(opId)
       const duplicateImport = cached.find(record =>
         record.petId === this.localDeviceIdValue
@@ -680,8 +681,15 @@ export class LocalRepositoryHost {
         await this.persistDocument(candidate)
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error)
-        this.state = 'read_only'
-        this.stopScheduler()
+        const stillActive = this.localDocument !== null
+          && this.localDocument.authority.state === 'active'
+          && this.localDocument.authority.stamp.owner === 'local'
+        if (stillActive) {
+          this.state = priorState
+        } else {
+          this.state = 'read_only'
+          this.stopScheduler()
+        }
         this.emitProjection()
         throw error
       }

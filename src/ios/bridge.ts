@@ -408,6 +408,7 @@ const api: QQPetApi = {
   onCommandResult() {},
   onSyncStatus() {},
   onResync() {},
+  async requestResync() {},
   getProjection: () => null,
   getStatus: () => legacyRendererStatus(),
   async load() {
@@ -574,6 +575,7 @@ const ready: Promise<void> = rpc.request<Bootstrap>('bootstrap', { role }).then(
       }
       api.onProjection = listener => runtime.onProjection(listener)
       api.onResync = listener => runtime.onResync(listener)
+      api.requestResync = async () => runtime.requestResync()
       api.onCommandResult = listener => runtime.onCommandResult(listener)
       api.onSyncStatus = listener => runtime.onSyncStatus(listener)
       api.getProjection = () => runtime.getProjection()

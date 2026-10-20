@@ -1,4 +1,6 @@
 import type { QQPetApi } from '../shared/ipc'
+import type { OrderedEvent } from '../shared/pet-runtime/events'
+import type { RendererProjection } from '../shared/renderer-api'
 import type { SaveData } from '../shared/save'
 import type { PetPointerInput } from './pet/input'
 
@@ -11,6 +13,12 @@ declare global {
     __qqpetRuntimeV2?: boolean
     /** Initial repository head so the store can enforce ordered projection gaps. */
     __qqpetInitialProjectionCursor?: { revision: number; eventSeq: number; owner?: 'local' | 'server'; authorityId?: string; authorityEpoch?: number; restoreGeneration?: number } | null
+    /** Projections received between bootstrap subscribing and the store importing. */
+    __qqpetBufferedProjections?: {
+      kind: 'projection' | 'resync'
+      projection: RendererProjection
+      events: OrderedEvent[]
+    }[]
     __qqpetFlush?: () => Promise<void>
     __qqpetInput?: (input: PetPointerInput) => void
     __qqpetNativePetInput?: boolean

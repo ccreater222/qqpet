@@ -135,6 +135,7 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
     closeState: noop,
     openState: noop,
     startAutoUpdate: noop, initLanVisit: noop, initWebhook: noop, initMemory: noop, initVoice: noop,
+    bootRenderer: noop, mountLanVisits: () => true,
     ...initial.ui,
   }
   const source = readFileSync(new URL('../../src/renderer/main.ts', import.meta.url), 'utf8')

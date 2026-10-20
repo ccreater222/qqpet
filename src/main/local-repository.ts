@@ -5,7 +5,7 @@ import { atomicWrite } from './atomic-write'
 import { startSave } from '../shared/save-logic'
 import { sessionActivityForInterval } from '../shared/pet-runtime/coverage'
 import type { CoverageReopen, CoverageSurvivor, EngineState, SessionCoverageInterval } from '../shared/pet-runtime/types'
-import { orderedDomainEvent, type DomainEvent, type OrderedDomainEvent } from '../shared/pet-runtime/events'
+import { orderedDomainEvent, type DomainEvent } from '../shared/pet-runtime/events'
 import { advanceSchedulerChunk, CATCHUP_CHUNK_TICKS } from '../shared/pet-runtime/scheduler'
 import {
   emptyOpIdCache, executeCommandIdempotent, migrateOpIdCache, validateOpIdCache, OP_ID_CACHE_SCHEMA_VERSION,
@@ -22,7 +22,7 @@ import {
 import {
   assertLocalPetDocumentV2, migrateLegacyLocalPetDocumentV2, migrateLegacySaveDataToPortableBundle,
   migratePortablePetBundle, LOCAL_DOCUMENT_FORMAT, LOCAL_DOCUMENT_SCHEMA_VERSION,
-  type AuthorityStamp, type LocalPetDocumentV2, type PortablePetBundleV1,
+  type AuthorityStamp, type LocalEventHistoryEntry, type LocalPetDocumentV2, type PortablePetBundleV1,
 } from '../shared/sync/portable'
 
 export const LOCAL_REPOSITORY_ENV_FLAG = 'QQPET_LOCAL_REPOSITORY_V2'
@@ -66,7 +66,7 @@ export interface LocalPetProjection {
 
 export interface LocalCommandResult {
   outcome: RuntimeOutcome
-  events: OrderedDomainEvent[]
+  events: LocalEventHistoryEntry[]
   projection: LocalPetProjection | null
   duplicate: boolean
 }
@@ -152,7 +152,15 @@ export function normalizeLocalPetDocument(raw: unknown): LoadedDocument {
   const idempotency = document.idempotency === undefined ? emptyOpIdCache() : migrateOpIdCache(document.idempotency)
   validateOpIdCache(idempotency)
   validatePersistedRuntimeState({ schemaVersion: 2, engine: document.bundle.engine, idempotency })
-  return { document: { ...document, idempotency }, idempotency }
+  const eventHistory = document.eventHistory?.map(event => ({
+    ...event,
+    revision: event.revision ?? document.revision,
+    gameTimeMs: event.gameTimeMs ?? document.bundle.engine.gameTimeMs,
+  }))
+  return {
+    document: { ...document, idempotency, ...(eventHistory === undefined ? {} : { eventHistory }) },
+    idempotency,
+  }
 }
 
 export interface LocalRepositoryActivation {
@@ -183,7 +191,7 @@ export class LocalRepository {
   private schedulerTimer: (() => void) | undefined
   private queue: Promise<void> = Promise.resolve()
   private lastProjectionValue: LocalPetProjection | null = null
-  private events: OrderedDomainEvent[] = []
+  private events: LocalEventHistoryEntry[] = []
   private lastReopenValue: CoverageReopen | undefined
   private stopped = false
   private appInstanceId = ''
@@ -241,7 +249,7 @@ export class LocalRepository {
   }
   getProjection(): LocalPetProjection | null { return this.lastProjectionValue === null ? null : cloneProjection(this.lastProjectionValue) }
   getDocument(): LocalPetDocumentV2 | null { return this.localDocument === null ? null : JSON.parse(JSON.stringify(this.localDocument)) as LocalPetDocumentV2 }
-  getRecentEvents(): OrderedDomainEvent[] { return JSON.parse(JSON.stringify(this.events)) as OrderedDomainEvent[] }
+  getRecentEvents(): LocalEventHistoryEntry[] { return JSON.parse(JSON.stringify(this.events)) as LocalEventHistoryEntry[] }
 
   async load(): Promise<LocalPetProjection | null> {
     if (this.loaded) return this.getProjection()
@@ -250,7 +258,14 @@ export class LocalRepository {
       this.localDocument = loaded.document
       this.idempotency = loaded.idempotency
       this.localDeviceIdValue = loaded.document.device.localDeviceId
-      this.events = (loaded.document.eventHistory ?? []).filter(event => event.eventSeq <= loaded.document.eventSeq).slice(-512)
+      this.events = (loaded.document.eventHistory ?? [])
+        .filter(event => event.eventSeq <= loaded.document.eventSeq)
+        .map(event => ({
+          ...event,
+          revision: event.revision ?? loaded.document.revision,
+          gameTimeMs: event.gameTimeMs ?? loaded.document.bundle.engine.gameTimeMs,
+        }))
+        .slice(-512)
       this.loaded = true
       if (loaded.document.authority.state !== 'active' || loaded.document.authority.stamp.owner !== 'local') {
         if (loaded.document.authority.state === 'handoff_pending') this.detachRollback = this.loadDetachRollback()
@@ -414,6 +429,9 @@ export class LocalRepository {
       if (this.detachRollback === null) this.detachRollback = this.loadDetachRollback()
       if (this.detachRollback === null) return this.getProjection()
       const restored = cloneDocument(this.detachRollback)
+      if (restored.authority.state !== 'active' || restored.authority.stamp.owner !== 'local') {
+        throw new Error('authority_not_active: rollback snapshot did not restore a local active authority')
+      }
       this.persistCandidate(restored)
       this.localDocument = restored
       this.idempotency = restored.idempotency ?? this.idempotency
@@ -433,6 +451,8 @@ export class LocalRepository {
     return this.enqueue(async () => {
       if (this.localDocument === null || this.state === 'stopped' || this.state === 'loading') throw new Error('local repository is not active')
       if (this.findCached(opId)) return this.getProjection()
+      const priorState = this.state
+      const activeBefore = this.localDocument.authority.state === 'active' && this.localDocument.authority.stamp.owner === 'local'
       try {
         const parsed = typeof value === 'string' ? JSON.parse(value) as unknown : value
         const bundle = migratePortablePetBundle(parsed)
@@ -497,7 +517,11 @@ export class LocalRepository {
         return this.getProjection()
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error)
-        this.state = 'read_only'
+        const stillActive = this.localDocument !== null
+          && this.localDocument.authority.state === 'active'
+          && this.localDocument.authority.stamp.owner === 'local'
+        this.state = activeBefore && stillActive ? priorState : 'read_only'
+        if (this.state === 'read_only') this.stopScheduler()
         this.emitProjection()
         return null
       }
@@ -578,13 +602,21 @@ export class LocalRepository {
     if (result.duplicate) return { outcome: result.outcome, events: [], projection: this.getProjection(), duplicate: true }
     const accepted = result.outcome.ok
     const eventStart = candidate.eventSeq
-    const ordered = accepted ? result.outcome.events.map((event: DomainEvent, index: number) => orderedDomainEvent(eventStart + index + 1, event)) : []
-
     candidate.revision = accepted ? this.localDocument.revision + 1 : this.localDocument.revision
-    candidate.eventSeq = eventStart + (accepted ? ordered.length : 0)
     candidate.bundle.engine = result.document.engine
     candidate.bundle.shared = result.document.engine.save
     candidate.idempotency = result.document.idempotency
+    const commandSeq = candidate.idempotency.records.findIndex(record =>
+      record.petId === this.localDeviceIdValue && record.deviceId === this.localDeviceIdValue && record.opId === opId) + 1
+    const ordered: LocalEventHistoryEntry[] = accepted
+      ? result.outcome.events.map((event: DomainEvent, index: number) => ({
+          ...orderedDomainEvent(eventStart + index + 1, event),
+          revision: candidate.revision,
+          gameTimeMs: candidate.bundle.engine.gameTimeMs,
+          ...(commandSeq > 0 ? { commandSeq } : {}),
+        }))
+      : []
+    candidate.eventSeq = eventStart + ordered.length
     let openedCoverageId: string | undefined
     let reopenMarker: CoverageReopen | undefined
     if (mutation !== undefined && accepted) {
@@ -628,8 +660,14 @@ export class LocalRepository {
       const runtime = rawRecord.runtime as Record<string, unknown> | null
       const duplicateIdentity = runtime !== null && typeof runtime === 'object' && 'localDeviceId' in runtime
       const missingIdempotency = rawRecord.idempotency === undefined
-      if (duplicateIdentity || missingIdempotency) this.backup(this.options.documentBackupPath || documentPath + '.bak', documentPath)
-      if (duplicateIdentity || missingIdempotency) this.writeDocument(loaded.document)
+      const missingEventMetadata = Array.isArray(rawRecord.eventHistory) && rawRecord.eventHistory.some(event => {
+        const record = event as Record<string, unknown> | null
+        return record === null || typeof record !== 'object' || record.revision === undefined || record.gameTimeMs === undefined
+      })
+      if (duplicateIdentity || missingIdempotency || missingEventMetadata) {
+        this.backup(this.options.documentBackupPath || documentPath + '.bak', documentPath)
+        this.writeDocument(loaded.document)
+      }
       this.appInstanceId = this.options.appInstanceId || this.newUuid()
       loaded.document.runtime = { appInstanceId: this.appInstanceId, startedAtWallMs: this.now() }
       loaded.document.bundle.originLocalDeviceId = loaded.document.device.localDeviceId
@@ -753,10 +791,14 @@ export class LocalRepository {
       const ctx: RuntimeCommandContext = { gameTimeMs: current.gameTimeMs, environment: current.environment, activeClientCount: 1, sessionActive: true, actorDeviceId: null }
       const coverageAtWallMs = (from: number, to: number) => sessionActivityForInterval(candidate.bundle.engine.sessionCoverage, from, to)
       const outcome = advanceSchedulerChunk(current, ctx, target, { maxChunkTicks: this.options.maxChunkTicks, coverageAtWallMs })
-      const ordered = outcome.events.map((event: DomainEvent, index: number) => orderedDomainEvent(candidate.eventSeq + index + 1, event))
       candidate.bundle.engine = outcome.state
       candidate.bundle.shared = outcome.state.save
       if (outcome.ticks > 0) candidate.revision += 1
+      const ordered: LocalEventHistoryEntry[] = outcome.events.map((event: DomainEvent, index: number) => ({
+        ...orderedDomainEvent(candidate.eventSeq + index + 1, event),
+        revision: candidate.revision,
+        gameTimeMs: outcome.state.gameTimeMs,
+      }))
       candidate.eventSeq += ordered.length
       candidate.eventHistory = [...this.events, ...ordered].slice(-512)
       this.syncAuthorityOn(candidate, target)
