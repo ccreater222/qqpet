@@ -300,6 +300,16 @@ export interface GameSessionState {
   status: 'active' | 'settled' | 'abandoned' | 'expired'
   settledCommandSeq?: number
   rewardKey?: string
+  cancelReason?: string
+}
+
+export interface SessionCoverageInterval {
+  coverageId: string
+  deviceId: string
+  connectedAtWallMs: number
+  disconnectedAtWallMs?: number
+  lastHeartbeatWallMs: number
+  closeReason?: 'graceful' | 'socket_closed' | 'crash_repaired' | 'app_shutdown'
 }
 
 export interface EngineState {
@@ -315,6 +325,8 @@ export interface EngineState {
   scheduledJobs: ScheduledJob[]
   nextScheduledJobId: number
   gameSessions: GameSessionState[]
+  /** Historical connected intervals used to derive session-clock coverage during catch-up. */
+  sessionCoverage: SessionCoverageInterval[]
   /** Last daily boundary that actually ran, in the current timezone's day-key form. */
   lastProcessedDayBoundaryKey: string
   /** Next 06:00 boundary in current canonical game time; recomputed on timezone changes. */
@@ -331,9 +343,9 @@ export interface RuntimeContext {
   gameTimeMs: number
   /** Calendar/weather records already normalized and persisted by the host. */
   environment: EnvironmentInputs
-  /** Live server client count; must be forced to 0 for every historical catch-up tick. */
+  /** Server client count derived from persisted coverage for a historical tick, or live sockets for a live tick. */
   activeClientCount: number
-  /** True only for live ticks or an actively running local app; false for every catch-up tick. */
+  /** True when coverage/session count is positive for that tick; false for zero-client/closed intervals. */
   sessionActive: boolean
   /** Authenticated device for command execution; null for scheduler-only ticks. */
   actorDeviceId: string | null
@@ -443,7 +455,8 @@ Scheduler cadence:
 
 - `CATCHUP_CHUNK_TICKS = 1440` (one game day) by default.
 - Catch-up runs at most one chunk per event-loop turn, persists a SQLite transaction, yields, then continues. It must not block the process in an unbounded `for` loop.
-- The target wall time is fixed at the start of a catch-up run. Every historical minute in that run is advanced with `activeClientCount=0` and `sessionActive=false`, even if a client connects midway; late clients must not retroactively accrue online time or sign-in gift countdown. After reaching the target, set the live scheduler anchor to the target and use the actual current authenticated-session count for subsequent live ticks only.
+- The target wall time is fixed at the start of a catch-up run. For each historical minute, derive `activeClientCount`/`sessionActive` from persisted `session_coverage` intervals that overlap that minute's wall interval; open intervals are active, closed intervals are not. A client that connected before the stall therefore counts during the stall; a zero-client or closed-app interval does not. A client connecting midway contributes only from its actual `connectedAtWallMs` onward, never retroactively. After reaching the target, set the live scheduler anchor to the target and use actual current connected sessions for subsequent live ticks.
+- On graceful shutdown close open coverage intervals at the shutdown wall; on crash, repair them to `min(restartWall, lastHeartbeatWall + COVERAGE_CRASH_GRACE_MS)` with `closeReason='crash_repaired'`. If no heartbeat exists, use the last committed scheduler anchor. Coverage intervals are persisted with the canonical state and included in portable/local bundles.
 - With `advanceWhileEmpty=true`, server downtime is caught up on startup. With `false`, no catch-up is performed across a start with zero clients.
 - A crash before a transaction commits loses that chunk; the persisted anchor/game time remains the previous committed state, so recovery is idempotent. A crash after commit but before broadcast is recovered by snapshot/replay; no game step is applied twice.
 - The scheduler and command executor share one serialized per-pet queue. A command arriving during a tick batch waits until the batch commits; commands and ticks have a single total order. A command/detach/import transaction commits with `synchronous=FULL` before any success result or projection is broadcast.
@@ -506,6 +519,8 @@ export interface SharedSaveData extends Omit<SaveData, 'petInfo' | 'settings'> {
 }
 
 export interface DeviceLocalOverlay {
+  /** Stable local UUID; session provenance/rebinding only, never server command authority. */
+  localDeviceId: string
   petInfo: Pick<PetInfo, 'lastX' | 'lastY'>
   settings: Omit<Settings, keyof SharedSettings>
   /** Local-only presentation caches, e.g. community position, not canonical. */
@@ -536,6 +551,7 @@ All other settings are device-local. `chatCheat`/`cheatTab` remain local UI gate
 
 Device-local overlay:
 
+- `localDeviceId` — stable local UUID generated once and stored in `LocalPetDocumentV2.device`; used as local session actor provenance and for owner-approved handoff rebinding only, never as a server device/auth token or command-authority identity.
 - `petInfo.lastX`, `petInfo.lastY` — window position, never a command and never broadcast.
 - `settings.opacity`, `music`, `sound`, `faceClick`, `quiet`, `autoStart`, `hidden`, `hd`, `zoom`, `windowDirection`, `clip`, `watchApp`, `roam`, `lan`, `webhook`, `webhookPort`, `webhookToken`, `voice`, `memory`, `polish`, `search`, `searchBackend`, `searchKey`, `petBar`, `chatCheat`, `cheatTab`, `weatherCity`, `autoUpdate`, `updateCheckedAt`, `petDisplayId`, `aiUrl`, `aiKey`, `aiModel`.
 - Local presentation caches that do not affect canonical game rules, such as community walk position and generated narration/prose.
@@ -579,8 +595,12 @@ All authoritative engine state moves between local and server mode only through 
 ```ts
 export interface AuthorityStamp {
   owner: 'local' | 'server'
-  /** Monotonic across every local/server handoff. */
+  /** Stable lineage UUID; changes only when an operator performs authority reset/restore rollback. */
+  authorityId: string
+  /** Monotonic across every local/server handoff and restore reset. */
   epoch: number
+  /** Incremented only by an operator-approved restore/reset; carried in every stamp. */
+  restoreGeneration: number
   revision: number
   eventSeq: number
   handoffId: string
@@ -592,12 +612,14 @@ interface PortablePetBundleV1 {
   schemaVersion: 1
   exportedAtWallMs: number
   authority: AuthorityStamp
+  /** Present for local-origin bundles; provenance/rebinding only, never auth authority. */
+  originLocalDeviceId?: string
   shared: SharedSaveData
   engine: EngineState
 }
 ```
 
-`EngineState` must include: game time, scheduler anchor, RNG seed/state, scheduled jobs/deadlines, active game/diudiule/exam/island_quiz session records with `actorDeviceId` and closed payload/answer key, timezone, canonical weather location, `advanceWhileEmpty`, last-processed day-boundary key, next day-boundary time, and the per-day environment cache. Device-local settings, position, credentials, AI/search/webhook secrets, and local prose are not included. Active session tokens are opaque and device-bound; after import/detach they remain usable only by the matching originating device, otherwise they are marked abandoned/expired and cannot be rewarded. Exported bundles must be treated as sensitive pet data and never logged in full.
+`EngineState` must include: game time, scheduler anchor, RNG seed/state, scheduled jobs/deadlines, active game/diudiule/exam/island_quiz session records with `actorDeviceId` (local mode uses stable `localDeviceId`) and closed payload/answer key, persisted `sessionCoverage`, timezone, canonical weather location, `advanceWhileEmpty`, last-processed day-boundary key, next day-boundary time, and the per-day environment cache. Device-local settings, position, credentials, AI/search/webhook secrets, and local prose are not included. Active session tokens are opaque and device-bound; after import/detach they remain usable only by the matching originating device, otherwise they are marked abandoned/expired and cannot be rewarded. Exported bundles must be treated as sensitive pet data and never logged in full.
 
 ```ts
 interface LocalPetDocumentV2 {
@@ -634,20 +656,20 @@ interface RemoteProjectionCacheV2 {
 ```
 
 - Local-mode v2 and remote cache are separate formats; mode switches write the appropriate one and back up the old one.
-- `LocalPetDocumentV2.bundle.engine.gameSessions` serializes every active/settled game/exam/island-quiz session with `actorDeviceId`, closed payload, and answer key; `RuntimeContext.actorDeviceId` supplies the acting device for command grading. Answer keys are local/server state and must never be projected.
+- `LocalPetDocumentV2.bundle.engine.gameSessions` serializes every active/settled game/exam/island-quiz session with `actorDeviceId`, closed payload, and answer key; `RuntimeContext.actorDeviceId` supplies the acting device for command grading. `bundle.engine.sessionCoverage` persists local app-active intervals keyed by `device.localDeviceId` for catch-up session-clock derivation. Answer keys are local/server state and must never be projected.
 - Old bare `SaveData` and original `config.json` imports are normalized into a portable bundle through the migration adapter: preserve shared data where possible, seed deterministic new RNG when absent, reconstruct job/session/day-boundary state, assign a local authority stamp for migrated local data, and back up the original file. A legacy file without a valid authority stamp cannot be imported into an active server authority.
-- Local full closed-app progression: with local `advanceWhileEmpty=true` (default), the next launch runs the full shared runtime from the persisted scheduler anchor through the entire closed interval in bounded catch-up chunks. This advances hunger, growth, illness, random events, death, tasks, jobs, farm/fishing and other game-world effects, not merely task completion. This is an approved deliberate behavior change. Online-session counters/sign-in online-gift countdown do not accrue for the closed interval (`sessionActive=false`). A one-time migration/UX warning and catch-up progress status are required; commands remain unavailable until catch-up completes.
+- Local full closed-app progression: with local `advanceWhileEmpty=true` (default), the next launch runs the full shared runtime from the persisted scheduler anchor through the entire closed interval in bounded catch-up chunks. This advances hunger, growth, illness, random events, death, tasks, jobs, farm/fishing and other game-world effects, not merely task completion. This is an approved deliberate behavior change. Online-session counters/sign-in online-gift countdown accrue only from persisted local coverage; a fully closed interval has none, while an app stall that remained active has coverage. A one-time migration/UX warning and catch-up progress status are required; commands remain unavailable until catch-up completes.
 - With local `advanceWhileEmpty=false`, the next launch resets the scheduler anchor to now and does not backfill the closed interval; pending jobs remain pending and resume relative to game time.
 - Import anchor handling and no double catch-up:
-  - Default `allowClamp=false`. If `engine.lastSchedulerWallMs` is outside `[wallNow - MAX_IMPORT_ANCHOR_PAST_MS (48h), wallNow + MAX_IMPORT_FUTURE_SKEW_MS (5m)]`, reject the import with `anchor_out_of_bounds`; no authority change occurs.
+  - Default `allowClamp=false`. If `engine.lastSchedulerWallMs` is outside `[wallNow - MAX_IMPORT_ANCHOR_PAST_MS (48h), wallNow + MAX_IMPORT_FUTURE_SKEW_MS (5m)]`, reject the import with `anchor_out_of_bounds`; no authority change occurs. A future anchor within +5m is accepted: use `wallNow` as the effective start, preserve `gameTimeMs`/deadlines, set no `importClamped`/`clockSkippedMs`, and run no catch-up.
   - If owner explicitly passes `allowClamp=true`, realign deterministically instead of preserving a stale anchor:
     1. `clampedAnchor = clamp(imported.lastSchedulerWallMs, wallNow - 48h, wallNow + 5m)`.
     2. For an old anchor, `clockSkippedMs = clampedAnchor - imported.lastSchedulerWallMs` (positive); the effective start anchor is `clampedAnchor`. For a future anchor, `clockSkippedMs = wallNow - imported.lastSchedulerWallMs` (negative); the effective start anchor is `wallNow`.
-    3. Shift `gameTimeMs += clockSkippedMs` and use the effective start anchor as `lastSchedulerWallMs`; the day-key clock therefore advances/retreats with the game clock.
+    3. Shift `gameTimeMs += clockSkippedMs` and use the effective start anchor as `lastSchedulerWallMs`; shift every persisted game-time deadline/due field by the same signed `clockSkippedMs`, including `scheduled_jobs.due_at_game_ms`, `game_sessions.expires_at_game_ms`, and engine/legacy timers/due fields. Remaining game-time duration is preserved; no skipped deadline is settled, rewarded, expired, or replayed.
     4. Recompute `nextDailyBoundaryMs` and set `lastProcessedDayBoundaryKey` to the current day key in the imported timezone; do not replay skipped daily boundaries.
     5. Persist `importClamped=true` and signed `clockSkippedMs` in engine state/status/logs.
   - After realignment, at most one normal bounded catch-up runs toward the `wallNow` captured at import start (normally up to the allowed 48h window; a future-skew import starts at `wallNow` and runs none). If `advanceWhileEmpty=false`, freeze immediately and do not backfill. Do not replay the command/event log.
-  - Tests must cover a 7-day-old anchor, future skew, exact-boundary imports, `allowClamp=false` rejection, repeated import/restart, and no double catch-up/daily boundary after realignment.
+  - Tests must cover a 7-day-old anchor, future skew within/beyond +5m, exact-boundary imports, `allowClamp=false` rejection, active job/deadline shifts, active game-session/exam expiry shifts, repeated import/restart, and no skipped deadline settlement/replay/double catch-up/daily boundary.
 - Export produces a portable bundle by default; import accepts a portable bundle or migrates a legacy bare SaveData/config.json into one. The import UI must explicitly show whether engine state/RNG/schedule is preserved and must back up the destination before replacing.
 - No local save becomes canonical in server mode. The server-mode `save.json` is a read-only projection cache with local overlay, not a source of authority.
 
@@ -684,6 +706,25 @@ import type { Sex } from '../save'
 
 export type CommandRole = 'player' | 'owner'
 
+export type JsonValue =
+  | null | boolean | number | string
+  | JsonValue[]
+  | { [key: string]: JsonValue }
+
+/** Typed result shapes for commands whose data is consumed by the renderer. */
+export interface ResultDataMap {
+  'device.list': { devices: DeviceInfo[] }
+  'device.revoke': { deviceId: string; revokedAtMs: number }
+  'game.startSession': { sessionToken: string; gameId: string }
+  'diudiule.startSession': { sessionToken: string }
+  'exam.start': { sessionToken: string; questions: { questionId: string; prompt: string; options: string[] }[] }
+  'island.startQuiz': { sessionToken: string; options: string[] }
+  'admin.exportForDetach': { authority: AuthorityStamp; bundle: PortablePetBundleV1 }
+}
+
+export type ResultDataFor<K extends keyof CommandPayloadMap> =
+  K extends keyof ResultDataMap ? ResultDataMap[K] : JsonValue
+
 export interface CommandError {
   code:
     | 'invalid_payload'
@@ -702,6 +743,7 @@ export interface CommandError {
     | 'server_catching_up'
     | 'authority_not_active'
     | 'authority_fork_risk'
+    | 'authority_reset_required'
     | 'anchor_out_of_bounds'
     | 'internal'
   message: string
@@ -715,7 +757,7 @@ export type CommandResult =
       commandSeq: number
       revision: number
       eventSeq: number
-      result?: Record<string, unknown>
+      result?: JsonValue
     }
   | {
       status: 'rejected'
@@ -901,11 +943,11 @@ Fishing game state currently lives in TypeScript but uses module-level caches an
 | `server.setAdvanceWhileEmpty` | `{ enabled: boolean }` | New setting | Owner. |
 | `server.setTimeZone` | `{ timeZone: string }` | New setting | Owner; validate IANA zone, recompute next 06:00 boundary, skip already-passed boundaries in new zone, execute next boundary once. |
 | `server.setWeatherCity` | `{ city: string }` | New canonical weather setting | Owner; validate non-empty city, persist `weather_location`, invalidate future unpersisted forecasts, cache/fetch new normalized records. |
-| `device.list` | `{}` | `src/server/device-registry.ts`; auth/admin UI | Owner; return non-secret device metadata (deviceId/label/role/created/lastSeen/revoked), never token hashes/plaintext. |
-| `device.revoke` | `{ deviceId: string }` | `src/server/device-registry.ts`; CLI `revoke-device` | Owner; reject last active owner; persist `revoked_at_ms`; close all sockets for that device with code 4002; broadcast `deviceRevoked`; every later command/reconnect for it fails. |
-| `admin.importPortableBundle` | `{ bundle: PortablePetBundleV1; allowClamp?: boolean }` | `src/main/save.ts:78-83`; import/export UI | Owner; validates bundle/schema/authority stamp; default `allowClamp=false` rejects out-of-bounds anchors; explicit true realigns game/day-key clock, persists `clockSkippedMs`/`importClamped`, backs up, restores engine/RNG/jobs/sessions/environment, emits snapshot. |
-| `admin.exportForDetach` | `{}` | Mode handoff | Owner; atomically pauses scheduler, increments `authority_epoch`, marks server `archived`, captures a portable bundle with exact revision/eventSeq/epoch, returns bundle; no further canonical ticks/commands while archived. |
-| `admin.resumeServer` | `{ expectedEpoch: number; bundle: PortablePetBundleV1; allowClamp?: boolean }` | Mode handoff | Owner; validates local authority stamp/epoch and applies the same import/anchor policy, imports/restores bundle atomically, increments server authority epoch, marks server active, restarts scheduler. Reject stale/forking epochs. |
+| `device.list` | `{}` | `src/server/device-registry.ts`; auth/admin UI | Owner; return `{ devices: DeviceInfo[] }` with non-secret metadata (deviceId/label/role/created/lastSeen/revoked), never token hashes/plaintext. |
+| `device.revoke` | `{ deviceId: string }` | `src/server/device-registry.ts`; `qqpet-server ctl revoke-device` | Owner; reject last active owner; persist `revoked_at_ms`; close all sockets for that device with code 4002; broadcast `deviceRevoked`; every later command/reconnect for it fails. |
+| `admin.importPortableBundle` | `{ bundle: PortablePetBundleV1; allowClamp?: boolean; rebindLocalSessions?: boolean }` | `src/main/save.ts:78-83`; import/export UI | Owner; validates bundle/schema/authority stamp; default `allowClamp=false` rejects out-of-bounds anchors; explicit true realigns game/day-key clock and shifts all job/session deadlines by `clockSkippedMs`; `rebindLocalSessions=true` may rebind active local-actor sessions to the uploading owner device, otherwise they are cancelled with status/no reward; backs up, restores engine/RNG/jobs/sessions/environment, emits snapshot. |
+| `admin.exportForDetach` | `{}` | Mode handoff | Owner; atomically pauses scheduler, computes `nextEpoch=max(current,bundle)+1`, records it as `handoff_epoch`, leaves `epoch` at the source authority, marks server `archived`, captures a portable bundle with exact revision/eventSeq/epoch, returns bundle; no further canonical ticks/commands while archived. |
+| `admin.resumeServer` | `{ expectedEpoch: number; bundle: PortablePetBundleV1; allowClamp?: boolean; rebindLocalSessions?: boolean }` | Mode handoff | Owner; validates local authority stamp/epoch, applies the same import/anchor and actor-rebind policy, imports/restores bundle atomically, increments server authority epoch, marks server active, restarts scheduler. Reject stale/forking epochs. |
 | `admin.grantCheat` | `{ stat: 'yb' or 'growth' or 'mood' or 'hunger' or 'clean' or 'health'; amount: number }` | `src/renderer/ui/setup.ts:408-419`; `src/renderer/ui/chat.ts:104-120` | Owner; replaces direct client `addInfo`/`setInfo` cheats. |
 | `admin.grantRandomGoods` | `{ type: GoodType; quantity: number }` | `src/renderer/ui/setup.ts:177-181` | Owner; server RNG selects goods, validates quantity/caps, grants inventory/illustrated. |
 
@@ -994,6 +1036,7 @@ export interface QQPetApi {
 LocalRepository is a real authority, not a compatibility shim.
 
 - It embeds the same `PetRuntime`/command handlers as the server in Electron main.
+- It generates/loads a stable `localDeviceId` UUID from `LocalPetDocumentV2.device` and uses it as `RuntimeContext.actorDeviceId` for local game/exam/quiz sessions and as the coverage `deviceId`. This identity is provenance only and never grants server authority.
 - It owns a serialized command queue and a 60s game scheduler in main.
 - It persists one `LocalPetDocumentV2` atomically (`save.json` or a versioned successor with an explicit migration/backup). Every command/tick batch and scheduler anchor is committed before the projection is emitted; `flush()` closes the final write barrier on quit/pagehide.
 - A crash loses only the uncommitted candidate batch. On restart the local repository resumes from the last committed game time/RNG/jobs/anchor; enabled local advance runs full catch-up, disabled local advance resets the anchor without backfill.
@@ -1008,11 +1051,12 @@ Local scheduler policy:
 
 - While the Electron app is running, local runtime context has `sessionActive=true`, `activeClientCount=1`, so online-time and sign-in online-gift countdown accrue.
 - On app shutdown, no process exists. On next launch:
-  - if local `advanceWhileEmpty` is true (default, approved deliberate behavior), fast-forward the **full game-world runtime** from `lastSchedulerWallMs` to now using bounded catch-up chunks. Hunger, growth, illness, random events, death, tasks, jobs, travel, farm/fishing, and all other game-clock effects advance. `sessionActive=false`, so online-time and sign-in online-gift countdown do not accrue for the closed interval;
+  - if local `advanceWhileEmpty` is true (default, approved deliberate behavior), fast-forward the **full game-world runtime** from `lastSchedulerWallMs` to now using bounded catch-up chunks. Hunger, growth, illness, random events, death, tasks, jobs, travel, farm/fishing, and all other game-clock effects advance. `sessionActive` is derived from persisted local session coverage, so a fully closed interval does not accrue online-time/sign-in gift countdown while an active app stall does;
   - if false, reset the scheduler anchor to now and do not backfill the closed interval; pending jobs remain relative to game time.
-- During a large closed-interval catch-up, LocalRepository reports `catching_up`, serves the last cache read-only, yields between bounded chunks, and does not accept commands until the final projection/ready. Every historical tick uses `sessionActive=false`/`activeClientCount=0` through the captured closed-interval target, even if the renderer has loaded or the user has connected; only subsequent live ticks use `1`/`true`. First migration shows a one-time warning and progress; this is an explicit UX/performance change from the legacy task-only resume.
+- During a large closed-interval catch-up, LocalRepository reports `catching_up`, serves the last cache read-only, yields between bounded chunks, and does not accept commands until the final projection/ready. Local session coverage is persisted alongside the local document using the stable `localDeviceId`: app-active intervals are open/covered, app-closed intervals are closed/uncovered, and a crash repairs via heartbeat/grace. Historical ticks derive `activeClientCount`/`sessionActive` from that coverage, so an app stall while the process/UI was active may accrue session time, while a fully closed interval does not; clients/renderer loading midway count only from their actual coverage start. First migration shows a one-time warning and progress; this is an explicit UX/performance change from the legacy task-only resume.
 - `advanceWhileEmpty` in local mode is a local-document setting, default `true`; it has the same meaning as the server setting, adapted to “app not running” instead of “zero server clients.”
 - Local mode remains fully offline and never depends on a server to initialize RNG, clock, or schema.
+- On a local→server handoff, the server may rebind active local sessions from `originLocalDeviceId` to the uploading paired server device only when the owner passes `rebindLocalSessions=true` and the epoch/revision/authority stamps validate; otherwise those sessions are cancelled atomically with status/reason and no reward. The UI must report the rebind/cancel result.
 
 ### 8.3 RemoteRepository
 
@@ -1068,7 +1112,7 @@ Rules for temporary coexistence:
 
 - Android, HarmonyOS, and iOS local mode migrate to the same shared runtime. Their TypeScript bridges (`src/android/bridge.ts`, `src/harmony/bridge.ts`, `src/ios/bridge.ts`) host `LocalRepository` and the 60s local scheduler, using native file read/write for the versioned local document.
 - The bridge exposes the same preload-compatible `load/command/flush/onProjection/onCommandResult/onSyncStatus` contract to the shared renderer. There is no mobile alternate rule set and no gameplay rule loop in the renderer.
-- Mobile `sessionActive=true` while the bridge scheduler is running as the active local app/service; if the OS suspends/kills the process, no ticks run. On next process start, local `advanceWhileEmpty=true` performs the same full closed-interval catch-up as desktop, with `sessionActive=false` for the suspended interval; false freezes/no-backfills.
+- Mobile `sessionActive=true` while the bridge scheduler is running as the active local app/service; if the OS suspends/kills the process, no ticks run. On next process start, local `advanceWhileEmpty=true` performs the same full covered-interval catch-up as desktop; `sessionActive` comes from persisted local coverage (closed/suspended intervals false, connected stalls true), and false freezes/no-backfills.
 - Mobile UI hides server mode entirely. Mobile capabilities explicitly report `serverMode: false`; pairing/WSS/RemoteRepository are not bundled into mobile builds in this phase.
 - Mobile persistence uses the same `PortablePetBundleV1`/`LocalPetDocumentV2` schema through native bridge methods. The bridge must preserve corrupt-file backups and migrate legacy bare save data before starting the runtime.
 - `tsconfig.web.json`, `tsconfig.harmony.json`, the Vite Android/Harmony/iOS builds, and mobile bridge tests must compile/run the shared runtime and command/projection contract. Server-mode code must be tree-shaken or type-gated out of mobile builds.
@@ -1078,37 +1122,42 @@ Rules for temporary coexistence:
 
 Mode switches are owner-only explicit authority transfers. A source authority must be fenced before any destination can start.
 
-Authority stamp fields: `owner` (`local`/`server`), monotonic `epoch`, `revision`, `eventSeq`, `handoffId`, and `detachedAtWallMs`. Epochs are comparable only within the history of one pet and increase on every transfer.
+Authority stamp fields: `owner` (`local`/`server`), stable lineage `authorityId`, monotonic `epoch`, `restoreGeneration`, `revision`, `eventSeq`, `handoffId`, and `detachedAtWallMs`.
+
+**Global epoch invariant:** every authority handoff computes `nextEpoch = max(currentAuthority.epoch, incomingBundle.authority.epoch) + 1`. The destination persists and serves `nextEpoch`; it never derives the new epoch from a fixed side or reuses an old epoch. `admin.exportForDetach` computes the destination epoch from the server's current stamp; `admin.importPortableBundle` and `admin.resumeServer` use the incoming local bundle's stamp in the formula; local freeze/detach import/export paths use the same formula. A stale/forked bundle is rejected before it can become active, but even rejection-recovery must not reuse an epoch that was already issued.
+An incoming bundle is stale if its epoch is lower than the destination's current known authority epoch, or if its `authorityId`/`restoreGeneration` do not match the expected lineage (except for an operator reset); it is rejected before state import. Equal epochs are accepted only for the exact archived handoff being resumed.
 
 #### Server → local detach
 
 1. Owner calls `admin.exportForDetach` over WSS (or the admin UI's equivalent).
 2. In one serialized transaction, the server:
    - pauses its scheduler and rejects new canonical commands;
-   - increments `pet_authority.epoch`;
-   - sets `owner='local'`, `state='archived'`, `handoff_id`, `detached_at_ms`, `source_revision`, `source_event_seq`;
-   - captures a `PortablePetBundleV1` whose `authority` is `owner='server'` and matches that epoch/revision/eventSeq;
+   - computes `nextEpoch = max(currentAuthority.epoch, bundle.authority.epoch) + 1` (for detach these are the same source epoch);
+   - leaves `pet_authority.epoch` at the source server epoch, records `handoff_epoch=nextEpoch`, sets `owner='local'`, `state='archived'`, `handoff_id`, `detached_at_ms`, `source_revision`, `source_event_seq`, while preserving `authority_id`/`restore_generation`;
+   - captures a `PortablePetBundleV1` whose `authority` is `owner='server'`, matches the source epoch/revision/eventSeq, and carries the same `authorityId`/`restoreGeneration`;
    - commits before sending the bundle.
 3. Server sends a `portableBundle` message/result. Normal projections stop; commands return `authority_not_active`. The server must not advance while archived.
-4. The destination LocalRepository validates `authority.owner='server'`, the exact server epoch, revision, eventSeq, and bundle schema before it writes `LocalPetDocumentV2`. It writes `authority.state='active'`, stamps `owner='local'` with epoch `serverEpoch + 1`, and only then starts the local scheduler.
+4. The destination LocalRepository validates `authority.owner='server'`, the exact server epoch, revision, eventSeq, and bundle schema before it writes `LocalPetDocumentV2`. It writes `authority.state='active'`, stamps `owner='local'` with the formula's `nextEpoch`, preserves `authorityId`/`restoreGeneration`, and only then starts the local scheduler.
 5. If import fails or is interrupted, the destination remains non-authoritative/read-only. The server remains archived. No dual authority exists.
-6. Owner `admin.resumeServer` later reactivates only by accepting a portable bundle from the current local authority (see local→server flow), validating that the local stamp is newer than the archived epoch, importing it atomically, incrementing `pet_authority.epoch`, and marking the server active. A stale/forked epoch is rejected with `authority_fork_risk`.
+6. Owner `admin.resumeServer` later reactivates only by accepting a portable bundle from the current local authority (see local→server flow). It computes `nextEpoch = max(current archived authority epoch, incoming local bundle.authority.epoch) + 1`; the incoming local bundle epoch is authoritative for the formula, not the old server epoch. It validates `authorityId`/`restoreGeneration` continuity, imports atomically, persists `nextEpoch`, and marks the server active. Stale/forked bundles are rejected with `authority_fork_risk`; an issued epoch is never reused.
 7. An archived server may re-send the original detach bundle idempotently to the same owner when no newer authority has been recorded; it must not create a second epoch/bundle for the same handoff.
 
 #### Local → server handoff
 
 1. LocalRepository enters `handoff_pending`: freezes its scheduler, stops accepting commands, and writes the pending state atomically.
-2. It increments the local authority epoch and captures a `PortablePetBundleV1` with `authority.owner='local'`, local epoch, exact revision/eventSeq, and handoffId. No local tick occurs after capture.
-3. Owner uploads `admin.importPortableBundle` (or `admin.resumeServer` when the server is archived). The server first pauses its own scheduler and marks the destination quiescent, then validates source owner/epoch/revision/eventSeq and the bundle schema; in one transaction it imports the bundle, increments `pet_authority.epoch`, marks `owner='server'`, `state='active'`, and only then starts its scheduler. Local stays frozen until the applied result.
+2. It increments the local authority epoch and captures a `PortablePetBundleV1` with `authority.owner='local'`, local epoch, exact revision/eventSeq, handoffId, and `originLocalDeviceId=LocalPetDocumentV2.device.localDeviceId`. No local tick occurs after capture.
+3. Owner uploads `admin.importPortableBundle` (or `admin.resumeServer` when the server is archived). The server first pauses its own scheduler and marks the destination quiescent, then validates source authorityId/restoreGeneration/owner/epoch/revision/eventSeq and the bundle schema. It computes `nextEpoch = max(current authority epoch, incoming bundle.authority.epoch) + 1`; in one transaction it imports the bundle (including `sessionCoverage`/active sessions), persists `nextEpoch`, marks `owner='server'`, `state='active'`, and only then starts its scheduler. Local stays frozen until the applied result.
+   If the owner supplies `rebindLocalSessions=true` and the bundle's `originLocalDeviceId` matches active sessions' `actorDeviceId`, those sessions are atomically rebound to the authenticated uploading server `deviceId`; after the rebind decision, every active session whose actor is not the authenticated uploading device is cancelled deterministically with `status='abandoned'`, `cancelReason='actor_rebind_failed'`, no reward, and an ordered status event. Rebinding is provenance-only; `localDeviceId` never grants server command authority.
 4. On applied result, local writes its document `authority.state='archived'` and never ticks again until a future detach.
 5. If the server rejects or returns `not_applied`, local restores `authority.state='active'` with the same epoch and unfreezes. If the result is uncertain after a disconnect, local remains frozen and queries `commandStatus`; it may roll back only after a definitive rejection/not_applied, never on an unknown outcome.
 6. An import crash before the server transaction commits leaves the local authority frozen and the server unchanged. A crash after commit but before ack leaves the server active; local reconciliation sees the applied command and archives itself. There is never a window where both sides can mutate.
 
 Protocol/DB support:
 
-- `pet_authority` persists epoch/owner/state/handoff/revision/eventSeq; `admin.exportForDetach` and `admin.resumeServer` are owner commands.
+- `pet_authority` persists `authority_id`, `restore_generation`, epoch/handoff_epoch/owner/state/handoff/revision/eventSeq; `admin.exportForDetach` and `admin.resumeServer` are owner commands. Every handoff path applies the global `nextEpoch` formula and requires the incoming stamp to carry the same `authority_id`/`restore_generation` unless an operator reset changed them.
 - `PortablePetBundleV1.authority` and `LocalPetDocumentV2.authority` are mandatory; missing/mismatched stamps reject the import. After validation, the destination rewrites the stored active bundle's `authority` to its own current stamp and keeps the source stamp in handoff audit metadata only; `bundle.authority` must match `LocalPetDocumentV2.authority.stamp` whenever local authority is active.
 - `Welcome`/`Ready`/`Projection` include `authority: { owner, epoch, state }` so clients can detect a non-active archive or stale epoch.
+- Only owner-role sessions may receive `PortableBundleMessage`/archived detach/export bundles. Player sessions receive authority status only and `authority_not_active`; they never receive bundle bytes, answer keys, session tokens, RNG state, schedules, or engine internals.
 - While archived, authenticated clients may connect only to read authority status, receive the archived detach bundle, or issue owner `admin.resumeServer`; all normal gameplay commands return `authority_not_active`. Handoff commands are owner-only and serialized with the runtime queue.
 - The server counts only active non-archived sessions for `activeClientCount`; the archive transition freezes scheduling before any further tick.
 
@@ -1135,10 +1184,10 @@ The server is the only authority in server mode:
 - The process must remain running for `advanceWhileEmpty=true` to advance while zero clients; server downtime is recovered by catch-up on restart when the setting is enabled.
 - On startup:
   1. Open SQLite, verify migrations, integrity/quick-check.
-  2. Load pet canonical state, engine state, RNG, per-day environment/weather cache, day-boundary keys, `pet_settings`, pending scheduled jobs, and game/exam sessions.
+  2. Load pet canonical state, engine state, RNG, per-day environment/weather cache, day-boundary keys, `pet_settings`, pending scheduled jobs, game/exam sessions, and `session_coverage`; repair any interval left open by a crash using heartbeat/grace before scheduling.
   3. Validate state/schema/RNG/jobs consistency; fail closed on corruption.
   4. Mark `catchingUp` or `ready`.
-  5. If `pet_authority.state='archived'`, do not schedule or accept canonical commands until `admin.resumeServer`; otherwise if `advanceWhileEmpty=true`, schedule bounded catch-up from persisted `lastSchedulerWallMs`; if false and zero clients, freeze and reset the scheduler anchor to now (no backfill).
+  5. If `pet_authority.state='archived'`, do not schedule or accept canonical commands until `admin.resumeServer`; if `state='reset'`, serve only authority-reset/full-snapshot handshakes and do not schedule or accept commands; otherwise if `advanceWhileEmpty=true`, schedule bounded catch-up from persisted `lastSchedulerWallMs`; if false and zero clients, freeze and reset the scheduler anchor to now (no backfill).
   6. Rebuild in-memory scheduling queue from persisted jobs; no client may submit commands until ready.
 - On SIGTERM/SIGINT: stop accepting commands, flush current transaction, checkpoint WAL if possible, close DB, close sockets, exit.
 
@@ -1179,9 +1228,12 @@ CREATE TABLE pet_settings (
 
 CREATE TABLE pet_authority (
   pet_id TEXT PRIMARY KEY REFERENCES pets(id) ON DELETE CASCADE,
+  authority_id TEXT NOT NULL,
+  restore_generation INTEGER NOT NULL,
   epoch INTEGER NOT NULL,
+  handoff_epoch INTEGER,
   owner TEXT NOT NULL CHECK (owner IN ('server', 'local')),
-  state TEXT NOT NULL CHECK (state IN ('active', 'archived')),
+  state TEXT NOT NULL CHECK (state IN ('active', 'archived', 'reset')),
   handoff_id TEXT NOT NULL,
   detached_at_ms INTEGER,
   source_revision INTEGER,
@@ -1213,9 +1265,22 @@ CREATE TABLE game_sessions (
   status TEXT NOT NULL CHECK (status IN ('active', 'settled', 'abandoned', 'expired')),
   settled_command_seq INTEGER,
   reward_key TEXT,
+  cancel_reason TEXT,
   PRIMARY KEY (pet_id, session_token)
 );
 CREATE INDEX game_sessions_open ON game_sessions(pet_id, status, expires_at_game_ms);
+
+CREATE TABLE session_coverage (
+  pet_id TEXT NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
+  coverage_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  connected_at_ms INTEGER NOT NULL,
+  disconnected_at_ms INTEGER,
+  last_heartbeat_at_ms INTEGER NOT NULL,
+  close_reason TEXT CHECK (close_reason IN ('graceful', 'socket_closed', 'crash_repaired', 'app_shutdown')),
+  PRIMARY KEY (pet_id, coverage_id)
+);
+CREATE INDEX session_coverage_time ON session_coverage(pet_id, connected_at_ms, disconnected_at_ms);
 
 CREATE TABLE commands (
   pet_id TEXT NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
@@ -1277,7 +1342,8 @@ CREATE TABLE pairing_codes (
 - `scheduled_jobs` and `game_sessions` are canonical lifecycle tables; runtime structs and rows are updated in the same transaction. There is no second unpersisted timer/session source after commit. On load, the host assembles `EngineState` from `save_json` + `engine_json` + `game_time_ms` + `scheduled_jobs` + `game_sessions` + `pet_settings.time_zone`/`advanceWhileEmpty`.
 - Game/exam/island-quiz session tokens are server-issued, high-entropy, one-use, device-bound (`actor_device_id`), and expire in game time. Their `payload_json` is a closed union (`game`, `diudiule`, `exam`, `island_quiz`); exam/quiz answer keys live only in the server payload and are never projected/logged. A settled/expired/abandoned token can never be rewarded. Session rows are included in portable bundles and restored on import; imported sessions with a mismatched actor/device or expiry are marked abandoned/expired.
 - `advance_while_empty` and `time_zone` are server settings, not gameplay fields. `time_zone` is validated as IANA and persisted at pet initialization.
-- `pet_authority` is the canonical authority gate. `epoch` increases on every server→local/local→server handoff; while `state='archived'` the scheduler is paused and normal commands are rejected. `admin.exportForDetach`/`admin.resumeServer` and `admin.importPortableBundle` update authority and canonical state in one transaction; no committed handoff may create two active authorities.
+- `session_coverage` records every authenticated connection interval. Graceful closes set `disconnected_at_ms`; startup repairs open crash intervals to `min(restartWall, last_heartbeat_at_ms + COVERAGE_CRASH_GRACE_MS)` with `close_reason='crash_repaired'`. Catch-up derives session-clock context by interval overlap, never by the current live socket count.
+- `pet_authority` is the canonical authority gate. `epoch` is the last active/source authority and `handoff_epoch` is the next issued epoch; while `state='archived'` or `state='reset'` the scheduler is paused and normal commands are rejected. `admin.exportForDetach`/`admin.resumeServer` and `admin.importPortableBundle` update authority and canonical state in one transaction; no committed handoff may create two active authorities.
 - A command row exists for every accepted/rejected command; its unique `(pet_id, device_id, op_id)` is the idempotency boundary. `commandStatus` is scoped to the authenticated device.
 - A duplicate `op_id` from the same device returns the stored result and performs no state/engine/event mutation. Cross-device `op_id` reuse is not accepted as a lookup key.
 - `BEGIN IMMEDIATE` wraps each command/tick batch. Snapshot, engine state, jobs, command row, and event rows commit atomically. Broadcast occurs only after commit.
@@ -1288,7 +1354,7 @@ CREATE TABLE pairing_codes (
 
 Already specified in §5.6–5.7. Server integration specifics:
 
-- Scheduler polls every 1s; runtime ticks are whole 60,000ms game minutes. For a live tick, supply `activeClientCount = authenticatedSessionCount` and `sessionActive = count > 0`. For **every tick in a catch-up batch**, supply `activeClientCount=0`, `sessionActive=false` until the captured catch-up target is reached, regardless of clients connecting midway; only ticks after the target use the actual live count. With zero clients and `advanceWhileEmpty=true`, world effects advance but online-session counters/sign-in gift countdown do not. During local closed-interval catch-up, keep `activeClientCount=0`, `sessionActive=false` for the whole closed interval; while the local app is running afterward, they are `1`/`true`.
+- Scheduler polls every 1s; runtime ticks are whole 60,000ms game minutes. For a live tick, supply the actual current authenticated-session count. For each historical catch-up tick, compute `activeClientCount` from persisted session coverage that overlaps that tick's wall interval, or `0` when there is no coverage. `sessionActive` is `activeClientCount > 0`; a connected stall is therefore true, while zero-client/restart/closed-app intervals are false. Late clients count only from their actual connection time, not retroactively. Only after the captured target do live ticks use actual current sessions.
 - On session count transitioning to zero with `advanceWhileEmpty=false`: persist `lastSchedulerWallMs = wallNow`, stop advance, leave jobs pending.
 - On first session after an empty/frozen interval with false: persist anchor `lastSchedulerWallMs = wallNow`, do not run missed ticks.
 - With true: continue ticks independent of session count. On restart, catch up from persisted anchor to current wall time.
@@ -1306,12 +1372,23 @@ Already specified in §5.6–5.7. Server integration specifics:
 - On `advanceWhileEmpty=true`, a restored older backup will be caught up to current wall time only if the setting says so; this is intentional and must be documented.
 - Do not copy a live DB+WAL pair manually; use the SQLite backup API. Keep `synchronous=FULL`; never downgrade canonical writes to NORMAL for latency.
 
+#### Restore rollback and authority reset
+
+- `pet_authority` stores stable `authority_id` (UUID) and `restore_generation` alongside epoch/owner/state. A normal handoff preserves both; a backup restore that rolls authority backward must mint a new `authority_id`.
+- On every startup the server compares the DB's `restore_generation`/`authority_id` with the external generation record. If the DB was restored from an older backup (generation lower than recorded), it must not serve clients or advance the scheduler until the operator runs the approved reset.
+- The operator-only restore command is `qqpet-server restore --from <backup> --accept-rollback [--restore-generation <n>] --owner-admin-credential <file>`. It requires filesystem access to the server data and an owner admin credential; normal players/owners over the game WSS cannot call it. If `--restore-generation` is omitted, the CLI increments the externally recorded generation file (for example `server-state/authority-generation.json`, separately backed up/recorded by the operator); a supplied value must be strictly greater than the recorded generation.
+- The command replaces the DB from a verified backup, mints a new UUID, sets the approved `restore_generation`, sets `pet_authority.state='reset'`, increments/assigns a never-reused epoch, and fsyncs both the generation record and DB authority reset before serving. If the process crashes between the two writes, startup refuses to serve and requires the operator to rerun the reset; no stale authority may serve in the gap.
+- The restore closes all live sockets and clears the socket registry before listening. A stale socket/command carrying the pre-restore authority is rejected; a socket cannot override the reset.
+- On handshake, if `ClientHello.cachedAuthority` is present and its `authorityId` differs, `restore_generation` differs, or its epoch is newer than the server's restored epoch, the server sends `authorityResetRequired { authority: currentStamp, requireFullSnapshot: true }`. The client must discard its cached projection/authority, reconnect with no cached authority (or send `resync {discardCachedAuthority:true}`), and accept a full snapshot. It must not remain indefinitely read-only.
+- While `pet_authority.state='reset'`, all clients receive the reset message/full snapshot path and no commands are accepted. The first successful reset full-snapshot handshake atomically transitions the authority to `active`; subsequent handshakes use normal epoch/snapshot rules. Repeated restore cycles mint new UUID/generation values and never reuse an old authority.
+
 ### 9.7 Observability
 
 Health/readiness should expose:
 
 - `ready` / `catchingUp`, `gameTimeMs`, `wallLagMs`, `revision`, `commandSeq`, `eventSeq`.
 - `advanceWhileEmpty`, `timeZone`, `nextTickAtMs`, pending scheduled job count/next due.
+- `authorityId`, `restoreGeneration`, authority state, open coverage interval count, and last coverage heartbeat.
 - active session count, DB writable/SQLite quick-check, command/event log size, last error.
 
 Metrics/logs:
@@ -1335,6 +1412,7 @@ Metrics/logs:
 - `requestId` correlates request/response; `opId` is the durable idempotency key for a command.
 - Events and projection frames are ordered by monotonic `eventSeq` and `revision`. Clients stop on a gap and request resync.
 - A full `SharedSaveData` snapshot is the projection unit. Whole-projection broadcast is safe here because the server is the sole writer and the snapshot is authoritative. Device overlay is applied in main, never sent to other clients.
+- Handshake authority check: if the client's cached `authorityId`/`restoreGeneration` differs from the server or its cached epoch is newer, send `authorityResetRequired` with the current authority stamp, discard the cache, and require a full snapshot; do not leave the client in a permanent read-only state. Archived/detach bundles are owner-only; players receive status/`authority_not_active` only.
 
 ### 10.2 TypeScript message shapes
 
@@ -1420,8 +1498,8 @@ export interface CommandPayloadMap {
   'device.list': Record<string, never>
   'device.revoke': { deviceId: string }
   'admin.exportForDetach': Record<string, never>
-  'admin.resumeServer': { expectedEpoch: number; bundle: PortablePetBundleV1; allowClamp?: boolean }
-  'admin.importPortableBundle': { bundle: PortablePetBundleV1; allowClamp?: boolean }
+  'admin.resumeServer': { expectedEpoch: number; bundle: PortablePetBundleV1; allowClamp?: boolean; rebindLocalSessions?: boolean }
+  'admin.importPortableBundle': { bundle: PortablePetBundleV1; allowClamp?: boolean; rebindLocalSessions?: boolean }
   'admin.grantCheat': { stat: CombatStat; amount: number }
   'admin.grantRandomGoods': { type: string; quantity: number }
 }
@@ -1440,6 +1518,8 @@ export interface ClientHello {
   lastRevision?: number
   lastEventSeq?: number
   appVersion: string
+  /** Client cache authority observed before this connection; used to detect restore rollback. */
+  cachedAuthority?: { authorityId: string; restoreGeneration: number; epoch: number }
   auth:
     | { kind: 'token'; token: string }
     | { kind: 'pairing'; code: string; deviceLabel: string }
@@ -1447,8 +1527,10 @@ export interface ClientHello {
 
 export interface WireAuthority {
   owner: 'server' | 'local'
+  authorityId: string
+  restoreGeneration: number
   epoch: number
-  state: 'active' | 'archived'
+  state: 'active' | 'archived' | 'reset'
 }
 
 export interface Welcome {
@@ -1548,7 +1630,7 @@ export interface WireCommandResult {
   commandSeq: number
   revision: number
   eventSeq: number
-  result?: Record<string, unknown>
+  result?: JsonValue
   error?: {
     code: string
     message: string
@@ -1556,7 +1638,7 @@ export interface WireCommandResult {
   }
 }
 
-/** `device.list` result data is DeviceInfo[]; `device.revoke` result is { deviceId, revokedAtMs }. */
+/** `device.list` result data is `{ devices: DeviceInfo[] }`; `device.revoke` result is `{ deviceId, revokedAtMs }`. */
 export interface DeviceInfo {
   deviceId: string
   label: string
@@ -1572,6 +1654,16 @@ export interface DeviceRevokedMessage {
   deviceId: string
   revokedAtMs: number
 }
+export interface AuthorityResetRequiredMessage {
+  t: 'authorityResetRequired'
+  code: 'authority_reset_required'
+  v: ProtocolVersion
+  requestId?: string
+  authority: AuthorityStamp
+  reason: 'restore_rollback' | 'authority_mismatch' | 'cache_newer'
+  requireFullSnapshot: true
+}
+
 
 export interface CommandStatusRequest {
   t: 'commandStatus'
@@ -1608,6 +1700,8 @@ export interface ResyncRequest {
   requestId: string
   lastRevision?: number
   lastEventSeq?: number
+  /** Client has discarded its cached authority/projection and needs a full reset snapshot. */
+  discardCachedAuthority?: boolean
 }
 
 export interface ErrorMessage {
@@ -1624,6 +1718,7 @@ export interface ErrorMessage {
     | 'server_catching_up'
     | 'authority_not_active'
     | 'authority_fork_risk'
+    | 'authority_reset_required'
     | 'anchor_out_of_bounds'
     | 'internal'
   message: string
@@ -1662,6 +1757,7 @@ export type ServerToClient =
   | CommandStatusResult
   | PortableBundleMessage
   | DeviceRevokedMessage
+  | AuthorityResetRequiredMessage
   | ErrorMessage
   | PongMessage
 ```
@@ -1754,8 +1850,10 @@ Malformed frames may be dropped or closed; oversized frames are closed with `400
 - A pairing request over WSS `hello` creates a device record and returns a per-device token once in `welcome.issuedToken`.
 - Device roles: `owner` and `player`. The first device is `owner`; the operator chooses the role for subsequent pairing codes. Only owner may issue admin/server-setting/import commands or revoke devices.
 - Device revocation is persisted and enforced on every command, not only at handshake. The server keeps an in-memory `deviceId -> Set<Connection>` socket registry populated on auth and cleaned on close.
+- On successful auth the server opens a `session_coverage` interval (`deviceId`, connectedAtWallMs, lastHeartbeatWallMs); heartbeat is persisted at least every 10s, graceful close/revocation sets disconnectedAtWallMs, and crash recovery repairs open intervals from heartbeat/grace. Live `activeClientCount` is recomputed from authenticated sockets; historical catch-up uses the persisted intervals.
 - Owner `device.list` returns non-secret metadata only. Owner `device.revoke {deviceId}` marks `revoked_at_ms` in a `synchronous=FULL` transaction (cannot revoke the last active owner), then atomically: removes the device from the auth registry, closes every live socket for that device with close code `4002 revoked`, broadcasts `deviceRevoked` to remaining authenticated sessions, and recomputes `activeClientCount`. If it was the last client and `advanceWhileEmpty=false`, the scheduler freezes without backfill.
 - A revoked live socket may never submit another command; commands already committed before the revocation remain committed, queued commands from that device are rejected/never dispatched, and reconnect/auth with that token fails. Every command handler rechecks the authenticated device row immediately before dispatch, even if a socket was authenticated earlier.
+- The running-server CLI path is `qqpet-server ctl revoke-device <id> --owner-admin-credential <file>`. It connects over a local 0600 admin socket or loopback-only admin WS channel, authenticates with the owner admin credential, and submits the same `device.revoke` control command so live sockets are closed and the broadcast is emitted; it must not write the DB directly. If the server is stopped, `qqpet-server revoke-device --offline --pet-id ... --device-id ...` may update `revoked_at_ms` under a DB lock, and startup must reject that device's token on its first handshake; the next running-server control path reconciles/notifies.
 - Device tokens contain at least 256 bits of randomness and are stored only as hashes server-side.
 - Pairing and auth errors are rate-limited and do not reveal whether a particular token/pet exists.
 
@@ -1773,6 +1871,7 @@ Malformed frames may be dropped or closed; oversized frames are closed with `400
 - Long-lived tokens/pairing codes never appear in URLs, query strings, paths, or HTTP headers. They travel only in the first WSS frame.
 - Server logs redact auth frames, command payloads, save bodies, and all AI/search/webhook credentials.
 - Server snapshots/commands/events contain no device settings or secrets: no `aiKey`, `searchKey`, `webhookToken`, token values, pairing codes, window position, zoom, or display IDs.
+- Archived detach/export bundles include engine internals and are owner-only WSS payloads; never log or expose them through HTTP/health/projection/player sockets.
 - TLS private keys live in the proxy/operator environment, never in the app or DB.
 - Rate/size limits from §10.5 are enforced before parsing large payloads where practical.
 
@@ -1814,12 +1913,15 @@ Provide server-package scripts:
 npm --prefix server run init -- --pet-id default [--time-zone Asia/Shanghai] [--weather-city 北京]
 npm --prefix server run pair -- --pet-id default --role player
 npm --prefix server run backup -- --pet-id default
-npm --prefix server run revoke-device -- --pet-id default --device-id <id>
+qqpet-server ctl revoke-device <device-id> --pet-id default --owner-admin-credential <file>
+qqpet-server revoke-device --offline --pet-id default --device-id <id>  # only when the server is stopped
+qqpet-server restore --from <backup> --accept-rollback [--restore-generation <n>] --owner-admin-credential <file>
 ```
 
 - `init` creates the canonical empty pet + empty engine state + pet settings and prints a one-time pairing code.
 - `pair` mints an owner/player pairing code; only a hash is stored.
 - `backup` invokes the same SQLite online backup path used by scheduled backups.
+- `restore --accept-rollback` is the only supported authority rollback path: it verifies the backup, mints a new authority UUID, advances the externally recorded restore generation, resets `pet_authority`, closes sockets, and requires clients to discard caches after `authorityResetRequired`.
 - No out-of-repo hosted service is required. Operators run the local package/container against their chosen WSS endpoint.
 
 ### 12.2 Configuration defaults
@@ -1829,6 +1931,9 @@ QQPET_SYNC_BIND=127.0.0.1
 QQPET_SYNC_PORT=8787
 QQPET_SYNC_DB=/var/lib/qqpet-sync/qqpet.sqlite
 QQPET_SYNC_BACKUP_DIR=/var/lib/qqpet-sync/backups
+QQPET_SYNC_RESTORE_GENERATION_FILE= # external operator-recorded restore-generation file (never inside DB backup)
+QQPET_ADMIN_SOCKET=                 # local owner-authenticated control socket path
+QQPET_OWNER_ADMIN_CREDENTIAL=       # owner admin credential file for ctl/restore approval; never logged
 QQPET_SYNC_TIME_ZONE=              # optional IANA zone; resolved host zone persisted per pet
 QQPET_SYNC_WEATHER_LOCATION=       # canonical server weather city; persisted per pet
 QQPET_SYNC_ADVANCE_WHILE_EMPTY=1   # initial pet setting; dynamic setting is persisted in DB
@@ -1866,7 +1971,7 @@ QQPET_SYNC_LOG_LEVEL=info
 - Run a scheduled SQLite online backup independent of command/event-log retention.
 - Keep daily backups plus pre-migration/pre-import backups; verify checksum/schema and store revision/gameTime metadata.
 - Restore procedure: stop service, replace DB from a consistent backup, start service, verify health/revision/schema, reconnect clients and let them snapshot.
-- Test restore in CI/ops smoke test.
+- Test restore in CI/ops smoke test. A restore that rolls authority backward must use `qqpet-server restore --accept-rollback` with > recorded restore generation; clients with newer cached authority receive `authorityResetRequired` and must discard cache before a full snapshot.
 - If `advanceWhileEmpty=true`, a restored older snapshot is caught up to current wall time after startup; if false and there are zero clients, it freezes until a client connects and does not backfill. This must be documented in the restore runbook.
 
 ## 13. Settings, storage UI, and mode switching
@@ -1913,7 +2018,7 @@ This pane is the only business-adjacent UI that knows backend details. The rest 
 ### 13.4 Local-mode behavior after migration
 
 - Local mode is still fully offline and runs the same deterministic runtime in Electron main (desktop) or the native bridge host (Android/Harmony/iOS).
-- Local `advanceWhileEmpty` defaults to `true`; while the app is closed/suspended, the next launch fast-forwards the full game world with the same bounded scheduler, including hunger, growth, illness, random events, death, tasks, jobs, and all other game-clock effects. `sessionActive=false` during the closed catch-up, so online-time/sign-in online-gift counters do not accrue. This is an approved deliberate behavior change from the old task-only resume.
+- Local `advanceWhileEmpty` defaults to `true`; while the app is closed/suspended, the next launch fast-forwards the full game world with the same bounded scheduler, including hunger, growth, illness, random events, death, tasks, jobs, and all other game-clock effects. `sessionActive` is derived from persisted local coverage; fully closed intervals do not accrue online-time/sign-in gift counters, while a connected app stall does. This is an approved deliberate behavior change from the old task-only resume.
 - The first migration/launch shows a one-time warning and catch-up progress; commands remain unavailable until catch-up completes. Large intervals are processed in bounded chunks and may take noticeable time; status/health must expose progress.
 - Setting `advanceWhileEmpty=false` freezes the closed interval and resumes without backfill.
 - Local save/import/export and corrupt-file recovery remain user-facing features, with a one-time format migration and backup.
@@ -1951,7 +2056,7 @@ This pane is the only business-adjacent UI that knows backend details. The rest 
 | Daily reset duplicate | Only direct day-boundary transition executes resets; `nextDailyBoundaryMs` is metadata, never a `ScheduledJob`; timezone recompute replaces metadata, not jobs. |
 | Unauthorized/revoked device | Reject auth/commands, rate-limit, never reveal token/pet details. Revocation closes all live sockets with 4002, broadcasts `deviceRevoked`, rejects queued commands, and fails reconnect. |
 | Server catching up | `welcome.catchingUp=true`; commands return `server_catching_up`; final snapshot/ready when caught up. |
-| Client connects mid-catch-up | Historical ticks remain `activeClientCount=0`/`sessionActive=false`; no retroactive online/gift accrual; only post-target live ticks use the new count. |
+| Client connects mid-catch-up | Historical ticks use persisted coverage; the new client counts only from its actual connect time, never retroactively. Connected-stall coverage counts; zero-client/closed intervals do not. |
 | Unknown/invalid command | Reject with `invalid_payload`/`not_available`; no partial state/RNG mutation; refresh projection if requested. |
 | Old local save format | One-time migration with backup; export/import compatibility; corrupt files preserved. |
 
@@ -1967,25 +2072,27 @@ The implementation is not accepted unless all of the following are demonstrated 
 6. **Restart determinism:** after a server restart with the same canonical state, RNG state, schedule, clock inputs, and environment inputs, applying the same command/tick sequence produces identical state and event sequence. Catch-up after a real restart advances exactly once.
 7. **No duplicate rewards:** a work/study/travel/task reward, feed item, or game reward is granted exactly once across lost responses, reconnects, and server restart; no reward is granted twice by catch-up.
 8. **No client canonical mutation:** the WebSocket protocol rejects/never accepts client SavePatch/tick/reward/state payloads; renderer direct `update()`/`setInfo()` on shared fields is removed or blocked. Tests that attempt the legacy path do not change server or LocalRepository canonical state.
-9. **No leaks:** `lastX/lastY`, display/UI settings, `aiKey`, `searchKey`, `webhookToken`, server tokens, pairing codes, and presentation prose are absent from server snapshots, command/event payloads, projections, logs, and backups intended for shared use.
+9. **No leaks:** `lastX/lastY`, display/UI settings, `aiKey`, `searchKey`, `webhookToken`, server tokens, pairing codes, presentation prose, archived engine bundles, RNG schedules, answer keys, and session tokens are absent from player-visible snapshots/projections/logs. Only owner-role archived/detach requests may receive the portable bundle.
 10. **Local-mode parity:** LocalRepository and the server, given the same initial state, seed, clock inputs, environment inputs, and command/tick sequence, produce the same semantic SharedSaveData and ordered events. Local mode remains fully offline.
 11. **Local migration:** old bare `save.json` and original `config.json` imports migrate with backups; corrupt-file backup, export/import, reset, and existing desktop behaviors remain usable.
 12. **Bootstrap/reset/adopt:** both-empty setup uses server canonical empty state + `pet.adopt`; reset is an explicit server command; no ambiguous payload-free bootstrap/admin path exists.
 13. **Backups:** a backup can be created and restored independently of command/event-log retention; health/schema/game state verification passes after restore.
 14. **Settings boundary:** shared settings are applied server-side; local/device settings and secrets never enter a command/log/projection. `advanceWhileEmpty` changes take effect exactly as specified.
 15. **Operational readiness:** health/readiness, WSS auth, rate/size limits, DB WAL/migrations, scheduler catch-up status, and logs/metrics work without exposing secrets or save contents.
-16. **Online-time split:** with `advanceWhileEmpty=true` and zero clients, world state advances but `onLineTime`, `onlineDataTime`, and the sign-in online-gift countdown do not. With at least one authenticated client, all three accrue only on live ticks. Local closed-app full catch-up uses the same split; clients connecting mid-catch-up do not retroactively accrue historical online time.
+16. **Online-time split:** with `advanceWhileEmpty=true` and zero clients, world state advances but `onLineTime`, `onlineDataTime`, and the sign-in online-gift countdown do not. With at least one authenticated client, all three accrue for live ticks and for covered historical intervals; zero-client/closed intervals do not. Local closed-app full catch-up uses the same coverage split; clients connecting mid-catch-up count only from their connect time, and fully closed intervals do not accrue.
 17. **Canonical weather model:** server mode uses the owner-configured weather city; weather is stored per game-day key with condition, temperatures (including `tomorrowMax`), provenance, and fetch time; missing days use deterministic seeded fallback; client `weatherCity` never appears in canonical data/projections/DB.
 18. **Game-session security:** `game`, `diudiule`, `exam`, and `island_quiz` sessions persist `actorDeviceId` plus a closed payload; exam/quiz answer keys are stored server-side and graded only for the originating device. Fabricated/replayed/wrong-device/expired/abandoned/kind-confused tokens and arbitrary reward amounts are rejected; task counter changes are exactly once.
-19. **Portable bundle round-trip:** export/import preserves shared SaveData, RNG, scheduled jobs/sessions, scheduler anchor, timezone/weather location/advance policy, day-boundary state, environment cache, and authority stamp. Default `allowClamp=false` rejects out-of-bounds anchors; explicit clamp realigns game/day-key clock, persists `clockSkippedMs`/`importClamped`, and no double catch-up occurs across import/restart/detach.
+19. **Portable bundle round-trip:** export/import preserves shared SaveData, RNG, scheduled jobs/sessions, scheduler anchor, timezone/weather location/advance policy, day-boundary state, environment cache, and authority stamp. Default `allowClamp=false` rejects out-of-bounds anchors; explicit clamp realigns game/day-key clock and shifts all job/session/timer deadlines by the same `clockSkippedMs`, preserving remaining duration without settling/replaying skipped deadlines; no double catch-up occurs across import/restart/detach.
 20. **Timezone change semantics:** eastward/westward and DST changes skip already-passed new-zone boundaries, schedule the next 06:00 exactly once, and do not double-run daily tasks, sign-in, mail, fish limits, or VIP settlement.
-21. **Mobile local runtime:** Android/Harmony/iOS local mode hosts the shared LocalRepository/runtime and command/projection contract, uses the same v2 portable document, hides server mode, and passes typecheck/build plus local/server parity tests. Mobile server mode is not exposed.
+21. **Mobile local runtime:** Android/Harmony/iOS local mode hosts the shared LocalRepository/runtime and command/projection contract, uses the same v2 portable document with stable `localDeviceId` and session coverage, hides server mode, and passes typecheck/build plus local/server parity tests. Mobile server mode is not exposed; localDeviceId never authorizes server commands.
 22. **Feature parity:** farm, fishing, island, small games, mail, sign-in, jobs, travel, and shop/inventory remain available in server mode; the command-coverage gate proves every canonical mutation has a handler, with no feature hidden by a storage-mode UI branch.
 23. **Local closed-period full progression:** with local `advanceWhileEmpty=true`, a full closed interval advances world effects (hunger, growth, illness, random events, death, tasks, jobs, farm/fishing) in bounded chunks, while online-session counters do not accrue; the UX exposes catch-up progress/readiness and legacy task-only behavior is intentionally removed.
-24. **Authority fencing:** server→local and local→server handoffs are owner-only, source-frozen/archived, epoch/revision-validated, and atomic. Crash/rollback tests prove no dual authority, no forked active epoch, and `admin.resumeServer` rejects stale authority.
-25. **Device revocation:** owner `device.list`/`device.revoke` work; revocation persists, closes all live sockets for the device, broadcasts `deviceRevoked`, rejects any queued/subsequent command, and fails reconnect auth.
+24. **Authority fencing:** server→local and local→server handoffs are owner-only, source-frozen/archived, authorityId/restoreGeneration/epoch/revision-validated, and atomic; player clients receive authority status only and never archived bundle contents. The global `nextEpoch=max(current,incoming)+1` invariant holds across a full server→local→server→local cycle; stale/forked bundles reject without epoch reuse; crash/rollback tests prove no dual authority.
+25. **Device revocation:** owner `device.list`/`device.revoke` work; running-server `qqpet-server ctl revoke-device` uses the owner-authenticated control path, while stopped-server revocation uses the documented offline DB path. Revocation persists, closes all live sockets, broadcasts `deviceRevoked`, rejects queued/subsequent commands, and fails reconnect auth.
 26. **Single daily executor:** 06:00 resets are processed only by the direct runtime day-boundary path and are never `ScheduledJob` rows; timezone changes update metadata directly and cannot double-run.
 27. **Durable commits:** canonical commits use WAL + `synchronous=FULL`; no command success or projection broadcast occurs before the FULL fsync transaction returns.
+28. **Restore authority reset:** backup restore into an older authority uses operator-only `restore --accept-rollback`, mints a new `authorityId`, advances externally recorded `restoreGeneration`, sets reset, closes stale sockets, and serves `authorityResetRequired` then a full snapshot. A client cache newer than the restored authority cannot remain read-only or override the reset; repeated restores never reuse authority/generation values.
+29. **Local session actor identity:** localDocuments persist a stable `localDeviceId`; local game/exam/quiz sessions use it only as provenance. On local→server handoff, owner-approved rebinding to the uploading server device or deterministic cancellation with status/no reward is demonstrated, and localDeviceId never grants server command authority.
 
 ## 16. Test matrix
 
@@ -2010,7 +2117,7 @@ The implementation is not accepted unless all of the following are demonstrated 
 - Catalog coverage test fails if a canonical `update`/`setInfo`/mutation remains outside the runtime.
 - Invalid payload, no pet/dead/paused/busy, insufficient funds/item, not available, cooldown, already claimed, unauthorized, catching-up.
 - Rejected commands consume no RNG and leave state/jobs/events unchanged.
-- Command result shape exactly matches protocol; duplicate opId returns original result.
+- Command result shape exactly matches protocol; `ResultDataMap`/`JsonValue` compile checks pass, `device.list` returns `{ devices: DeviceInfo[] }`, and duplicate opId returns original result.
 - Reset/adopt/bury/revive and both-empty bootstrap paths.
 - API guard: no client SavePatch/tick/reward fields accepted over WS.
 - Command-coverage static gate maps every canonical mutation call site (including mail delete, island quiz/options/talk/news, game/diudiule sessions, farm/fishing, SWF callbacks) to a command and migration group; no renderer/shared canonical mutation outside runtime is allowed.
@@ -2028,12 +2135,14 @@ The implementation is not accepted unless all of the following are demonstrated 
   - `advanceWhileEmpty=false`: zero clients freeze; reconnect no backfill; with clients active it advances and resumes;
   - server restart enabled: catch-up from anchor in bounded chunks;
   - server restart disabled: no empty catch-up;
-  - local closed-app catch-up runs full world effects with `sessionActive=false`, bounded chunks, and `catching_up` status;
+  - local closed-app catch-up derives `sessionActive` from local coverage (closed false, connected stall true), with bounded chunks and `catching_up` status;
   - process crash between chunks/transaction rollback no duplicate ticks/rewards;
   - commands rejected during catch-up; final snapshot/ready arrives.
-  - a client connecting mid-catch-up does not change historical `activeClientCount`/`sessionActive`; online counters remain unchanged for the catch-up interval and only live ticks accrue.
+  - a client connecting mid-catch-up affects coverage only from its actual connect time; pre-connect historical ticks remain uncovered, while a pre-existing connected-stall interval is covered;
+  - a server stall with an already-connected client produces covered catch-up minutes; a zero-client/restart interval produces uncovered minutes;
+  - a local app stall with persisted coverage accrues session time, while a fully closed app interval does not; crash-repair closes at heartbeat+grace and is deterministic.
 - Game/diudiule/exam/island_quiz session tests: actorDeviceId mismatch, fabricated/replayed/expired/abandoned tokens, kind confusion, exact stored exam/quiz question/options/answer-key grading, per-day cap, task-counter exactly-once, arbitrary reward field rejection, projection never leaks answer keys, timeout cancellation.
-- Portable import tests: 7-day-old anchor, future skew, exact boundary, default `allowClamp=false` rejection, explicit clamp clock realignment (`clockSkippedMs`/`importClamped`), one catch-up only, repeated import/restart, engine/RNG/session/authority/environment preservation.
+- Portable import tests: 7-day-old anchor, future skew within/beyond +5m, exact boundary, default `allowClamp=false` rejection, explicit clamp clock realignment (`clockSkippedMs`/`importClamped`), active job/deadline and game-session/exam-expiry shifts, no skipped deadline settlement/replay, one catch-up only, repeated import/restart, engine/RNG/session/authority/environment preservation.
 - No unbounded loop: cap per chunk; event-loop yields; health reports catch-up progress.
 - Event order and job ordering `(dueAtGameMs, jobId)` stable.
 
@@ -2041,11 +2150,14 @@ The implementation is not accepted unless all of the following are demonstrated 
 
 - SQLite migration from empty and prior schema; WAL + `synchronous=FULL` transaction atomicity/durability across state/RNG/jobs/sessions/commands/events; no success response or projection broadcast before the FULL fsync commit returns.
 - Unique opId/idempotency; commandStatus `applied`/`rejected`/`not_applied`; crash between commit and response; UI remains read-only until reconciliation.
-- Authority fencing tests: detach commit/bundle-loss, local import failure/restart, local handoff_pending, destination quiescence during import, server import ack loss, resume stale/forked epoch, no dual authority/fork.
-- Device revocation tests: `device.list` redaction, last-owner protection, live socket closure, `deviceRevoked` broadcast, queued command rejection, reconnect failure.
+- Authority fencing tests: detach commit/bundle-loss, local import failure/restart, local handoff_pending, destination quiescence during import, server import ack loss, full server→local→server→local cycle (epochs E→E+1→E+2→E+3), stale-lower/equal/forked bundle rejection, strict monotonic epochs with no reuse, and no dual authority/fork.
+- Local actor handoff tests: game/exam/island_quiz sessions created with `localDeviceId`; owner rebind to uploading server device succeeds only with valid authority/epochs; no-rebind/mismatch cancels deterministically with status/reason/no reward; localDeviceId never authorizes a server command.
+- Device revocation/result tests: `device.list` returns `{ devices: DeviceInfo[] }` with redaction, last-owner protection, live socket closure, `deviceRevoked` broadcast, queued command rejection, reconnect failure; `ctl revoke-device` uses the owner-authenticated control path, and offline revocation is rejected at startup.
 - SQLite `synchronous=FULL` durability assertion: kill/fault after commit response boundary must not lose committed canonical revision/epoch/session.
-- Portable bundle JSON round-trip preserves shared SaveData + engine state + authority stamp, including game_sessions actorDeviceId/closed payload/answer key; SQLite schema includes game_sessions/pet_authority/jobs/day-boundary/environment metadata; weather records and canonical weather city persist.
+- Restore/reset tests: startup detects an older DB restore from the external generation record and refuses service; client cache authorityId/restoreGeneration newer than restored server; `authorityResetRequired` + full-snapshot recovery; repeated restore with new UUID/generation; crash between generation-record and DB reset; stale socket command rejection; reconnect after reset.
+- Portable bundle JSON round-trip preserves shared SaveData + engine state + authority stamp, including game_sessions actorDeviceId/closed payload/answer key and sessionCoverage; SQLite schema includes game_sessions/pet_authority/session_coverage/jobs/day-boundary/environment metadata; weather records and canonical weather city persist.
 - Device pairing TTL/single-use/revocation/role enforcement; token hashes; no plaintext token in DB/log. `device.list` redaction and `device.revoke` last-owner protection.
+- Archived/detach bundle secrecy: player `exportBundle`/detach receives `authority_not_active`/status only, never bundle/answer keys/session tokens/RNG/schedules; owner receives the bundle over WSS only.
 - Revocation closes all live sockets with 4002, broadcasts `deviceRevoked`, rejects a command queued by the revoked device, and fails reconnect authentication.
 - Backup/restore independent of command/event retention; schema/game-time checks.
 - Projection/event sequence and resync after missed frames; replay retention and snapshot fallback.
@@ -2087,7 +2199,7 @@ The implementation is not accepted unless all of the following are demonstrated 
 ### 16.7 Local-mode regression/parity
 
 - LocalRepository same-runtime command sequence produces the same semantic state/events as server for fixed seed/clock/environment/session context, including weather/day keys, game sessions, and task counters.
-- Local app closed with advance true fast-forwards the full world on next launch, with online counters frozen and bounded catch-up status; false freezes/no backfill.
+- Local app closed with advance true fast-forwards the full world on next launch using persisted coverage (closed intervals false, app stalls covered) and bounded catch-up status; false freezes/no backfill.
 - Portable bundle export/import round-trip preserves RNG/schedules/sessions/anchor/day-boundary/environment/authority; local handoff_pending rolls back only after definitive rejection/not_applied.
 - Old bare save/config import migration, corrupt-file backup, export/import, reset.
 - Android/Harmony/iOS local bridge runtime parity, native v2-file persistence, server-mode hiding, and Vite/typecheck builds.
@@ -2118,14 +2230,14 @@ The implementation is intentionally too large for one change. This sequence is d
 ### C2 — Command catalog, protocol, portable bundle, data-boundary and environment schemas
 
 - Add complete `PetCommand`/payload map, command validation/error types, ordered event types, protocol message types/versioning.
-- Add `SharedSaveData`, `DeviceLocalOverlay`, `AuthorityStamp`, `PortablePetBundleV1`, closed game/exam/quiz session payloads, EngineState persistence fields (`importClamped`/`clockSkippedMs`, day keys), per-day weather records/day keys, allowlist/filter validators, schema versions.
+- Add `SharedSaveData`, `DeviceLocalOverlay` (`localDeviceId`), `AuthorityStamp` (`authorityId`/`restoreGeneration`), `PortablePetBundleV1`, `ResultDataMap`/`JsonValue`, closed game/exam/quiz session payloads, session coverage/local identity types, EngineState persistence fields (`importClamped`/`clockSkippedMs`, day keys), per-day weather records/day keys, allowlist/filter validators, schema versions.
 - Add tests for command payloads, shared/local boundaries, protocol shape, and secret exclusion.
 - No server or renderer behavior change.
 
 ### C3 — Runtime groups A–D, online/session-clock split, actor-bound game/exam/quiz sessions
 
 - Extract deterministic handlers and minute-step logic for core stats/lifecycle, inventory/economy/VIP, work/study/travel/exams/tasks, daily resets/sign-in/mail.
-- Implement `activeClientCount`/`sessionActive` online-time gating, deterministic per-day weather fallback, and actor-bound game/diudiule/exam/island_quiz session payload/answer-key/abandon/cancel rules.
+- Implement coverage-derived `activeClientCount`/`sessionActive` online-time gating, deterministic per-day weather fallback, and actor-bound game/diudiule/exam/island_quiz session payload/answer-key/abandon/cancel/local-actor rebinding rules.
 - Add characterization/golden tests per group and deterministic RNG/time tests.
 - Add a headless runtime test that can execute commands/ticks without Electron.
 - No production wiring.
@@ -2134,13 +2246,13 @@ The implementation is intentionally too large for one change. This sequence is d
 
 - Extract social/island/games logic and fishing/farm rules; complete missing handlers.
 - Complete command validation/event generation and scheduled jobs.
-- Add scheduler/catch-up tests including `advanceWhileEmpty=true/false`, historical zero-session catch-up even with mid-catch-up connects, direct-only daily resets (no daily jobs), east/west/DST timezone boundaries, RNG/restart, bounded chunks.
+- Add scheduler/catch-up tests including `advanceWhileEmpty=true/false`, coverage-derived catch-up with mid-catch-up connects, connected stalls, zero-client/closed intervals, direct-only daily resets (no daily jobs), east/west/DST timezone boundaries, RNG/restart, bounded chunks.
 - Add a catalog-coverage gate over every current mutation call site and feature-parity groups A–F; fail if a canonical mutation lacks a command/runtime handler.
 - No production wiring; server mode remains unavailable.
 
 ### C5 — Desktop/mobile LocalRepository, portable bundle, local v2 persistence
 
-- Add desktop main and Android/Harmony/iOS bridge LocalRepository hosts, portable-bundle local v2 document, atomic migration from bare save data, local scheduler, command queue, projection/events contract, and per-host native file persistence.
+- Add desktop main and Android/Harmony/iOS bridge LocalRepository hosts, portable-bundle local v2 document with stable localDeviceId/session coverage, atomic migration from bare save data, local scheduler, command queue, projection/events contract, and per-host native file persistence.
 - Keep legacy local path behind a dev-only runtime flag; never run both in one mode.
 - Add local parity/characterization tests against the headless runtime.
 - Local default still old until the final cutover; no server mode.
@@ -2160,35 +2272,35 @@ The implementation is intentionally too large for one change. This sequence is d
 - Delete legacy renderer mutation adapters used during migration.
 - Add local full closed-period catch-up/migration UX/perf handling, mobile local parity/build tests. No server mode yet.
 
-### C8 — Server package, WAL/FULL durability, auth/device revocation, authority/session, command service
+### C8 — Server package, WAL/FULL durability, auth/revocation, authority/restore reset, sessions, command service
 
-- Add `server/` package, SQLite migrations/transactions (including game_sessions with actor/payload and pet_authority) with WAL+`synchronous=FULL`, device registry/pairing/auth plus `device.list`/`device.revoke` socket registry/revocation broadcast, WebSocket sessions, command service/idempotency, snapshot/event storage, weather cache/CLI/config, health/logging.
+- Add `server/` package, SQLite migrations/transactions (including game_sessions with actor/payload, pet_authority with authorityId/restoreGeneration/reset, and session_coverage) with WAL+`synchronous=FULL`, device registry/pairing/auth plus `device.list`/`device.revoke` socket registry/revocation broadcast/control CLI, restore `--accept-rollback` authority reset, WebSocket sessions, command service/idempotency, snapshot/event storage, weather cache/CLI/config, health/logging.
 - Launch the shared runtime host with persisted schedule/RNG and `advanceWhileEmpty` setting; implement server command handlers from the same shared runtime.
 - Add server integration tests for auth, command duplicate/status, transaction rollback, persistence, backups.
 - Server is runnable/testable but not exposed to the desktop app yet.
 
-### C9 — Server scheduler, direct daily boundaries, catch-up zero-session history, authority/portable import
+### C9 — Server scheduler, direct daily boundaries, coverage-derived catch-up history, authority/portable import
 
-- Implement 60s scheduler, wall anchor, `advanceWhileEmpty` enable/disable, historical catch-up context (`activeClientCount=0`/`sessionActive=false`) even with mid-catch-up clients, direct daily boundary executor with no daily jobs, timezone/DST handling, command gating, recovery after crash/restart, RNG/job/session persistence, authority/import fencing, portable-import anchor realignment, projection/event broadcast.
+- Implement 60s scheduler, wall anchor, `advanceWhileEmpty` enable/disable, coverage-derived historical catch-up context (`session_coverage`) including connected stalls and mid-catch-up clients, direct daily boundary executor with no daily jobs, timezone/DST handling, command gating, recovery after crash/restart, RNG/job/session persistence, authority/import fencing, portable-import anchor realignment, projection/event broadcast.
 - Add fake-clock tests for enabled/disabled zero-client behavior, restart determinism, no duplicate rewards, backup/restore.
 - Health/metrics for game time/catch-up/next tick/scheduled jobs.
 
 ### C10 — RemoteRepository WebSocket integration (desktop only)
 
-- Add RemoteRepository WSS client, pairing/token safeStorage, reconnect/backoff, cursor, snapshot/replay/resync, command in-flight status, authority-aware cache, owner export/detach and handoff requests, status events.
+- Add RemoteRepository WSS client, pairing/token safeStorage, reconnect/backoff, cursor, snapshot/replay/resync, command in-flight status, authority-aware cache with `authority_reset_required` cache-discard/full-snapshot recovery, owner export/detach and handoff requests, status events.
 - Add server-mode feature flag and integration tests: two WebSocket clients, feed/projection, lost result, duplicate opId, revision gap.
 - No storage UI yet; used in tests/dev builds.
 
 ### C11 — Storage UI, portable import/export, mode switching, weather/timezone, backups, admin flows
 
-- Add storage admin UI: mode choice, server URL/pairing, device list/revoke, status/revision/gameTime/authority epoch, unified `setAdvanceWhileEmpty`, timezone, canonical weather city, initial source, owner-only detach/resume handoff with rollback/status.
-- Add portable-bundle export/import UI and backup/authority/clamp reporting, local v1→v2 migration, server first-enable upload/use-server choice, reset/adopt owner commands, admin replacement.
+- Add storage admin UI: mode choice, server URL/pairing, device list/revoke, status/revision/gameTime/authority epoch/restore generation, unified `setAdvanceWhileEmpty`, timezone, canonical weather city, initial source, owner-only detach/resume handoff with rollback/status, and local actor rebind/cancel reporting.
+- Add portable-bundle export/import UI and backup/authority/clamp reporting, restore-generation/reset warning UI, local v1→v2 migration, server first-enable upload/use-server choice, reset/adopt owner commands, admin replacement.
 - Remove server-mode feature flag; enable both modes.
 - Test migration failures/rollback, secret/local-field denial, backup before overwrite.
 
 ### C12 — E2E (desktop + mobile local), CI, deployment docs, and final gate
 
-- Add two-Electron-instance real-server E2E (including detach/resume/revocation) plus mobile bridge/local-runtime parity and build checks.
+- Add two-Electron-instance real-server E2E (detach/resume/authority reset/revocation/coverage-derived catch-up/local actor rebind) plus mobile bridge/local-runtime parity and build checks.
 - Add CI runtime/command/server/scheduler/E2E jobs and release gating.
 - Complete server `README`, Docker Compose, Caddy/Nginx TLS/WebSocket docs, systemd unit, backup/restore and runbook.
 - Run full acceptance matrix; record evidence before human/Lead sign-off.
@@ -2207,11 +2319,11 @@ A fresh senior implementer/architect must read this spec and the cited code, the
 - LocalRepository uses the same runtime on desktop and mobile local hosts and has a viable portable-bundle/v2 persistence/migration path; server mode is hidden on mobile.
 - Full feature parity and the command-coverage gate cover every canonical mutation/current call site, including farm/fishing/island/games/mail/sign-in/jobs/travel/shop-inventory.
 - Server command ordering/idempotency/event sequence/scheduler/catch-up/reconnect/status (`applied`/`rejected`/`not_applied`) semantics are testable.
-- `advanceWhileEmpty` true/false, catch-up historical zero-session context, online-session clock split, local full closed-period catch-up, and restart behavior are unambiguous.
+- `advanceWhileEmpty` true/false, coverage-derived catch-up session context, online-session clock split, local full closed-period catch-up, and restart behavior are unambiguous.
 - Canonical weather model (owner city, per-day records/provenance/fallback/day key) and timezone/DST boundary changes are implementable/testable.
 - Game/diudiule/exam/island_quiz sessions persist actorDeviceId and closed payloads; caps, expiry/abandonment, task-counter integration, answer-key secrecy, and exploit tests are complete.
 - Portable bundle export/import preserves engine/authority state; out-of-bounds anchors reject by default; explicit clamp realigns clocks and avoids double catch-up.
-- Catch-up uses historical zero-session context; daily resets have one runtime path; WAL uses FULL; revocation and authority handoff crash semantics are testable.
+- Catch-up uses persisted session coverage (connected stall vs zero/closed), local actor identity/rebinding is explicit, authority ID/generation and restore reset are implementable, result typing/CLI control is testable, daily resets have one runtime path, WAL uses FULL, and revocation/authority handoff crash semantics are testable.
 - Shared/device/never-upload boundaries and secret hygiene are complete.
 - Backups are independent of log retention.
 - Commit slices have no missing dependency and each leaves a coherent state.
@@ -2242,8 +2354,8 @@ P0/P1 findings block the commit. P2/P3 findings must be fixed or explicitly acce
 - The two-Electron-instance E2E has run against a real server, not a mock.
 - Android/Harmony/iOS local runtime/build checks and local/server parity pass; server mode remains hidden on mobile.
 - Feature parity and command-coverage gates pass for all in-scope features.
-- Online-time/session-clock split (including mid-catch-up connects), weather/day-key/fallback, actor-bound game/exam/quiz exploit suite, timezone/DST changes, portable bundle round-trip/authority fencing, anchor realignment, and backup restore are demonstrated.
-- Authority handoff, device revocation/live-socket closure, direct-only daily resets, and WAL `synchronous=FULL` durability tests pass.
+- Coverage-derived online-time/session clock (including connected stalls and mid-catch-up connects), weather/day-key/fallback, actor-bound game/exam/quiz exploit suite, timezone/DST changes, portable bundle round-trip/authority fencing, anchor realignment, and backup restore are demonstrated.
+- Authority handoff, restore-rollback reset/cache recovery, local actor rebind/cancel, device revocation/live-socket closure, session-coverage catch-up, direct-only daily resets, and WAL `synchronous=FULL` durability tests pass.
 - Local full closed-period catch-up is implemented with progress/read-only UX and matches server world semantics.
 - No client patch/tick/reward path can mutate canonical state.
 - No secrets/device fields are found in server DB/broadcast/log/backups; session `actorDeviceId`/tokens are device-bound and not reusable across devices/hosts; exam/quiz answer keys never appear in projections.
@@ -2274,6 +2386,9 @@ P0/P1 findings block the commit. P2/P3 findings must be fixed or explicitly acce
 19. **Anchor clamp — resolved.** Default reject; explicit owner realignment shifts game/day-key clock, persists `clockSkippedMs`/`importClamped`, and has at most one post-realignment catch-up.
 20. **Durability — resolved.** WAL plus `synchronous=FULL`; no success/broadcast before the fsynced commit.
 21. **Device revocation — resolved.** Owner `device.list`/`device.revoke`, per-command checks, live-socket registry closure/broadcast, reconnect denial.
+22. **Authority restore rollback — resolved.** Stable `authority_id` + `restore_generation`, operator `restore --accept-rollback`, reset state, owner/player handshake mismatch handling, cache-discard/full-snapshot recovery, and stale-socket rejection.
+23. **Session coverage and local actor identity — resolved.** Persisted `session_coverage` drives catch-up session clock; stable `localDeviceId` drives local session provenance and owner-approved rebinding/cancellation.
+24. **Typed result and CLI control surface — resolved.** `ResultDataMap`/`JsonValue` type command results; `device.list` returns `{ devices }`. Running-server revocation uses `qqpet-server ctl revoke-device` over an owner-authenticated local control channel; stopped-server revocation uses the documented offline DB path and startup rejection.
 
 ### 19.2 Key scope risks
 
@@ -2288,10 +2403,13 @@ P0/P1 findings block the commit. P2/P3 findings must be fixed or explicitly acce
 - **Local full closed-period progression.** The approved local behavior now simulates hunger, growth, illness, random events, death, tasks, jobs, farm/fishing, etc. across the full app-closed period. This is a deliberate behavior change with UX/performance implications: large catch-up must yield, show progress, and stay read-only until ready.
 - **Portable bundle/anchor correctness.** Engine-state import must preserve RNG/schedules/sessions/environment/day-boundary/authority state; default reject out-of-bounds anchors, and explicit clamp must realign game/day-key clocks without double catch-up. Malformed/stale/forked bundles can corrupt future progression.
 - **Authority source conflicts.** A detach/import failure or ack loss can leave either a frozen source or a stale archived server; every handoff must persist epoch/revision/intent and reconcile before any authority resumes. No test may allow both sides to tick.
-- **Catch-up context errors.** Using current connected clients for historical ticks would grant online/sign-in rewards retroactively; the catch-up context must be fixed zero-session history until the target.
+- **Catch-up context errors.** Using current connected clients for historical ticks would grant online/sign-in rewards retroactively; catch-up must derive each historical minute from persisted session coverage, not the live socket count.
 - **Daily reset duplication.** Running day boundaries both directly and as jobs would double-reset tasks/sign-in/VIP; only the runtime direct path is allowed.
-- **Anchor realignment.** Rejecting stale anchors by default prevents permanent wall lag; explicit realignment must shift both game clock and day-key metadata and record `clockSkippedMs`.
+- **Anchor realignment.** Rejecting stale anchors by default prevents permanent wall lag; explicit realignment must shift game clock, day-key metadata, and every job/session/timer deadline by `clockSkippedMs` while preserving remaining duration and recording the skip.
 - **Durability/revocation.** `synchronous=NORMAL` or handshake-only revocation can lose committed state or leave live revoked sockets able to mutate; FULL fsync plus per-command/socket revocation are mandatory.
+- **Restore authority rollback/cache mismatch.** Restoring an older DB without a new authority UUID/generation can let cached clients fork or remain read-only; operator reset plus cache-discard/full-snapshot recovery and stale-socket invalidation are mandatory.
+- **Coverage attribution.** Missing/crash-open coverage can under/over-count online time; intervals must be persisted, repaired deterministically, and never replaced by the current live socket count during catch-up.
+- **Local actor rebinding.** Local sessions must use the stable localDeviceId and be explicitly rebound or cancelled on upload; silently treating localDeviceId as server auth would violate authority boundaries.
 - **Game-session exploit surface.** Token issuance, device binding, expiry, caps, abandoned sessions, task counters, and command idempotency all need adversarial tests; accepting client reward amounts would break server authority.
 - **Deterministic external inputs/AI.** Calendar/weather and AI output are not naturally deterministic. The runtime must receive persisted normalized environment inputs and keep prose/presentation out of canonical state; otherwise restart/replay reproducibility is impossible.
 - **Long catch-up.** Enabled zero-client operation can create large wall-time gaps. Bounded chunks, readiness gating, health visibility, and test coverage are required; an unbounded catch-up loop can freeze the server.
@@ -2311,11 +2429,14 @@ These are not open architectural alternatives; they are concrete defaults in thi
 - E2E latency target p95 ≤ 1s LAN/loopback (CI timeout 3s).
 - Canonical weather city configured by operator/owner; missing forecasts use deterministic seeded fallback and `provenance:'fallback'`.
 - Game session timeouts: small/flash 60 minutes, diudiule 5 minutes, exam 30 minutes, island quiz 10 minutes of game time; `game.reward` daily `Game` cap 60 minutes, `diudiule.reward` no GameRound/Game increment.
-- Import anchor: default `allowClamp=false`; bounds 48h into the past/5m into the future. Explicit clamp shifts game/day-key clock by signed `clockSkippedMs`, uses the clamped old anchor/wallNow as effective start, persists `importClamped`, and permits at most one post-realignment catch-up toward the captured wallNow.
+- Import anchor: default `allowClamp=false`; bounds 48h into the past/5m into the future. Explicit clamp shifts game/day-key clock and all job/session/timer deadlines by signed `clockSkippedMs`, uses the clamped old anchor/wallNow as effective start, persists `importClamped`, and permits at most one post-realignment catch-up toward the captured wallNow.
 - Day key: `YYYY-MM-DD` of the 06:00 boundary in the canonical IANA timezone.
 - Daily boundaries are metadata/direct runtime transitions, never `ScheduledJob` rows.
-- Catch-up history uses `activeClientCount=0`, `sessionActive=false` through the fixed target; live ticks use actual count.
+- Catch-up history derives `activeClientCount`/`sessionActive` from persisted `session_coverage`; live ticks use actual count.
 - SQLite WAL with `synchronous=FULL` for canonical commits; no broadcast before fsync.
+- Session coverage heartbeat is persisted at least every 10s; `COVERAGE_CRASH_GRACE_MS=120000` for crash-repaired coverage; local `localDeviceId` is generated once as a UUID and persisted in the local device overlay.
+- `authorityId` is a UUID stable across handoffs; `restoreGeneration` starts at 0 and advances only via operator `restore --accept-rollback` (external recorded generation file).
+- Restore rollback requires `restore --accept-rollback` and a strictly increasing externally recorded `restoreGeneration`; a new authority UUID is minted.
 
 ## 20. Definition of done for this design
 
@@ -2324,7 +2445,7 @@ This design artifact is complete for approval when:
 - The human confirms the full server-side engine and local/shared-runtime migration on desktop and mobile local hosts.
 - The shared settings allowlist, canonical weather city/fallback policy, and `advanceWhileEmpty` default are accepted.
 - Feature parity and the command-coverage gate are accepted as release conditions.
-- Authority fencing, device revocation, direct-only daily resets, catch-up historical zero-session context, and WAL `synchronous=FULL` semantics are accepted.
+- Authority fencing/restore reset, device revocation, direct-only daily resets, coverage-derived catch-up, localDeviceId actor rebinding, and WAL `synchronous=FULL` semantics are accepted.
 - The builder-check reports no unresolved architecture contradiction.
 - The Lead approves the C1–C12 slicing and final E2E gate.
 - Implementation has still not begun.
