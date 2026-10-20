@@ -399,7 +399,7 @@ const FARM_BURDEN_KEYS = ['name', 'Items', 'number'] as const
 const FARM_WAREHOUSE_KEYS = ['fruit', 'number', 'name', 'price'] as const
 const ISLAND_CANONICAL_FIELDS = [
   'day', 'sent', 'letter', 'lit', 'lamps', 'tier', 'pieces', 'piece', 'want', 'loved',
-  'errands', 'fought', 'wins',
+  'errands', 'fought', 'wins', 'newsFacts', 'newsDay',
 ] as const
 const ISLAND_PRESENTATION_FIELDS = ['news', 'note'] as const
 const ISLAND_ERRAND_FIELDS = ['from', 'kind', 'to', 'got', 'took'] as const

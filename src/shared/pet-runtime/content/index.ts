@@ -13,6 +13,7 @@ import ALBUM from './album.json' with { type: 'json' }
 import FRIES_TABLE from './fries.json' with { type: 'json' }
 import FARM from './farm.json' with { type: 'json' }
 import ISLAND_TABLE from './island.json' with { type: 'json' }
+import SHOP_TABLE from './shop.json' with { type: 'json' }
 
 export type GoodType = keyof SelfGoodDatas
 export type TimedType = keyof SelfGoodUseOption
@@ -223,3 +224,16 @@ export const FARM_CROPS = (FARM as unknown as { crops: FarmCropDefinition[] }).c
 export const FARM_SEEDS = (FARM as unknown as { seeds: FarmSeedDefinition[] }).seeds
 export const FARM_FERTILIZERS = (FARM as unknown as { fertilizers: FarmFertilizerDefinition[] }).fertilizers
 export const ISLAND = ISLAND_TABLE as unknown as IslandContent
+
+
+function collectStringLeaves(value: unknown, output: string[]): void {
+  if (typeof value === 'string') { output.push(value); return }
+  if (Array.isArray(value)) { for (const entry of value) collectStringLeaves(entry, output); return }
+  if (value !== null && typeof value === 'object') {
+    for (const entry of Object.values(value as Record<string, unknown>)) collectStringLeaves(entry, output)
+  }
+}
+
+const shopIds: string[] = []
+collectStringLeaves(SHOP_TABLE, shopIds)
+export const SOLD_IDS = new Set<string>(shopIds)

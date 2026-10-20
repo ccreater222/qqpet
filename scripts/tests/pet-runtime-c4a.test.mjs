@@ -26,7 +26,7 @@ const {
   dayKeyAt,
 } = await import('../../src/shared/pet-runtime/index.ts')
 const {
-  FRIES, FARM_CROPS, FARM_SEEDS, ISLAND, PHOTOS, allGoods, EXAM_BANK,
+  FRIES, FARM_CROPS, FARM_SEEDS, FARM_FERTILIZERS, ISLAND, PHOTOS, allGoods, EXAM_BANK, SOLD_IDS,
 } = await import('../../src/shared/pet-runtime/content/index.ts')
 const { COMMAND_TYPES } = await import('../../src/shared/sync/command-validation.ts')
 const { validateEngineState } = await import('../../src/shared/sync/portable.ts')
@@ -52,6 +52,7 @@ function islandSeed(extra = {}) {
   return JSON.stringify({
     day: currentBoundarySeconds(GAME_TIME_MS, 'Asia/Shanghai'),
     sent: 0, letter: '', lit: [], lamps: [], tier: 0, pieces: 0, piece: false,
+    newsFacts: [], newsDay: 0,
     want: '', loved: false, errands: [], fought: [], wins: 0,
     ...extra,
   })
@@ -251,11 +252,17 @@ function islandState(extra = {}) {
 
 test('island daily interaction commands cover letters, errands, quiz and news', () => {
   const letters = islandState()
-  const accepted = ok(letters, 'island.acceptLetter', { fromNpcId: '莉莉', toNpcId: '探险家琼斯' })
+  const accepted = ok(letters, 'island.acceptLetter', { fromNpcId: '小艾', toNpcId: '探险家琼斯' })
   assert.equal(blob(accepted.state, 'island').letter, '探险家琼斯')
   const delivered = ok(accepted.state, 'island.deliverLetter', { toNpcId: '探险家琼斯' })
   assert.equal(blob(delivered.state, 'island').sent, 1)
   assert.equal(blob(delivered.state, 'island').letter, '')
+
+  rejected(islandState(), 'island.acceptLetter', { fromNpcId: '莉莉', toNpcId: '探险家琼斯' }, {}, 'not_available')
+  const litTarget = islandState({ lit: ['探险家琼斯'] })
+  rejected(litTarget, 'island.acceptLetter', { fromNpcId: '小艾', toNpcId: '探险家琼斯' }, {}, 'not_available')
+  const unlit = ok(litTarget, 'island.acceptLetter', { fromNpcId: '小艾', toNpcId: '莉莉' })
+  assert.equal(blob(unlit.state, 'island').letter, '莉莉')
 
   const arrival = islandState({ errands: [{ from: '周大饼', kind: 'visit', to: '3', got: 0, took: false }] })
   const arrived = ok(arrival, 'island.arriveScene', { sceneId: '3' })
@@ -280,10 +287,12 @@ test('island daily interaction commands cover letters, errands, quiz and news', 
   assert.equal(blob(turned.state, 'island').errands[0].took, true)
   assert.ok(turned.result.goods.length >= 1)
 
-  const gift = islandState({ errands: [{ from: '木木', kind: 'gift', to: 'food', got: 0, took: false }] })
-  const gifted = ok(gift, 'island.giftNpc', { npcId: '木木', itemId: '102010001' })
-  assert.equal(blob(gifted.state, 'island').errands[0].took, true)
-  assert.ok(gifted.result.goods.length >= 1)
+  const love = islandState({ want: '102010001', loved: false })
+  const gifted = ok(love, 'island.giftNpc', { npcId: '小艾', itemId: '102010001' })
+  assert.equal(blob(gifted.state, 'island').loved, true)
+  assert.equal(gifted.state.save.selfGoodDatas.food.find(entry => entry.startsWith('_102010001*')), '_102010001*4')
+  assert.ok(gifted.result.goods.length >= 2)
+  rejected(gifted.state, 'island.giftNpc', { npcId: '小艾', itemId: '102010001' }, {}, 'already_claimed')
 
   const bring = islandState({ errands: [{ from: '佐佐', kind: 'bring', to: '102010001', got: 0, took: false }] })
   const brought = ok(bring, 'island.turnInErrand', { npcId: '佐佐', errandId: '0', itemId: '102010001' })
@@ -447,6 +456,16 @@ test('C4a fishing, farm and island content tables drift-check against renderer/S
   })
   assert.deepEqual(FARM_CROPS, crops)
   assert.deepEqual(FARM_SEEDS, seeds)
+  assert.equal(readFileSync('src/shared/pet-runtime/content/shop.json', 'utf8'), readFileSync('src/renderer/pet/data/shop.json', 'utf8'))
+  const shop = JSON.parse(readFileSync('src/renderer/pet/data/shop.json', 'utf8'))
+  const shopLeaves = []
+  const collect = value => {
+    if (typeof value === 'string') shopLeaves.push(value)
+    else if (Array.isArray(value)) value.forEach(collect)
+    else if (value !== null && typeof value === 'object') Object.values(value).forEach(collect)
+  }
+  collect(shop)
+  assert.deepEqual([...SOLD_IDS].sort(), [...new Set(shopLeaves)].sort())
 
   const islandSource = readFileSync('src/renderer/ui/island.ts', 'utf8')
   const placesBlock = islandSource.split('const PLACES:')[1].split('}', 1)[0]
@@ -480,9 +499,49 @@ test('C4a fishing, farm and island content tables drift-check against renderer/S
   assert.deepEqual(ISLAND.plays, plays)
 
   const spotBlock = islandSource.split('const SPOTS:')[1].split('\nconst MONSTERS', 1)[0]
-  const spotKeys = [...spotBlock.matchAll(/^  (?:'([^']+)'|([A-Za-z0-9_]+)): \{\n    name: '([^']+)'/gm)]
-    .map(match => match[1] ?? match[2])
-  assert.deepEqual(Object.keys(ISLAND.spots), spotKeys)
+  const spotRows = [...spotBlock.matchAll(/^  (?:'([^']+)'|([A-Za-z0-9_]+)): \{\n    name: '([^']+)'/gm)]
+  assert.deepEqual(Object.keys(ISLAND.spots), spotRows.map(match => match[1] ?? match[2]))
+  assert.deepEqual(Object.fromEntries(spotRows.map(match => [match[1] ?? match[2], { name: match[3] }])), ISLAND.spots)
+
+  const sendersBlock = islandSource.split('const SENDERS = ')[1].split('\n', 1)[0]
+  const senders = [...sendersBlock.matchAll(/'([^']+)'/g)].map(match => match[1])
+  assert.deepEqual(ISLAND.senders, senders)
+  for (const [name, value] of [['LETTERS', ISLAND.letters], ['PIECES', ISLAND.pieces], ['TIER', ISLAND.tier]]) {
+    const match = new RegExp('const ' + name + ' = (\\d+)').exec(islandSource)
+    assert.equal(Number(match[1]), value)
+  }
+
+  const errandsBlock = islandSource.split('const ERRANDS:')[1].split('\n]', 1)[0]
+  const errands = [...errandsBlock.matchAll(/\['([^']+)', '([^']+)', '([^']+)', '([^']*)'\]/g)]
+    .map(match => [match[1], match[2], match[3], match[4]])
+  assert.deepEqual(ISLAND.errands, errands)
+
+  const tacticsBlock = islandSource.split('const TACTICS = ')[1].split('\n} as const', 1)[0]
+  const tactics = {}
+  for (const match of tacticsBlock.matchAll(/^  (\S+): \{\n    stat: '([^']+)'/gm)) tactics[match[1]] = match[2]
+  assert.deepEqual(ISLAND.tactics, tactics)
+
+  const choresBlock = islandSource.split('const CHORES:')[1].split('\n}', 1)[0]
+  const chores = {}
+  for (const match of choresBlock.matchAll(/^  (\w+): \['[^']*', (\d+)\]/gm)) chores[match[1]] = Number(match[2])
+  assert.deepEqual(ISLAND.chores, chores)
+
+  const giftsBlock = islandSource.split('const GIFTS:')[1].split('\n}', 1)[0]
+  const gifts = {}
+  for (const match of giftsBlock.matchAll(/(\w+): '([^']+)'/g)) gifts[match[1]] = match[2]
+  assert.deepEqual(ISLAND.gifts, gifts)
+
+  const farmControl = readFileSync('tools/qqfarm/src/com/MyFarm/control/FarmlandControl.as', 'utf8')
+  const fertilizerBlock = farmControl.split('const FERTILIZER:Object = {')[1].split('};', 1)[0]
+  const fertilizerDurations = {}
+  for (const match of fertilizerBlock.matchAll(/"([^"]+)":(\d+)/g)) fertilizerDurations[match[1]] = Number(match[2])
+  const propsXml = readFileSync('resources/pet/qqfarm/com/MyFarm/data/xml/props.xml', 'utf8')
+  const fertilizerNames = {}
+  for (const match of propsXml.matchAll(/<item\s+([^>]+)>/g)) {
+    const row = attrs(match[1])
+    if (row.object && row.name) fertilizerNames[row.object] = row.name
+  }
+  assert.deepEqual(FARM_FERTILIZERS.map(item => ({ item: item.item, name: fertilizerNames[item.item], duration: fertilizerDurations[item.item] })), FARM_FERTILIZERS)
 })
 
 test('game and diudiule sessions remain server-authoritative in Group E', () => {
@@ -500,4 +559,65 @@ test('game and diudiule sessions remain server-authoritative in Group E', () => 
   const diuReward = ok(diuStarted.state, 'diudiule.reward', { sessionToken: diuToken })
   assert.equal(diuReward.state.gameSessions[0].status, 'settled')
   assert.equal(diuReward.result.yb, 1)
+})
+
+test('island daily roll mirrors the 6+2, can-filtered, sold-want renderer path', () => {
+  const state = islandState({ day: 0 })
+  const refreshed = ok(state, 'island.refreshNews', { dayKey: dayKeyAt(GAME_TIME_MS, 'Asia/Shanghai') })
+  const island = blob(refreshed.state, 'island')
+  assert.equal(island.errands.length, 8)
+  assert.equal(new Set(island.errands.map(errand => errand.from)).size, 8)
+  assert.equal(new Set(island.errands.map(errand => errand.kind)).size, 8)
+  const written = island.errands.slice(0, 6)
+  for (const errand of written) {
+    assert.equal(ISLAND.errands.some(([from, kind, to]) => from === errand.from && kind === errand.kind && to === errand.to), true)
+  }
+  for (const errand of island.errands) {
+    if (errand.kind === 'bring') {
+      const item = allGoods('food').concat(allGoods('toy'), allGoods('clean')).find(good => good.id === errand.to)
+      assert.ok(item)
+      assert.equal(SOLD_IDS.has(item.id), true)
+      assert.ok(item.price > 0 && item.price <= 200)
+      assert.equal(item.PD === true || item.outOfPrint === true, false)
+    }
+    if (errand.kind === 'fight') {
+      const id = Number(errand.to)
+      const best = Math.max(...Object.values(ISLAND.tactics).map(stat => {
+        const value = refreshed.state.save.petInfo[stat]
+        return (value + 10) / (value + 10 + 10 * id * id)
+      }))
+      assert.ok(best >= 0.5)
+    }
+  }
+  const want = allGoods('food').concat(allGoods('toy'), allGoods('clean')).find(good => good.id === island.want)
+  assert.ok(want)
+  assert.equal(SOLD_IDS.has(want.id), true)
+  assert.ok(want.price > 0 && want.price <= 200)
+  assert.equal(want.PD === true || want.outOfPrint === true, false)
+  assert.ok((want.needLevel ?? 0) <= refreshed.state.save.petComputedlInfo.level)
+})
+
+test('island refreshNews persists canonical facts and is idempotent until the next day', () => {
+  const state = islandState({ day: 0 })
+  const first = ok(state, 'island.refreshNews', { dayKey: dayKeyAt(GAME_TIME_MS, 'Asia/Shanghai') })
+  assert.equal(first.result.cached, false)
+  assert.equal(first.result.facts.length, 4)
+  assert.deepEqual(blob(first.state, 'island').newsFacts, first.result.facts.map(fact => [fact.heading, fact.fact]))
+  const drawsAfterFirst = first.state.rng.draws
+  const second = ok(first.state, 'island.refreshNews', { dayKey: dayKeyAt(GAME_TIME_MS, 'Asia/Shanghai') })
+  assert.equal(second.result.cached, true)
+  assert.deepEqual(second.result.facts, first.result.facts)
+  assert.equal(second.state.rng.draws, drawsAfterFirst)
+
+  const nextTime = NEXT_BOUNDARY_MS + 1000
+  const next = clone(first.state)
+  next.gameTimeMs = nextTime
+  const nextKey = dayKeyAt(nextTime, 'Asia/Shanghai')
+  const nextDay = ok(next, 'island.refreshNews', { dayKey: nextKey })
+  assert.equal(nextDay.result.cached, false)
+  assert.equal(blob(nextDay.state, 'island').newsDay, currentBoundarySeconds(nextTime, 'Asia/Shanghai'))
+  const nextDraws = nextDay.state.rng.draws
+  const repeat = ok(nextDay.state, 'island.refreshNews', { dayKey: nextKey })
+  assert.equal(repeat.result.cached, true)
+  assert.equal(repeat.state.rng.draws, nextDraws)
 })

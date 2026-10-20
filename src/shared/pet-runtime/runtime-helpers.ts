@@ -202,6 +202,8 @@ export interface IslandState {
   errands: IslandErrand[]
   fought: string[]
   wins: number
+  newsFacts: [string, string][]
+  newsDay: number
 }
 
 export interface FishState {
@@ -307,6 +309,7 @@ export function defaultIsland(gameTimeMs: number): IslandState {
   return {
     day: Math.floor(gameTimeMs / 1000), sent: 0, letter: '', lit: [], lamps: [], tier: 0,
     pieces: 0, piece: false, want: '', loved: false, errands: [], fought: [], wins: 0,
+    newsFacts: [], newsDay: 0,
   }
 }
 
@@ -326,6 +329,8 @@ export function readIsland(save: SharedSaveData, gameTimeMs: number): IslandStat
     errands: parsed.errands ?? [],
     fought: parsed.fought ?? [],
     wins: parsed.wins ?? 0,
+    newsFacts: parsed.newsFacts ?? [],
+    newsDay: parsed.newsDay ?? 0,
   }
 }
 

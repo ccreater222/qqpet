@@ -4,6 +4,7 @@ import {
   allGoods,
   findGood,
   parseGoodCode,
+  SOLD_IDS,
   goodOf,
   type RuntimeGood,
   type GoodType,
@@ -50,9 +51,61 @@ function requireIslandReady(context: HandlerContext): IslandState {
 }
 
 function buyable(good: RuntimeGood, level: number): boolean {
-  return typeof good.price === 'number' && good.price > 0 && good.price <= 200 &&
+  return SOLD_IDS.has(good.id) && typeof good.price === 'number' && good.price > 0 && good.price <= 200 &&
     good.PD !== true && good.outOfPrint !== true && (good.needLevel ?? 0) <= level
 }
+
+function dailyWants(state: HandlerContext['state']): RuntimeGood[] {
+  const level = state.save.petComputedlInfo.level
+  return (['food', 'toy', 'clean'] as const)
+    .flatMap(type => allGoods(type))
+    .filter(good => buyable(good, level))
+}
+
+function tacticOdds(state: HandlerContext['state'], monsterId: string): number {
+  const id = Number(monsterId)
+  if (Number.isFinite(id) === false || id <= 0) return 0
+  let best = 0
+  for (const stat of Object.values(ISLAND.tactics)) {
+    const value = state.save.petInfo[stat]
+    best = Math.max(best, (value + 10) / (value + 10 + 10 * id * id))
+  }
+  return best
+}
+
+function canErrand(kind: string, to: string, state: HandlerContext['state']): boolean {
+  if (kind === 'bring') {
+    const good = findGood(to)
+    return good !== null && buyable(good, state.save.petComputedlInfo.level)
+  }
+  if (kind === 'fight') return tacticOdds(state, to) >= 0.5
+  return true
+}
+
+function rollValue(kind: string, from: string, state: HandlerContext['state'], rng: HandlerContext['rng']): string | null {
+  if (kind === 'talk') return rng.pickOne(Object.keys(ISLAND.folk).filter(name => name !== from))
+  if (kind === 'bring') return rng.pickOne(dailyWants(state))?.id ?? null
+  if (kind === 'spot') return rng.pickOne(Object.keys(ISLAND.spots))
+  if (kind === 'fight') {
+    return rng.pickOne(Object.keys(ISLAND.monsters).filter(id => tacticOdds(state, id) >= 0.5))
+  }
+  if (kind === 'tour') return String(rng.randIntInclusive(2, 4))
+  if (kind === 'chore') {
+    const keys = Object.keys(ISLAND.chores)
+    const key = rng.pickOne(keys)
+    return key === null ? null : key + ':' + String(rng.randIntInclusive(1, ISLAND.chores[key]))
+  }
+  if (kind === 'gift') return rng.pickOne(Object.keys(ISLAND.gifts))
+  if (kind === 'visit') {
+    const scene = ISLAND.folk[from]?.scene
+    return rng.pickOne(Object.keys(ISLAND.places).filter(id => Number(id) !== scene))
+  }
+  if (kind === 'chat') return String(rng.randIntInclusive(2, 3))
+  if (kind === 'play') return rng.pickOne(Object.keys(ISLAND.plays))
+  return null
+}
+
+const ROLLED_KINDS = ['talk', 'bring', 'spot', 'fight', 'tour', 'chore', 'gift', 'visit', 'chat', 'play'] as const
 
 function errandNeed(errand: IslandErrand): number {
   return errand.kind === 'chat' || errand.kind === 'tour' ? Number(errand.to) : 1
@@ -74,10 +127,6 @@ function knownNpc(npcId: string): boolean {
   return Object.prototype.hasOwnProperty.call(ISLAND.folk, npcId)
 }
 
-function knownSender(npcId: string): boolean {
-  return knownNpc(npcId) || ISLAND.senders.includes(npcId)
-}
-
 function knownSpot(spotId: string): boolean {
   return Object.prototype.hasOwnProperty.call(ISLAND.spots, spotId)
 }
@@ -97,23 +146,33 @@ function sceneOfInput(sceneId: string): number {
   return Number(found[0])
 }
 
-function rollErrands(rng: HandlerContext['rng'], island: IslandState, level: number): IslandErrand[] {
-  const candidates = rng.shuffle(ISLAND.errands.map(([from, kind, to]) => ({ from, kind, to })))
-  const result: IslandErrand[] = []
-  for (const candidate of candidates) {
-    if (result.length >= 8) break
-    if (result.some(errand => errand.from === candidate.from || errand.kind === candidate.kind)) continue
-    result.push({ ...candidate, got: 0, took: false })
+function rollErrands(rng: HandlerContext['rng'], state: HandlerContext['state']): IslandErrand[] {
+  const written: IslandErrand[] = []
+  for (const candidate of rng.shuffle(ISLAND.errands.map(([from, kind, to]) => ({ from, kind, to })))) {
+    if (written.length >= 6) break
+    if (written.some(errand => errand.from === candidate.from || errand.kind === candidate.kind)) continue
+    if (canErrand(candidate.kind, candidate.to, state) === false) continue
+    written.push({ ...candidate, got: 0, took: false })
   }
-  if (result.length === 0) {
-    const from = Object.keys(ISLAND.folk)[0]
-    if (from !== undefined) result.push({ from, kind: 'talk', to: Object.keys(ISLAND.folk)[1] ?? from, got: 0, took: false })
+
+  const made: IslandErrand[] = []
+  const available = rng.shuffle(Object.keys(ISLAND.folk).filter(name => written.some(errand => errand.from === name) === false))
+  for (const from of available) {
+    if (made.length >= 2) break
+    const kinds = rng.shuffle(ROLLED_KINDS.filter(kind =>
+      written.some(errand => errand.kind === kind) === false &&
+      made.some(errand => errand.kind === kind) === false,
+    ))
+    for (const kind of kinds) {
+      const to = rollValue(kind, from, state, rng)
+      if (to !== null) {
+        made.push({ from, kind, to, got: 0, took: false })
+        break
+      }
+    }
   }
-  const wantPool = (['food', 'toy', 'clean'] as const)
-    .flatMap(type => allGoods(type))
-    .filter(good => buyable(good, level))
-  island.want = rng.pickOne(wantPool)?.id ?? ''
-  return result
+
+  return [...written, ...made]
 }
 
 /** Materializes the canonical 06:00 island day without any AI/presentation prose. */
@@ -133,7 +192,11 @@ export function materializeIslandDay(
   island.piece = false
   island.loved = false
   island.fought = []
-  island.errands = rollErrands(rng, island, state.save.petComputedlInfo.level)
+  island.newsFacts = []
+  island.newsDay = 0
+  const want = rng.pickOne(dailyWants(state))
+  island.want = want?.id ?? ''
+  island.errands = rollErrands(rng, state)
   writeIsland(state.save, island)
   return island
 }
@@ -233,10 +296,16 @@ export function islandArriveScene(context: HandlerContext, payload: CommandPaylo
 }
 
 export function islandAcceptLetter(context: HandlerContext, payload: CommandPayloadMap['island.acceptLetter']): HandlerResult {
-  if (knownSender(payload.fromNpcId) === false || knownNpc(payload.toNpcId) === false) reject('not_available', 'unknown island npc')
+  if (ISLAND.senders.includes(payload.fromNpcId) === false || knownNpc(payload.toNpcId) === false) {
+    reject('not_available', 'letters require a canonical sender and known target')
+  }
   const island = ensureIslandDay(context, requireIslandReady(context))
   if (island.sent >= ISLAND.letters) reject('already_claimed', 'daily letter allowance is exhausted')
   if (island.letter !== '') reject('busy', 'a letter is already being carried')
+  const unlit = Object.keys(ISLAND.folk).filter(name => island.lit.includes(name) === false)
+  if (unlit.length > 0 && unlit.includes(payload.toNpcId) === false) {
+    reject('not_available', 'the target already received a letter; choose an unlit islander')
+  }
   island.letter = payload.toNpcId
   writeIsland(context.state.save, island)
   return {
@@ -365,21 +434,21 @@ export function islandClaimTreasure(context: HandlerContext): HandlerResult {
 
 export function islandGiftNpc(context: HandlerContext, payload: CommandPayloadMap['island.giftNpc']): HandlerResult {
   const island = ensureIslandDay(context, requireIslandReady(context))
-  if (knownNpc(payload.npcId) === false) reject('not_available', 'unknown island npc')
-  const errand = island.errands.find(candidate => candidate.from === payload.npcId && candidate.kind === 'gift' && candidate.took === false)
-  if (errand === undefined) reject('not_available', 'no active gift errand for this npc')
-  const item = findGood(payload.itemId)
-  if (item === null || item.type !== errand.to) reject('not_available', 'the gift does not match the errand')
-  if (takeGood(context.state.save, item.type, item.id, 1) === false) reject('insufficient_item', 'the gift is not owned')
-  errand.got = 1
-  errand.took = true
+  if (payload.npcId !== '小艾') reject('not_available', 'only 小艾 has a daily love request')
+  if (island.loved) reject('already_claimed', 'the daily love request was already completed')
+  if (island.want.length === 0) reject('not_available', 'no daily want is available')
+  if (payload.itemId !== island.want) reject('not_available', 'the gift does not match 小艾\'s daily want')
+  const item = findGood(island.want)
+  if (item === null) reject('not_available', 'the daily want item is unknown')
+  if (takeGood(context.state.save, item.type, item.id, 1) === false) reject('insufficient_item', 'the daily want item is not owned')
+  island.loved = true
   const goods: RuntimeGood[] = [goodOf('nums', 'yb', context.rng.randIntInclusive(10, 30) * 10), ...lootGoods(context.rng, 1)]
   grantGoods(context.state.save, goods)
   writeIsland(context.state.save, island)
   return {
-    result: json({ npcId: payload.npcId, itemId: payload.itemId, goods: rewardGoods(goods) }),
+    result: json({ npcId: payload.npcId, itemId: payload.itemId, loved: true, goods: rewardGoods(goods) }),
     events: [
-      event('island.rewardGranted', { kind: 'gift', npcId: payload.npcId, goods: rewardGoods(goods) as never }),
+      event('island.rewardGranted', { kind: 'love', npcId: payload.npcId, goods: rewardGoods(goods) as never }),
       event('item.consumed', { type: item.type, id: item.id, count: 1, source: 'island' }),
     ],
   }
@@ -436,12 +505,21 @@ export function islandRefreshNews(context: HandlerContext, payload: CommandPaylo
   const island = ensureIslandDay(context, requireIslandReady(context))
   const expectedDayKey = dayKeyAt(context.ctx.gameTimeMs, context.state.timeZone)
   if (payload.dayKey !== expectedDayKey) reject('not_available', 'news refresh is for a stale day')
+  if (island.newsFacts.length === 4 && island.newsDay === island.day) {
+    const cached = island.newsFacts.map(([heading, fact]) => ({ heading, fact }))
+    return {
+      result: json({ dayKey: payload.dayKey, facts: cached, cached: true }),
+      events: [event('island.newsRefreshed', { dayKey: payload.dayKey, count: cached.length, cached: true })],
+    }
+  }
   const selected = context.rng.shuffle(ISLAND.facts).slice(0, 4)
-  const facts = selected.map(([heading, fact]) => ({ heading, fact }))
+  island.newsFacts = selected.map(([heading, fact]) => [heading, fact])
+  island.newsDay = island.day
   writeIsland(context.state.save, island)
+  const facts = island.newsFacts.map(([heading, fact]) => ({ heading, fact }))
   return {
-    result: json({ dayKey: payload.dayKey, facts }),
-    events: [event('island.newsRefreshed', { dayKey: payload.dayKey, count: facts.length })],
+    result: json({ dayKey: payload.dayKey, facts, cached: false }),
+    events: [event('island.newsRefreshed', { dayKey: payload.dayKey, count: facts.length, cached: false })],
   }
 }
 
