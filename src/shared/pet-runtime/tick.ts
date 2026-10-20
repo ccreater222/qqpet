@@ -27,7 +27,7 @@ import { fatigue } from './stats'
 import { resolveWeatherForDay, weatherStrain, withWeatherDay } from './environment'
 import { dayKeyAt, nextDailyBoundaryMs } from './time'
 import { STUDY_GOODS, WORK_GOODS } from './content/index'
-import { applyTravelCompletion } from './travel'
+import { applyTravelCompletion, travelEarlyRoll } from './travel'
 import { selfCare } from './self-care'
 import { resetDailyTasks } from './runtime-tasks'
 import { resetFishLimits, settlePinkDiamond } from './handlers-b'
@@ -178,9 +178,13 @@ function processDueJobs(state: EngineState, nowMs: number, rng: RuntimeRng): Dom
       continue
     }
     if (job.type === 'travel') {
-      job.status = 'completed'
-      const destination = typeof job.payload.activityId === 'string' ? job.payload.activityId : ''
-      events.push(...applyTravelCompletion(state, destination, job.payload.early === 1, nowMs, rng))
+      const startedAt = typeof job.payload.startedAtGameMs === 'number' ? job.payload.startedAtGameMs : job.dueAtGameMs - 60 * 60_000
+      const elapsed = (nowMs - startedAt) / 60_000
+      if (elapsed > 60) {
+        job.status = 'completed'
+        const destination = typeof job.payload.activityId === 'string' ? job.payload.activityId : ''
+        events.push(...applyTravelCompletion(state, destination, false, nowMs, rng))
+      }
       continue
     }
     if (job.type === 'work' || job.type === 'study') {
@@ -322,6 +326,21 @@ function passiveMinute(state: EngineState, ctx: RuntimeContext, weather: ReturnT
   }
   events.push(...selfCare(state))
   syncActivityProjection(state)
+  const travelJob = state.scheduledJobs.find(job =>
+    job.status === 'pending' && job.type === 'travel',
+  )
+  if (travelJob !== undefined) {
+    const destination = typeof travelJob.payload.activityId === 'string' ? travelJob.payload.activityId : ''
+    const startedAt = typeof travelJob.payload.startedAtGameMs === 'number'
+      ? travelJob.payload.startedAtGameMs
+      : travelJob.dueAtGameMs - 60 * 60_000
+    const elapsed = (state.gameTimeMs - startedAt) / 60_000
+    const early = elapsed > 55 ? travelEarlyRoll(save, rng) : false
+    if (early || elapsed >= 60 || state.gameTimeMs >= travelJob.dueAtGameMs) {
+      travelJob.status = 'completed'
+      events.push(...applyTravelCompletion(state, destination, early, state.gameTimeMs, rng))
+    }
+  }
   tickTimedGoods(save, grown, events)
   events.push(...sessionClockTick(state, ctx))
   events.push(...illnessTick(state, weather, rng))
@@ -343,12 +362,16 @@ export function advanceMinuteInPlace(state: EngineState, ctx: RuntimeContext): D
   state.save.nowTimeLine = Math.floor(nextGameTimeMs / 1000)
   if (state.save.settings.paused || state.save.petInfo.health <= 0 || state.save.isBury) {
     for (const job of state.scheduledJobs) {
-      if (job.status === 'pending') job.dueAtGameMs += GAME_MINUTE_MS
+      if (job.status === 'pending') {
+        job.dueAtGameMs += GAME_MINUTE_MS
+        if (typeof job.payload.startedAtGameMs === 'number') job.payload.startedAtGameMs += GAME_MINUTE_MS
+      }
     }
     for (const session of state.gameSessions) {
       if (session.status === 'active') session.expiresAtGameMs += GAME_MINUTE_MS
     }
     state.nextDailyBoundaryMs += GAME_MINUTE_MS
+    syncActivityProjection(state)
     return []
   }
   const rng = createRuntimeRng(state.rng)

@@ -543,11 +543,19 @@ export function mailSlot(mails: MailMap, gameTimeMs: number): number {
   return slot
 }
 
+function someUniqueGoods(type: 'food' | 'toy', count: number, rng: RuntimeRng): RuntimeGood[] {
+  const pool = allGoods(type)
+  const picks: RuntimeGood[] = []
+  for (let index = 0; index < count && pool.length > 0; index++) {
+    const selected = rng.randIntInclusive(0, pool.length - 1)
+    const good = pool.splice(selected, 1)[0]
+    picks.push({ ...good, num: rng.randIntInclusive(1, 3) })
+  }
+  return picks
+}
+
 export function mailGoods(save: SharedSaveData, yb: number, rng: RuntimeRng): RuntimeGood[] {
-  const picks = [
-    ...rng.shuffle(allGoods('food')).slice(0, 3).map(good => ({ ...good, num: rng.randIntInclusive(1, 3) })),
-    ...rng.shuffle(allGoods('toy')).slice(0, 2).map(good => ({ ...good, num: rng.randIntInclusive(1, 3) })),
-  ]
+  const picks = [...someUniqueGoods('food', 3, rng), ...someUniqueGoods('toy', 2, rng)]
   picks.push({ ...goodOf('nums', 'yb'), num: scaleYbForDifficulty(save, yb) })
   return picks
 }

@@ -28,7 +28,7 @@ const {
   deserializeRuntimeState,
   fallbackWeatherForDay,
   applyTravelCompletion,
-  chooseTravelEarlyMinutes,
+  travelEarlyRoll,
   travelInventoryTotal,
   sessionActivityForInterval,
   stableStringify,
@@ -38,7 +38,7 @@ const {
 } = await import('../../src/shared/pet-runtime/index.ts')
 const { validateEngineState } = await import('../../src/shared/sync/portable.ts')
 const { COMMAND_TYPES } = await import('../../src/shared/sync/command-validation.ts')
-const { goodOf, TRAVEL_PROVINCES, DAILY_TASK_TEMPLATES, STATIC_TASKS, EXAM_BANK, LOOT_POOLS, parseGoodCode } = await import('../../src/shared/pet-runtime/content/index.ts')
+const { goodOf, TRAVEL_PROVINCES, DAILY_TASK_TEMPLATES, STATIC_TASKS, EXAM_BANK, LOOT_POOLS, parseGoodCode, BIRTHDAY_FOOD_IDS } = await import('../../src/shared/pet-runtime/content/index.ts')
 const {
   dailyTaskCandidates,
   dailyTaskIsOff,
@@ -47,7 +47,10 @@ const {
   resetDailyTasks,
   rollDailyTasks,
 } = await import('../../src/shared/pet-runtime/runtime-tasks.ts')
-const { createRuntimeRng, lootGoods } = await import('../../src/shared/pet-runtime/runtime-helpers.ts')
+const { createRuntimeRng, lootGoods, mailGoods } = await import('../../src/shared/pet-runtime/runtime-helpers.ts')
+const { claimOnlineGift, claimBirthdayGift } = await import('../../src/shared/pet-runtime/handlers-d.ts')
+const { startTravel } = await import('../../src/shared/pet-runtime/handlers-c.ts')
+const { takeTravelPhoto } = await import('../../src/shared/pet-runtime/travel.ts')
 const {
   DAY_KEY,
   GAME_TIME_MS,
@@ -1287,4 +1290,157 @@ test('sweetheart self-care uses recomputed caps on a level-up tick', () => {
   assert.equal(ticked.state.save.selfGoodDatas.food.find(entry => entry.startsWith('_10013006*')), '_10013006*4')
   assert.equal(blob(ticked.state, 'task').doNums.Eat, 1)
   assert.ok(ticked.state.save.petInfo.hunger > 1100)
+})
+
+test('fresh static task rewards replay renderer load-then-reset RNG order', () => {
+  function rewardFor(template, rng) {
+    const random = template.reroll ? lootGoods(rng, template.reroll) : []
+    const fixed = (template.good ?? []).map(code => parseGoodCode(code)).filter(good => good !== null)
+    return [...random, ...fixed]
+  }
+  function expectedStatic(seed) {
+    const rng = createRuntimeRng(createRngState(seed))
+    const tabs = ['ddw', 'growth', 'travel']
+    const loaded = {}
+    for (const tab of tabs) {
+      loaded[tab] = STATIC_TASKS[tab].map(template => ({ take: false, good: rewardFor(template, rng) }))
+    }
+    const reset = {}
+    for (const tab of tabs) {
+      reset[tab] = STATIC_TASKS[tab].map((template, index) => ({
+        take: template.keep === true ? loaded[tab][index].take : false,
+        good: template.reroll ? rewardFor(template, rng) : loaded[tab][index].good,
+      }))
+    }
+    return reset
+  }
+  function assertPath(start) {
+    const expected = expectedStatic(SEED)
+    const actual = resetDailyTasks(start.save, GAME_TIME_MS, 'Asia/Shanghai', createRuntimeRng(createRngState(SEED)))
+    assert.deepEqual(actual.next.taskList.ddw, expected.ddw)
+    assert.deepEqual(actual.next.taskList.growth, expected.growth)
+    assert.deepEqual(actual.next.taskList.travel, expected.travel)
+  }
+  assertPath(baseState())
+  assertPath(ok(baseState(), 'pet.reset', {}, { actorRole: 'owner' }).state)
+  assertPath(ok(ok(baseState(), 'pet.reset', {}, { actorRole: 'owner' }).state, 'pet.adopt', { sex: 'GG' }, { actorRole: 'owner' }).state)
+})
+
+test('paused travel projection freezes active minutes and early rolls use current state', () => {
+  const base = baseState()
+  const drawsBeforeStart = base.rng.draws
+  const started = ok(base, 'job.startTravel')
+  assert.equal(started.state.rng.draws, drawsBeforeStart + 1)
+  const job = started.state.scheduledJobs[0]
+  const dueAt = job.dueAtGameMs
+  const startedAt = job.payload.startedAtGameMs
+  const drawsBeforePause = started.state.rng.draws
+
+  const paused = clone(started.state)
+  paused.save.settings.paused = true
+  const pausedTicks = advanceMinutes(paused, context(paused, { sessionActive: false, activeClientCount: 0 }), 10)
+  assert.equal(pausedTicks.ok, true, JSON.stringify(pausedTicks.ok ? pausedTicks.result : pausedTicks.error))
+  const pausedJob = pausedTicks.state.scheduledJobs[0]
+  assert.equal(pausedTicks.state.rng.draws, drawsBeforePause)
+  assert.equal(pausedJob.dueAtGameMs, dueAt + 10 * 60000)
+  assert.equal(pausedJob.payload.startedAtGameMs, startedAt + 10 * 60000)
+  assert.equal(blob(pausedTicks.state, 'activity'), 0)
+
+  pausedTicks.state.save.settings.paused = false
+  const resumed = advanceMinute(pausedTicks.state, context(pausedTicks.state, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.ok ? resumed.result : resumed.error))
+  assert.equal(blob(resumed.state, 'activity'), 1)
+  assert.equal(resumed.state.scheduledJobs[0].status, 'pending')
+
+  function thresholdFor(save) {
+    let captured = null
+    const fakeRng = {
+      randIntInclusive(min, max) {
+        captured = { min, max }
+        return 11
+      },
+    }
+    const early = travelEarlyRoll(save, fakeRng)
+    return { captured, early }
+  }
+  const low = thresholdFor(clone(base.save))
+  const luckySave = clone(base.save)
+  luckySave.petInfo.pinkDiamond = true
+  luckySave.petInfo.PDiamondLevel = 7
+  luckySave.petInfo.sweetHeart = true
+  luckySave.petInfo.charm = 60000
+  luckySave.petInfo.intel = 90000
+  const lucky = thresholdFor(luckySave)
+  assert.equal(low.captured.min, 0)
+  assert.equal(low.captured.max, 990)
+  assert.equal(lucky.captured.max < low.captured.max, true)
+  assert.equal(low.early, false)
+  assert.equal(lucky.early, false)
+})
+
+
+test('rounded renderer draws remain rounded outside lootGoods item selection', () => {
+  function recordingRng(roundedValue = 0) {
+    const calls = []
+    return {
+      calls,
+      randIntInclusive(min, max) {
+        calls.push(['rand', min, max])
+        return roundedValue
+      },
+      randomIndex(count) {
+        calls.push(['index', count])
+        return 0
+      },
+      randomUnit() {
+        calls.push(['unit'])
+        return 0.99
+      },
+      chance(probability) {
+        calls.push(['chance', probability])
+        return false
+      },
+    }
+  }
+
+  const online = baseState()
+  online.save.saveJsonData.signin = JSON.stringify({
+    collectionList: {}, getGrowth: null, onlineGiftNum: 0, isOnlineLastTime: 0, getBirthDayGift: true,
+  })
+  const onlineRng = recordingRng(2)
+  const onlineResult = claimOnlineGift({ state: online, ctx: context(online), rng: onlineRng })
+  assert.deepEqual(onlineRng.calls[0], ['rand', 0, 10_000])
+  assert.equal(onlineRng.calls.some(call => call[0] === 'index'), true)
+  assert.ok(onlineResult.events.length > 0)
+
+  const birthday = baseState()
+  birthday.save.saveJsonData.signin = JSON.stringify({
+    collectionList: {}, getGrowth: null, onlineGiftNum: 0, isOnlineLastTime: 20, getBirthDayGift: false,
+  })
+  const birthdayRng = recordingRng(0)
+  const birthdayResult = claimBirthdayGift({ state: birthday, ctx: context(birthday), rng: birthdayRng })
+  assert.deepEqual(birthdayRng.calls, [['rand', 0, BIRTHDAY_FOOD_IDS.length - 1]])
+  assert.ok(birthdayResult.events.length > 0)
+
+  const photo = baseState()
+  photo.save.saveJsonData.album = '[]'
+  const photoRng = recordingRng(0)
+  const shot = takeTravelPhoto(photo.save, TRAVEL_PROVINCES[0].name, GAME_TIME_MS, photoRng)
+  assert.ok(shot)
+  assert.equal(photoRng.calls[0][0], 'chance')
+  const roundedPhotoCall = photoRng.calls.find(call => call[0] === 'rand')
+  assert.ok(roundedPhotoCall)
+  assert.equal(roundedPhotoCall[1], 0)
+  assert.equal(photoRng.calls.some(call => call[0] === 'index'), false)
+
+  const travel = baseState()
+  const travelRng = recordingRng(0)
+  startTravel({ state: travel, ctx: context(travel), rng: travelRng })
+  assert.deepEqual(travelRng.calls[0], ['rand', 0, TRAVEL_PROVINCES.length - 1])
+
+  const mail = baseState()
+  const mailRng = recordingRng(0)
+  const mailGift = mailGoods(mail.save, 100, mailRng)
+  assert.equal(mailGift.length, 6)
+  assert.equal(mailRng.calls.every(call => call[0] === 'rand'), true)
 })

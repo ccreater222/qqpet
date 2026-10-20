@@ -16,7 +16,6 @@ import {
   writeTaskProgress,
 } from './runtime-helpers'
 import { counterValue, taskDefinitionAt } from './runtime-tasks'
-import { chooseTravelEarlyMinutes } from './travel'
 import { answerIslandQuiz, startExam, startIslandQuiz, submitExam, type SessionHandlerOutcome } from './sessions'
 import type { HandlerContext, HandlerResult } from './handler-types'
 import type { JsonObject, JsonValue } from './types'
@@ -114,19 +113,18 @@ export function startTravel(context: HandlerContext): HandlerResult {
   requireNotPaused(context.state)
   const blocker = cannotStartActivity(context.state.save)
   if (blocker !== null) rejectActivityBlocker(blocker)
-  const province = context.rng.pickOne(TRAVEL_PROVINCES)
-  if (province === null) reject('not_available', 'no travel destinations')
+  if (TRAVEL_PROVINCES.length === 0) reject('not_available', 'no travel destinations')
+  const province = TRAVEL_PROVINCES[context.rng.randIntInclusive(0, TRAVEL_PROVINCES.length - 1)]
   context.state.save.activeOption.trip = province.name
   writeSharedBlob(context.state.save, 'activity', 0)
-  const plan = chooseTravelEarlyMinutes(context.state.save, context.rng)
-  const dueAtGameMs = context.ctx.gameTimeMs + plan.minutes * 60_000
+  const dueAtGameMs = context.ctx.gameTimeMs + 60 * 60_000
   const job = scheduleJob(context.state, 'travel', dueAtGameMs, payloadJson({
     activityKind: 'travel', activityId: province.name, startedAtGameMs: context.ctx.gameTimeMs,
-    early: plan.early ? 1 : 0, plannedMinutes: plan.minutes,
+    plannedMinutes: 60,
   }))
   return {
-    result: json({ jobId: job.id, destination: province.name, dueAtGameMs, early: plan.early }),
-    events: [domainEvent('activity.started', { kind: 'travel', activityId: province.name, dueAtGameMs, early: plan.early })],
+    result: json({ jobId: job.id, destination: province.name, dueAtGameMs }),
+    events: [domainEvent('activity.started', { kind: 'travel', activityId: province.name, dueAtGameMs })],
   }
 }
 

@@ -16,8 +16,8 @@ import type { EngineState, JsonObject } from './types'
 import { fatigue, luck } from './stats'
 
 
-/** Pre-rolls the renderer's final-five-minute early return into the authoritative job deadline. */
-export function chooseTravelEarlyMinutes(save: SharedSaveData, rng: RuntimeRng): { minutes: number; early: boolean } {
+/** Current-state renderer tripTask.early roll, evaluated only in the final five active ticks. */
+export function travelEarlyRoll(save: SharedSaveData, rng: RuntimeRng): boolean {
   const tired = fatigue({
     health: save.petInfo.health,
     mood: save.petInfo.mood,
@@ -39,10 +39,7 @@ export function chooseTravelEarlyMinutes(save: SharedSaveData, rng: RuntimeRng):
     fatigue: tired,
   })
   const threshold = Math.max(0, 1000 - lucky * 10)
-  for (let done = 56; done <= 60; done++) {
-    if (rng.randIntInclusive(0, threshold) <= 10) return { minutes: done, early: true }
-  }
-  return { minutes: 60, early: false }
+  return rng.randIntInclusive(0, threshold) <= 10
 }
 
 export interface TravelShot { id: string; city: string; d: number }
@@ -76,9 +73,7 @@ export function takeTravelPhoto(
     [city, ''].map(place => left.filter(photo => photo.b === kind && photo.p === place)),
   ).find(entries => entries.length > 0)
   if (pool === undefined) return null
-  const index = rng.randomIndex(pool.length)
-  if (index === null) return null
-  const photo = pool[index]
+  const photo = pool[rng.randIntInclusive(0, pool.length - 1)]
   const shot: TravelShot = { id: photo.id, city, d: Math.floor(gameTimeMs / 1000) }
   writeSharedBlob(save, 'album', [...readShots(save), shot])
   return shot

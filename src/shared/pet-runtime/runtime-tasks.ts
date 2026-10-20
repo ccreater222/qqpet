@@ -107,6 +107,32 @@ export function rollDailyTasks(
   return daily
 }
 
+
+export function buildResetStaticTaskLists(
+  previous: TaskProgress,
+  rng: RuntimeRng,
+): Record<'ddw' | 'growth' | 'travel', TaskEntry[]> {
+  const tabs = ['ddw', 'growth', 'travel'] as const
+  const loaded = {} as Record<'ddw' | 'growth' | 'travel', TaskEntry[]>
+  for (const tab of tabs) {
+    loaded[tab] = STATIC_TASKS[tab].map((template, index) => {
+      const existing = previous.taskList[tab][index]
+      return existing ?? entryFor(template, rng)
+    })
+  }
+  const reset = {} as Record<'ddw' | 'growth' | 'travel', TaskEntry[]>
+  for (const tab of tabs) {
+    reset[tab] = STATIC_TASKS[tab].map((template, index) => {
+      const entry = loaded[tab][index]
+      return {
+        take: template.keep === true ? entry.take : false,
+        good: template.reroll ? rewardGoods(template, rng) : entry.good,
+      }
+    })
+  }
+  return reset
+}
+
 export function resetDailyTasks(
   save: SharedSaveData,
   gameTimeMs: number,
@@ -117,42 +143,9 @@ export function resetDailyTasks(
   const previous = readTaskProgress(save)
   const next: TaskProgress = {
     doNums: {},
-    taskList: {
-      daily: [],
-      ddw: previous.taskList.ddw.map((entry, index) => {
-        const template = STATIC_TASKS.ddw[index]
-        if (template === undefined) return entry
-        return {
-          take: template.keep === true ? entry.take : false,
-          good: template.reroll ? rewardGoods(template, rng) : entry.good,
-        }
-      }),
-      growth: previous.taskList.growth.map((entry, index) => {
-        const template = STATIC_TASKS.growth[index]
-        if (template === undefined) return entry
-        return {
-          take: template.keep === true ? entry.take : false,
-          good: template.reroll ? rewardGoods(template, rng) : entry.good,
-        }
-      }),
-      travel: previous.taskList.travel.map((entry, index) => {
-        const template = STATIC_TASKS.travel[index]
-        if (template === undefined) return entry
-        return {
-          take: template.keep === true ? entry.take : false,
-          good: template.reroll ? rewardGoods(template, rng) : entry.good,
-        }
-      }),
-    },
+    taskList: { daily: [], ...buildResetStaticTaskLists(previous, rng) },
     daily: previous.daily,
     dailyDay: previous.dailyDay,
-  }
-  for (const tab of ['ddw', 'growth', 'travel'] as const) {
-    next.taskList[tab] = STATIC_TASKS[tab].map((template, index) => {
-      const existing = next.taskList[tab][index]
-      if (existing !== undefined) return existing
-      return entryFor(template, rng)
-    })
   }
   writeTaskProgress(save, next)
   const daily = rollDailyTasks(save, gameTimeMs, timeZone, rng, calendarDay)
