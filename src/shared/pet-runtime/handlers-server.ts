@@ -7,6 +7,7 @@ import { dayKeyAt, reconcileTimeZone } from './time'
 import type { JsonObject, JsonValue } from './types'
 
 const MAX_ADMIN_RANDOM_GOODS = 1000
+const MAX_ADMIN_CHEAT_AMOUNT = 1_000_000
 
 function json<T>(value: T): JsonValue {
   return value as unknown as JsonValue
@@ -69,7 +70,9 @@ export function serverSetWeatherCity(context: HandlerContext, payload: CommandPa
 }
 
 export function adminGrantCheat(context: HandlerContext, payload: CommandPayloadMap['admin.grantCheat']): HandlerResult {
-  if (Number.isFinite(payload.amount) === false) reject('invalid_payload', 'cheat amount must be finite')
+  if (Number.isFinite(payload.amount) === false || payload.amount <= 0 || payload.amount > MAX_ADMIN_CHEAT_AMOUNT) {
+    reject('invalid_payload', 'cheat amount must be a finite positive amount within the safe maximum')
+  }
   const stat = payload.stat
   const next = context.state.save.petInfo[stat] + payload.amount
   if (stat === 'health') {

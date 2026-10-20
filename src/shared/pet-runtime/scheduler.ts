@@ -73,23 +73,24 @@ export function advanceSchedulerChunk(
   const activityAt = (fromWallMs: number, toWallMs: number): SessionActivity =>
     options.coverageAtWallMs?.(fromWallMs, toWallMs) ??
     sessionActivityForInterval(candidate.sessionCoverage, fromWallMs, toWallMs)
-  const nextCoverageStart = (fromWallMs: number): number => {
-    if (options.coverageAtWallMs !== undefined) return targetWallMs
-    let resume = targetWallMs
-    for (const interval of candidate.sessionCoverage) {
-      if (interval.disconnectedAtWallMs !== undefined && interval.disconnectedAtWallMs <= fromWallMs) continue
-      if (interval.connectedAtWallMs > fromWallMs && interval.connectedAtWallMs < resume) resume = interval.connectedAtWallMs
+  const liveAt = (wallMs: number): number =>
+    options.liveActiveClientCountAtWallMs?.(wallMs) ?? 0
+  const nextActiveWall = (fromWallMs: number): number => {
+    for (let wallMs = fromWallMs; wallMs < targetWallMs; wallMs += GAME_MINUTE_MS) {
+      const activity = activityAt(wallMs, wallMs + GAME_MINUTE_MS)
+      if (activity.activeClientCount > 0 || liveAt(wallMs) > 0) return wallMs
     }
-    return Math.min(resume, targetWallMs)
+    return targetWallMs
   }
   for (let index = 0; index < ticks; index++) {
     const fromWallMs = anchor + index * GAME_MINUTE_MS
     const toWallMs = fromWallMs + GAME_MINUTE_MS
-    const liveAtMinute = options.liveActiveClientCountAtWallMs?.(fromWallMs) ?? 0
+    const liveAtMinute = liveAt(fromWallMs)
     nonNegativeInteger(liveAtMinute, 'liveActiveClientCountAtWallMs')
     const activity = activityAt(fromWallMs, toWallMs)
-    if (candidate.advanceWhileEmpty === false && liveAtMinute === 0 && activity.activeClientCount === 0) {
-      const resumeAtWallMs = nextCoverageStart(fromWallMs)
+    const activeAtMinute = Math.max(activity.activeClientCount, liveAtMinute)
+    if (candidate.advanceWhileEmpty === false && activeAtMinute === 0) {
+      const resumeAtWallMs = nextActiveWall(fromWallMs)
       candidate.lastSchedulerWallMs = resumeAtWallMs
       return {
         ok: true, state: candidate, events, ticks: completed,
@@ -99,8 +100,8 @@ export function advanceSchedulerChunk(
     const tickCtx: RuntimeContext = {
       ...ctx,
       gameTimeMs: candidate.gameTimeMs,
-      activeClientCount: activity.activeClientCount,
-      sessionActive: activity.sessionActive,
+      activeClientCount: activeAtMinute,
+      sessionActive: activeAtMinute > 0,
       actorDeviceId: null,
     }
     events.push(...advanceMinuteInPlace(candidate, tickCtx))

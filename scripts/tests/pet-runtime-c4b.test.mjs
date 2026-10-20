@@ -522,6 +522,15 @@ const expectedMutationSiteCounts = {
     'src/shared/pet-runtime/travel.ts|writeMails|': 1,
 }
 
+const expectedCallbackSiteCounts = new Map([
+  ['src/renderer/pet/fishing.ts', 1],
+  ['src/renderer/swf/player.ts', 1],
+  ['src/renderer/ui/farm.ts', 2],
+  ['src/renderer/ui/fishing.ts', 4],
+  ['src/renderer/ui/float.ts', 1],
+  ['src/renderer/ui/talk.ts', 2],
+])
+
 test('full renderer mutation gate classifies every canonical mutation/site to runtime groups', () => {
   const runtimeCommands = new Set([...C3_COMMAND_TYPES, ...C4A_COMMAND_TYPES, ...C4B_COMMAND_TYPES])
   const mapping = {
@@ -635,6 +644,30 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
   for (const key of allSiteKeys) {
     assert.equal(actualSiteCounts.get(key) ?? 0, expectedMutationSiteCounts[key] ?? 0, 'unexpected or missing mutation call site: ' + key)
   }
+
+  const callbackPattern = new RegExp(String.raw`\.callback\s*\(|ExternalInterface\.addCallback|pondCommand\s*\(`, 'g')
+  const actualCallbackCounts = new Map()
+  function walkCallbackCounts(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) walkCallbackCounts(path)
+      else if (entry.name.endsWith('.ts')) {
+        const count = [...readFileSync(path, 'utf8').matchAll(callbackPattern)].length
+        if (count > 0) actualCallbackCounts.set(path, count)
+      }
+    }
+  }
+  walkCallbackCounts('src/renderer')
+  walkCallbackCounts('src/shared')
+  const callbackKeys = new Set([...expectedCallbackSiteCounts.keys(), ...actualCallbackCounts.keys()])
+  for (const key of callbackKeys) {
+    assert.equal(actualCallbackCounts.get(key) ?? 0, expectedCallbackSiteCounts.get(key) ?? 0, 'unexpected or missing SWF callback mutation site: ' + key)
+  }
+  const simulatedExtraCallback = new Map(expectedCallbackSiteCounts)
+  simulatedExtraCallback.set('src/renderer/ui/farm.ts', (simulatedExtraCallback.get('src/renderer/ui/farm.ts') ?? 0) + 1)
+  const callbackMismatch = [...new Set([...simulatedExtraCallback.keys(), ...actualCallbackCounts.keys()])]
+    .some(key => (simulatedExtraCallback.get(key) ?? 0) !== (actualCallbackCounts.get(key) ?? 0))
+  assert.equal(callbackMismatch, true)
 
   const updateTargets = new Set()
   const setInfoTargets = new Set()
@@ -799,6 +832,28 @@ test('advanceWhileEmpty=false pre-connect gap freezes without game-time advancem
   assert.equal(second.state.save.petInfo.onLineTime, 1)
 })
 
+test('advanceWhileEmpty=false hook-only pre-connect gap resumes from live hook activity', () => {
+  const state = baseState()
+  state.lastSchedulerWallMs = WALL_TIME_MS
+  state.gameTimeMs = GAME_TIME_MS
+  state.advanceWhileEmpty = false
+  state.sessionCoverage = []
+  const connectAt = WALL_TIME_MS + 2 * 60000
+  const target = WALL_TIME_MS + 4 * 60000
+  const liveHook = wallMs => wallMs >= connectAt ? 1 : 0
+  const first = advanceSchedulerChunk(state, context(state, { activeClientCount: 0 }), target, { liveActiveClientCountAtWallMs: liveHook })
+  assert.equal(first.ticks, 0)
+  assert.equal(first.frozen, true)
+  assert.equal(first.resumeAtWallMs, connectAt)
+  assert.equal(first.state.lastSchedulerWallMs, connectAt)
+  assert.equal(first.state.gameTimeMs, GAME_TIME_MS)
+  const second = advanceSchedulerChunk(first.state, context(first.state, { activeClientCount: 0 }), target, { liveActiveClientCountAtWallMs: liveHook })
+  assert.equal(second.ticks, 2)
+  assert.equal(second.frozen, false)
+  assert.equal(second.state.gameTimeMs, GAME_TIME_MS + 120000)
+  assert.equal(second.state.save.petInfo.onLineTime, 2)
+})
+
 test('per-minute coverage hook credits only post-connect minutes', () => {
   const state = baseState()
   state.lastSchedulerWallMs = WALL_TIME_MS
@@ -883,8 +938,20 @@ test('server/admin commands enforce owner authority and repeated settings stay c
   assert.equal(cheat.state.save.petInfo.yb, beforeCheat + 50)
   const random = ok(cheat.state, 'admin.grantRandomGoods', { type: 'food', quantity: 2 }, { actorRole: 'owner' })
   assert.equal(random.result.goods.length, 2)
-  const noop = ok(cheat.state, 'admin.grantCheat', { stat: 'yb', amount: 0 }, { actorRole: 'owner' })
-  assert.equal(noop.state.save.petInfo.yb, cheat.state.save.petInfo.yb)
+  const deterministicA = ok(baseState(), 'admin.grantRandomGoods', { type: 'food', quantity: 2 }, { actorRole: 'owner' })
+  const deterministicB = ok(baseState(), 'admin.grantRandomGoods', { type: 'food', quantity: 2 }, { actorRole: 'owner' })
+  assert.equal(stableStringify(deterministicA.state), stableStringify(deterministicB.state))
+  rejected(zoneTwice.state, 'settings.setShared', { key: 'unknown', value: true }, {}, 'invalid_payload')
+  rejected(zoneTwice.state, 'settings.setShared', { key: 'undying', value: 'yes' }, {}, 'invalid_payload')
+  rejected(zoneTwice.state, 'server.setTimeZone', { timeZone: 'not/a/zone' }, { actorRole: 'owner' }, 'invalid_payload')
+  rejected(zoneTwice.state, 'server.setAdvanceWhileEmpty', { enabled: 'no' }, { actorRole: 'owner' }, 'invalid_payload')
+  rejected(zoneTwice.state, 'server.setWeatherCity', { city: '' }, { actorRole: 'owner' }, 'invalid_payload')
+  const repeatCheat = ok(cheat.state, 'admin.grantCheat', { stat: 'yb', amount: 50 }, { actorRole: 'owner' })
+  assert.equal(repeatCheat.state.save.petInfo.yb, cheat.state.save.petInfo.yb + 50)
+  for (const amount of [-1, 0, Number.NaN, Number.POSITIVE_INFINITY, 1_000_001]) {
+    rejected(zoneTwice.state, 'admin.grantCheat', { stat: 'yb', amount }, { actorRole: 'owner' }, 'invalid_payload')
+  }
+  rejected(zoneTwice.state, 'admin.grantRandomGoods', { type: 'food', quantity: 0 }, { actorRole: 'owner' }, 'invalid_payload')
 })
 
 
