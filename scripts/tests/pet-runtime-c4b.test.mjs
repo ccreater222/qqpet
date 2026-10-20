@@ -29,6 +29,10 @@ const {
   reconcileTimeZone,
   executeCommandIdempotent,
   SerializedIdempotentExecutor,
+  createPersistedRuntimeState,
+  serializePersistedRuntimeState,
+  deserializePersistedRuntimeState,
+  validatePersistedRuntimeState,
   C3_COMMAND_TYPES,
   C4A_COMMAND_TYPES,
   C4B_COMMAND_TYPES,
@@ -534,6 +538,7 @@ const expectedCallbackSignatures = {
   'src/renderer/ui/fishing.ts|pondCommand|head.cmd': 1,
   'src/renderer/pet/fishing.ts|pondCommand|cmd': 1,
   'tools/qqfarm/src/com/MyFarm/control/FarmlandControl.as|ExternalInterface.addCallback|farmAll': 1,
+  'tools/qqfarm/src/com/MyFarm/control/Control.as|ExternalInterface.addCallback|farmView': 1,
 }
 test('full renderer mutation gate classifies every canonical mutation/site to runtime groups', () => {
   const runtimeCommands = new Set([...C3_COMMAND_TYPES, ...C4A_COMMAND_TYPES, ...C4B_COMMAND_TYPES])
@@ -661,6 +666,9 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
     for (const match of source.matchAll(/ExternalInterface\.addCallback\s*\(\s*['"]([^'"]+)['"]/g)) {
       addCallbackSignature(file, 'ExternalInterface.addCallback', match[1])
     }
+    for (const match of source.matchAll(/ExternalInterface\.call\s*\(\s*['"]([^'"]+)['"]/g)) {
+      addCallbackSignature(file, 'ExternalInterface.call', match[1])
+    }
     for (const match of source.matchAll(/\bpondCommand\s*\(\s*([^,)]+)/g)) {
       const identity = match[1].trim().replace(/:.*$/, '')
       addCallbackSignature(file, 'pondCommand', identity)
@@ -675,7 +683,14 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
   }
   walkCallbackSignatures('src/renderer')
   walkCallbackSignatures('src/shared')
-  collectCallbackSignatures('tools/qqfarm/src/com/MyFarm/control/FarmlandControl.as', readFileSync('tools/qqfarm/src/com/MyFarm/control/FarmlandControl.as', 'utf8'))
+  function walkActionScript(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) walkActionScript(path)
+      else if (entry.name.endsWith('.as')) collectCallbackSignatures(path, readFileSync(path, 'utf8'))
+    }
+  }
+  walkActionScript('tools/qqfarm')
   const callbackKeys = new Set([...Object.keys(expectedCallbackSignatures), ...actualCallbackSignatures.keys()])
   for (const key of callbackKeys) {
     assert.equal(actualCallbackSignatures.get(key) ?? 0, expectedCallbackSignatures[key] ?? 0, 'unexpected or missing SWF callback signature: ' + key)
@@ -698,6 +713,11 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
   simulatedAddCallbackReplacement['tools/qqfarm/src/com/MyFarm/control/FarmlandControl.as|ExternalInterface.addCallback|farmAll'] = 0
   simulatedAddCallbackReplacement['tools/qqfarm/src/com/MyFarm/control/FarmlandControl.as|ExternalInterface.addCallback|farmEvil'] = 1
   assert.equal(callbackSignaturesMatch(actualCallbackSignatures, simulatedAddCallbackReplacement), false)
+  const simulatedNewAsCallback = {
+    ...expectedCallbackSignatures,
+    'tools/qqfarm/src/com/MyFarm/control/ReclamationControl.as|ExternalInterface.addCallback|newCallback': 1,
+  }
+  assert.equal(callbackSignaturesMatch(actualCallbackSignatures, simulatedNewAsCallback), false)
 
   const updateTargets = new Set()
   const setInfoTargets = new Set()
@@ -997,69 +1017,102 @@ test('real scheduler catch-up crosses spring-forward and fall-back 06:00 boundar
     state.advanceWhileEmpty = true
     state.sessionCoverage = []
     state.save.saveJsonData.task = '{}'
-    state.save.saveJsonData.signin = JSON.stringify({ collectionList: {}, getGrowth: null, onlineGiftNum: 3, isOnlineLastTime: 2, getBirthDayGift: true })
+    state.save.saveJsonData.email = '{}'
+    state.save.petInfo.onLineTime = 20
+    state.save.saveJsonData.signin = JSON.stringify({ collectionList: {}, getGrowth: [[1, 2, 3], null], onlineGiftNum: 3, isOnlineLastTime: 2, getBirthDayGift: true })
     const result = advanceSchedulerChunk(state, context(state), WALL_TIME_MS + 60000)
     assert.equal(result.ticks, 1)
     const expectedKey = dayKeyAt(boundary, zone)
     assert.equal(result.state.lastProcessedDayBoundaryKey, expectedKey)
     assert.equal(blob(result.state, 'task').dailyDay, boundary / 1000)
+    const signin = blob(result.state, 'signin')
+    assert.equal(signin.getGrowth, null)
+    assert.equal(signin.getBirthDayGift, false)
+    assert.ok(Object.values(blob(result.state, 'email')).some(mail => mail.l === '欢迎来到QQ宠物~'))
     assert.ok(result.state.nextDailyBoundaryMs > boundary)
     assert.equal(result.state.scheduledJobs.some(job => job.type === 'daily'), false)
   }
 })
 
 
-test('pure device-scoped opId idempotency returns stored admin results without reapplying', () => {
+test('atomic persisted document scopes opIds and replays without reapplying', () => {
   const petId = 'pet-1'
   const deviceId = 'device-a'
   const base = baseState()
+  const document = createPersistedRuntimeState(base)
   const cheatCommand = { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 50 } }
-  const firstCheat = executeCommandIdempotent(petId, deviceId, base, cheatCommand, context(base, { actorRole: 'owner' }), 'op-cheat-1')
+  const firstCheat = executeCommandIdempotent(petId, deviceId, document, cheatCommand, context(base, { actorRole: 'owner' }), 'op-cheat-1')
   assert.equal(firstCheat.duplicate, false)
   assert.equal(firstCheat.outcome.ok, true)
-  assert.equal(firstCheat.commit.state.save.petInfo.yb, base.save.petInfo.yb + 50)
-  const retryCheat = executeCommandIdempotent(petId, deviceId, firstCheat.commit.state, cheatCommand, context(firstCheat.commit.state, { actorRole: 'owner' }), 'op-cheat-1', firstCheat.commit.cache)
+  assert.equal(firstCheat.document.engine.save.petInfo.yb, base.save.petInfo.yb + 50)
+  assert.equal(firstCheat.document.idempotency.records.length, 1)
+  assert.deepEqual(Object.keys(firstCheat.document).sort(), ['engine', 'idempotency', 'schemaVersion'])
+  const retryCheat = executeCommandIdempotent(petId, deviceId, firstCheat.document, cheatCommand, context(firstCheat.document.engine, { actorRole: 'owner' }), 'op-cheat-1')
   assert.equal(retryCheat.duplicate, true)
   assert.deepEqual(retryCheat.outcome.result, firstCheat.outcome.result)
   assert.equal(retryCheat.outcome.events.length, 0)
-  assert.equal(retryCheat.commit.state.save.petInfo.yb, firstCheat.commit.state.save.petInfo.yb)
+  assert.equal(retryCheat.document.engine.save.petInfo.yb, firstCheat.document.engine.save.petInfo.yb)
 
   const goodsCommand = { type: 'admin.grantRandomGoods', payload: { type: 'food', quantity: 2 } }
-  const firstGoods = executeCommandIdempotent(petId, deviceId, firstCheat.commit.state, goodsCommand, context(firstCheat.commit.state, { actorRole: 'owner' }), 'op-goods-1', retryCheat.commit.cache)
-  const retryGoods = executeCommandIdempotent(petId, deviceId, firstGoods.commit.state, goodsCommand, context(firstGoods.commit.state, { actorRole: 'owner' }), 'op-goods-1', firstGoods.commit.cache)
+  const firstGoods = executeCommandIdempotent(petId, deviceId, firstCheat.document, goodsCommand, context(firstCheat.document.engine, { actorRole: 'owner' }), 'op-goods-1')
+  const retryGoods = executeCommandIdempotent(petId, deviceId, firstGoods.document, goodsCommand, context(firstGoods.document.engine, { actorRole: 'owner' }), 'op-goods-1')
   assert.equal(firstGoods.duplicate, false)
   assert.equal(retryGoods.duplicate, true)
   assert.deepEqual(retryGoods.outcome.result, firstGoods.outcome.result)
   assert.equal(retryGoods.outcome.events.length, 0)
-  assert.equal(stableStringify(retryGoods.commit.state), stableStringify(firstGoods.commit.state))
-  assert.equal(typeof JSON.parse(JSON.stringify(retryGoods.commit.cache)), 'object')
+  assert.equal(stableStringify(retryGoods.document.engine), stableStringify(firstGoods.document.engine))
 
-  const otherDevice = executeCommandIdempotent(petId, 'device-b', firstCheat.commit.state, cheatCommand, context(firstCheat.commit.state, { actorRole: 'owner' }), 'op-cheat-1', retryGoods.commit.cache)
+  const otherDevice = executeCommandIdempotent(petId, 'device-b', firstCheat.document, cheatCommand, context(firstCheat.document.engine, { actorRole: 'owner' }), 'op-cheat-1')
   assert.equal(otherDevice.duplicate, false)
-  assert.equal(otherDevice.commit.state.save.petInfo.yb, firstCheat.commit.state.save.petInfo.yb + 50)
-  assert.equal(otherDevice.commit.cache.length, retryGoods.commit.cache.length + 1)
+  assert.equal(otherDevice.document.engine.save.petInfo.yb, firstCheat.document.engine.save.petInfo.yb + 50)
+  assert.equal(otherDevice.document.idempotency.records.length, firstCheat.document.idempotency.records.length + 1)
 
-  const escapedA = executeCommandIdempotent(petId, deviceId, base, cheatCommand, context(base, { actorRole: 'owner' }), '__proto__')
-  const escapedB = executeCommandIdempotent(petId, deviceId, escapedA.commit.state, cheatCommand, context(escapedA.commit.state, { actorRole: 'owner' }), 'toString', escapedA.commit.cache)
+  const escapedA = executeCommandIdempotent(petId, deviceId, createPersistedRuntimeState(base), cheatCommand, context(base, { actorRole: 'owner' }), '__proto__')
+  const escapedB = executeCommandIdempotent(petId, deviceId, escapedA.document, cheatCommand, context(escapedA.document.engine, { actorRole: 'owner' }), 'toString')
   assert.equal(escapedA.duplicate, false)
   assert.equal(escapedB.duplicate, false)
-  assert.equal(escapedB.commit.cache.length, 2)
-  assert.equal(Object.prototype.hasOwnProperty.call(escapedB.commit.cache, '__proto__'), false)
+  assert.equal(escapedB.document.idempotency.records.length, 2)
+  assert.equal(Object.prototype.hasOwnProperty.call(escapedB.document.idempotency.records, '__proto__'), false)
 
-  const rejectedFirst = executeCommandIdempotent(petId, deviceId, base, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 0 } }, context(base, { actorRole: 'owner' }), 'op-rejected')
-  const rejectedRetry = executeCommandIdempotent(petId, deviceId, rejectedFirst.commit.state, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 0 } }, context(rejectedFirst.commit.state, { actorRole: 'owner' }), 'op-rejected', rejectedFirst.commit.cache)
+  const rejectedFirst = executeCommandIdempotent(petId, deviceId, createPersistedRuntimeState(base), { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 0 } }, context(base, { actorRole: 'owner' }), 'op-rejected')
+  const rejectedRetry = executeCommandIdempotent(petId, deviceId, rejectedFirst.document, { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 0 } }, context(rejectedFirst.document.engine, { actorRole: 'owner' }), 'op-rejected')
   assert.equal(rejectedFirst.outcome.ok, false)
   assert.equal(rejectedRetry.duplicate, true)
   assert.deepEqual(rejectedRetry.outcome.error, rejectedFirst.outcome.error)
-  assert.equal(stableStringify(rejectedRetry.commit.state), stableStringify(rejectedFirst.commit.state))
+  assert.equal(stableStringify(rejectedRetry.document.engine), stableStringify(rejectedFirst.document.engine))
 
-  const serialized = new SerializedIdempotentExecutor(petId, deviceId, base)
-  const serializedFirst = serialized.execute(cheatCommand, context(base, { actorRole: 'owner' }), 'op-serialized')
-  const serializedRetry = serialized.execute(cheatCommand, context(serializedFirst.commit.state, { actorRole: 'owner' }), 'op-serialized')
+  const serialized = serializePersistedRuntimeState(firstGoods.document)
+  const restored = deserializePersistedRuntimeState(serialized)
+  validatePersistedRuntimeState(restored)
+  const crashReplay = executeCommandIdempotent(petId, deviceId, restored, cheatCommand, context(restored.engine, { actorRole: 'owner' }), 'op-cheat-1')
+  assert.equal(crashReplay.duplicate, true)
+  assert.equal(crashReplay.document.engine.save.petInfo.yb, restored.engine.save.petInfo.yb)
+
+  const executor = new SerializedIdempotentExecutor(petId, deviceId, createPersistedRuntimeState(base))
+  const serializedFirst = executor.execute(cheatCommand, context(base, { actorRole: 'owner' }), 'op-serialized')
+  const snapshot = executor.snapshot()
+  snapshot.engine.save.petInfo.yb = -999
+  assert.notEqual(executor.snapshot().engine.save.petInfo.yb, -999)
+  const serializedRetry = executor.execute(cheatCommand, context(serializedFirst.document.engine, { actorRole: 'owner' }), 'op-serialized')
   assert.equal(serializedFirst.duplicate, false)
   assert.equal(serializedRetry.duplicate, true)
-  assert.equal(serialized.snapshot().state.save.petInfo.yb, base.save.petInfo.yb + 50)
-  assert.equal(serialized.snapshot().cache.length, 1)
+  assert.equal(executor.snapshot().engine.save.petInfo.yb, base.save.petInfo.yb + 50)
+  assert.equal(executor.snapshot().idempotency.records.length, 1)
+
+  const malformed = deserializePersistedRuntimeState(serializePersistedRuntimeState(firstCheat.document))
+  malformed.idempotency.records.push({ ...malformed.idempotency.records[0] })
+  assert.throws(() => validatePersistedRuntimeState(malformed))
+  const malformedVersion = JSON.parse(serializePersistedRuntimeState(firstCheat.document))
+  malformedVersion.idempotency.schemaVersion = 999
+  assert.throws(() => validatePersistedRuntimeState(malformedVersion))
+  assert.throws(() => executeCommandIdempotent(petId, deviceId, malformed, cheatCommand, context(base, { actorRole: 'owner' }), 'new-op'))
+  assert.throws(() => executeCommandIdempotent(123, deviceId, firstCheat.document, cheatCommand, context(base, { actorRole: 'owner' }), 'new-op'))
+  assert.throws(() => executeCommandIdempotent('', deviceId, firstCheat.document, cheatCommand, context(base, { actorRole: 'owner' }), 'new-op'))
+  assert.throws(() => executeCommandIdempotent(petId, 123, firstCheat.document, cheatCommand, context(base, { actorRole: 'owner' }), 'new-op'))
+  assert.throws(() => executeCommandIdempotent(petId, deviceId, firstCheat.document, cheatCommand, context(base, { actorRole: 'owner' }), 123))
+  const malformedRecord = JSON.parse(serializePersistedRuntimeState(firstCheat.document))
+  malformedRecord.idempotency.records[0].commandType = 'not-a-command'
+  assert.throws(() => validatePersistedRuntimeState(malformedRecord))
 })
 
 test('false-mode gap search is bounded to the chunk horizon, not the long target', () => {
@@ -1122,4 +1175,18 @@ test('coverage hook can return an exact activeFromWallMs for sub-minute pre-conn
   assert.equal(first.resumeAtWallMs, connectAt)
   assert.equal(first.state.lastSchedulerWallMs, connectAt)
   assert.equal(first.state.gameTimeMs, GAME_TIME_MS)
+})
+
+test('serialized executor queues concurrent callers and applies one duplicate-protected command', async () => {
+  const base = baseState()
+  const executor = new SerializedIdempotentExecutor('pet-queue', 'device-queue', createPersistedRuntimeState(base))
+  const command = { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 50 } }
+  const [first, second] = await Promise.all([
+    executor.executeSerialized(command, context(base, { actorRole: 'owner' }), 'op-concurrent'),
+    executor.executeSerialized(command, context(base, { actorRole: 'owner' }), 'op-concurrent'),
+  ])
+  assert.equal(first.duplicate, false)
+  assert.equal(second.duplicate, true)
+  assert.equal(executor.snapshot().engine.save.petInfo.yb, base.save.petInfo.yb + 50)
+  assert.equal(executor.snapshot().idempotency.records.length, 1)
 })
