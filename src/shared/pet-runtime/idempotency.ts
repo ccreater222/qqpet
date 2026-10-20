@@ -125,13 +125,17 @@ function validateLegacyRecord(value: unknown): asserts value is Omit<Idempotency
 function migrateLegacyRecord(value: unknown): IdempotencyRecord {
   validateLegacyRecord(value)
   const record = value as Record<string, unknown>
+  // v1 serialized no-result success as result:null. Explicit null was not
+  // representable in v1, so a v1 null must migrate to no-result semantics.
+  const hasResult = Object.prototype.hasOwnProperty.call(record, 'result')
+  const resultPresent = hasResult && record.result !== null
   return {
     petId: record.petId as string,
     deviceId: record.deviceId as string,
     opId: record.opId as string,
     commandType: record.commandType as PetCommand['type'],
-    resultPresent: Object.prototype.hasOwnProperty.call(record, 'result'),
-    ...(Object.prototype.hasOwnProperty.call(record, 'result') ? { result: record.result as JsonValue } : {}),
+    resultPresent,
+    ...(resultPresent ? { result: record.result as JsonValue } : {}),
     ...(Object.prototype.hasOwnProperty.call(record, 'error') ? { error: record.error as CommandError } : {}),
   }
 }
@@ -196,16 +200,23 @@ export function emptyOpIdCache(): OpIdCache {
 }
 
 export function validateOpIdCache(value: unknown): asserts value is OpIdCache {
-  migrateOpIdCache(value)
+  validateCurrentCache(value)
 }
 
 export function validatePersistedRuntimeState(value: unknown): asserts value is PersistedRuntimeState {
-  migratePersistedRuntimeState(value)
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) reject('invalid_payload', 'persisted runtime state must be an object')
+  const document = value as Record<string, unknown>
+  if (Object.keys(document).some(key => key !== 'schemaVersion' && key !== 'engine' && key !== 'idempotency')) {
+    reject('invalid_payload', 'unknown persisted runtime state field')
+  }
+  if (document.schemaVersion !== PERSISTED_RUNTIME_SCHEMA_VERSION) reject('invalid_payload', 'unsupported persisted runtime schema version')
+  assertEngineState(document.engine)
+  validateOpIdCache(document.idempotency)
 }
 
 export function clonePersistedRuntimeState(document: PersistedRuntimeState): PersistedRuntimeState {
-  const current = migratePersistedRuntimeState(document)
-  return JSON.parse(stableStringify(current)) as PersistedRuntimeState
+  validatePersistedRuntimeState(document)
+  return JSON.parse(stableStringify(document)) as PersistedRuntimeState
 }
 
 export function serializePersistedRuntimeState(document: PersistedRuntimeState): string {
@@ -242,8 +253,8 @@ export function executeCommandIdempotent(
   validateBoundedString(petId, 'petId')
   validateBoundedString(deviceId, 'deviceId')
   validateOpId(opId)
-  const current = migratePersistedRuntimeState(document)
-  validatePersistedRuntimeState(current)
+  validatePersistedRuntimeState(document)
+  const current = document
   const existing = findRecord(current, petId, deviceId, opId)
   if (existing !== undefined) {
     if (existing.commandType !== command.type) {

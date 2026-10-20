@@ -1260,6 +1260,7 @@ test('legacy v1 idempotency cache and runtime documents migrate on read and writ
       { petId: 'pet-v1', deviceId: 'device-v1', opId: 'op-result-v1', commandType: 'admin.grantCheat', result: { ok: true } },
       { petId: 'pet-v1', deviceId: 'device-v1', opId: 'op-no-result-v1', commandType: 'pet.bury' },
       { petId: 'pet-v1', deviceId: 'device-v1', opId: 'op-error-v1', commandType: 'admin.grantCheat', error },
+      { petId: 'pet-v1', deviceId: 'device-v1', opId: 'op-null-v1', commandType: 'pet.bury', result: null },
     ],
   }
   const migratedCache = migrateOpIdCache(v1Cache)
@@ -1269,13 +1270,20 @@ test('legacy v1 idempotency cache and runtime documents migrate on read and writ
   assert.equal(Object.prototype.hasOwnProperty.call(migratedCache.records[1], 'result'), false)
   assert.equal(migratedCache.records[2].resultPresent, false)
   assert.deepEqual(migratedCache.records[2].error, error)
+  assert.equal(migratedCache.records[3].resultPresent, false)
+  assert.equal(Object.prototype.hasOwnProperty.call(migratedCache.records[3], 'result'), false)
 
   const v1Doc = { schemaVersion: 1, engine: baseState(), idempotency: v1Cache }
+  assert.throws(() => validateOpIdCache(v1Cache))
+  assert.throws(() => validatePersistedRuntimeState(v1Doc))
   const migratedDoc = deserializePersistedRuntimeState(JSON.stringify(v1Doc))
   assert.equal(migratedDoc.schemaVersion, 2)
   assert.equal(migratedDoc.idempotency.schemaVersion, OP_ID_CACHE_SCHEMA_VERSION)
   assert.equal(migratedDoc.idempotency.records.every(record => typeof record.resultPresent === 'boolean'), true)
   assert.equal(JSON.parse(serializePersistedRuntimeState(migratedDoc)).schemaVersion, 2)
+  const nullReplay = executeCommandIdempotent('pet-v1', 'device-v1', migratedDoc, { type: 'pet.bury', payload: {} }, context(migratedDoc.engine), 'op-null-v1')
+  assert.equal(nullReplay.duplicate, true)
+  assert.equal(Object.prototype.hasOwnProperty.call(nullReplay.outcome, 'result'), false)
   assert.throws(() => deserializePersistedRuntimeState(JSON.stringify({ ...v1Doc, schemaVersion: 99 })))
   assert.throws(() => migrateOpIdCache({ ...v1Cache, schemaVersion: 99 }))
   const malformedV1 = { schemaVersion: 1, records: [{ ...v1Cache.records[0], error }] }
