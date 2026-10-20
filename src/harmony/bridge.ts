@@ -12,12 +12,17 @@ import { applyPatch, buried, petOf, startSave } from '../shared/save-logic'
 import { TRAY_STATES, trayTip } from '../shared/tray'
 import { latestRelease } from '../shared/update'
 import { weather } from '../shared/weather'
+import { harmonyLocalRepositoryStorage } from './local-repository-storage'
+import { createMobileLocalRepositoryBridge, webCryptoAvailable, type MobileLocalRepositoryBridge } from '../mobile/local-repository-bridge'
 
 /** The `QQPetNative` JavaScript interface of PetHost. Async calls answer through `__qqpet.resolve(id, value, error)`. */
 interface Native {
   /** A file in the app's private storage. Missing is an empty string: ArkWeb turns no-value into ''. */
   read(name: string): string
   write(name: string, text: string): void
+  /** Explicit atomic v2 state capability; absent on shells without the C5b native update. */
+  readStateFile?(name: string): string | null
+  writeAtomic?(name: string, text: string): boolean
   http(id: number, method: string, url: string, headers: string, body: string): void
   exportSave(id: number, name: string, text: string): void
   importSave(id: number): void
@@ -51,6 +56,37 @@ declare global {
 }
 
 const native = window.QQPetNative
+
+// Explicit, opt-in development authority. Packaged builds require the Vite
+// build-time flag; the query form is only available under the dev server.
+const LOCAL_RUNTIME_V2_FLAG = import.meta.env.VITE_QQPET_LOCAL_RUNTIME_V2 === '1'
+  || (import.meta.env.DEV && new URLSearchParams(location.search).get('qqpet-local-runtime-v2') === '1')
+let localRuntimeFailure: string | undefined
+let localRuntime: MobileLocalRepositoryBridge | null = null
+const legacyV2DocumentPresent = LOCAL_RUNTIME_V2_FLAG === false
+  && typeof native.readStateFile === 'function'
+  && native.readStateFile('save.v2.json') !== null
+if (legacyV2DocumentPresent) localRuntimeFailure = 'local-v2 document exists; enable the explicit v2 flag'
+if (LOCAL_RUNTIME_V2_FLAG) {
+  const readStateFile = native.readStateFile?.bind(native)
+  const writeAtomic = native.writeAtomic?.bind(native)
+  if (typeof readStateFile !== 'function' || typeof writeAtomic !== 'function') {
+    localRuntimeFailure = 'native atomic state storage capability is missing'
+  } else if (webCryptoAvailable() === false) {
+    localRuntimeFailure = 'Web Crypto getRandomValues is unavailable'
+  } else {
+    try {
+      localRuntime = createMobileLocalRepositoryBridge({
+        storage: harmonyLocalRepositoryStorage({ readStateFile, writeAtomic }),
+        devRuntimeFlag: true,
+        rendererCapability: true,
+        autoScheduler: true,
+      })
+    } catch (error) {
+      localRuntimeFailure = error instanceof Error ? error.message : String(error)
+    }
+  }
+}
 
 const pending = new Map<number, { resolve: (v: string | null) => void; reject: (e: Error) => void }>()
 let seq = 0
@@ -103,10 +139,14 @@ function readSave(): Record<string, any> | null {
   }
 }
 
-let save: SaveData = startSave(readSave())
+let save: SaveData = startSave(LOCAL_RUNTIME_V2_FLAG || legacyV2DocumentPresent ? null : readSave())
 let leaving = false
-const write = (): void => native.write(FILE, JSON.stringify(save))
-write()
+const legacyAuthorityDisabled = (): boolean => LOCAL_RUNTIME_V2_FLAG || legacyV2DocumentPresent
+const write = (): void => {
+  if (legacyAuthorityDisabled()) return
+  native.write(FILE, JSON.stringify(save))
+}
+if (legacyAuthorityDisabled() === false) write()
 
 let tray: TrayState = 'leave'
 let posted = ''
@@ -214,24 +254,52 @@ listeners.outside.push(() => {
 })
 
 const api: QQPetApi = {
-  capabilities: { rotatableScreen: true },
-  load: async () => cloneJson(save),
+  capabilities: {
+    rotatableScreen: true,
+    serverMode: false,
+    localRepositoryV2: localRuntime !== null,
+    ...(localRuntimeFailure === undefined ? {} : { localRepositoryV2Reason: localRuntimeFailure }),
+  },
+  async load() {
+    if (legacyV2DocumentPresent) throw new Error('local runtime v2 unavailable: ' + (localRuntimeFailure ?? 'local-v2 document exists'))
+    if (LOCAL_RUNTIME_V2_FLAG) {
+      if (localRuntime === null) throw new Error('local runtime v2 unavailable: ' + (localRuntimeFailure ?? 'unknown'))
+      try {
+        return await localRuntime.load()
+      } catch (error) {
+        localRuntimeFailure = error instanceof Error ? error.message : String(error)
+        if (api.capabilities) {
+          api.capabilities.localRepositoryV2 = false
+          api.capabilities.localRepositoryV2Reason = localRuntimeFailure
+        }
+        throw error
+      }
+    }
+    return cloneJson(save)
+  },
   save(patch) {
+    if (legacyAuthorityDisabled()) throw new Error('legacy save(patch) is disabled while local runtime v2 is enabled')
     if (leaving) return
     applyPatch(save, cloneJson(patch))
     write()
     if (patch.petInfo) showTray()
   },
+  async flush() {
+    if (localRuntime !== null) await localRuntime.flush()
+  },
   resetPet(sex) {
+    if (legacyAuthorityDisabled()) throw new Error('resetPet must use the command API while local runtime v2 is enabled')
     save = buried(save, sex)
     write()
     relaunch()
   },
   async exportSave() {
+    if (legacyAuthorityDisabled()) throw new Error('legacy save export is disabled while local runtime v2 is enabled')
     const day = new Date().toISOString().slice(0, 10)
     return (await call((id) => native.exportSave(id, `QQPet-${day}.json`, JSON.stringify(save, null, 2)))) !== null
   },
   async importSave() {
+    if (legacyAuthorityDisabled()) throw new Error('legacy save import is disabled while local runtime v2 is enabled')
     const text = await call((id) => native.importSave(id))
     if (text === null) return
     const pet = petOf(JSON.parse(text))
@@ -247,7 +315,11 @@ const api: QQPetApi = {
   webSearch: (query) => webSearch(nativeFetch, query),
   weather: (city) => weather(nativeFetch, city),
   latestRelease: () => latestRelease(nativeFetch),
-  quit: () => native.quit(),
+  quit() {
+    if (localRuntime === null) { native.quit(); return }
+    const runtime = localRuntime
+    void runtime.flush().then(() => runtime.stop()).finally(() => native.quit())
+  },
   copyText: (text) => native.copyText(text),
   openUrl: (url) => native.openUrl(url),
   setClickThrough() {},
@@ -262,8 +334,36 @@ const api: QQPetApi = {
   onTrayClick: (l) => void listeners.trayClick.push((c) => l({ ...c, x: innerWidth / 2, y: innerHeight / 2 })),
   onGamePlayed: (l) => void listeners.gamePlayed.push(l),
   onClipboard: (l) => void listeners.clipboard.push(l),
-  onPresence: (l) => void listeners.presence.push(l),
+  onPresence: (l) => void listeners.presence.push((away) => {
+    if (localRuntime !== null) void (away ? localRuntime.suspend() : localRuntime.resume())
+    l(away)
+  }),
   onFront() {},
 }
 
 window.qqpet = api
+
+if (localRuntime !== null) {
+  const runtime = localRuntime
+  api.command = runtime.command.bind(runtime)
+  api.setAdvanceWhileEmpty = async (enabled) => { await runtime.setAdvanceWhileEmpty(enabled) }
+  api.onProjection = listener => runtime.onProjection(listener)
+  api.onCommandResult = listener => runtime.onCommandResult(listener)
+  api.onSyncStatus = listener => runtime.onSyncStatus(listener)
+  api.getProjection = () => runtime.getProjection()
+  api.getStatus = () => runtime.getStatus()
+  runtime.onProjection((projection) => {
+    save = projection.save
+    showTray()
+  })
+}
+if (LOCAL_RUNTIME_V2_FLAG) {
+  addEventListener('pagehide', () => {
+    if (localRuntime !== null) void localRuntime.suspend()
+  })
+  document.addEventListener('visibilitychange', () => {
+    if (localRuntime === null) return
+    if (document.visibilityState === 'hidden') void localRuntime.suspend()
+    else void localRuntime.resume()
+  })
+}

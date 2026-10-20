@@ -19,7 +19,7 @@ function flag(v: boolean | string | number): boolean {
 
 export class Native {
   static readonly METHODS: string[] = [
-    'read', 'write', 'http', 'exportSave', 'importSave',
+    'read', 'write', 'readStateFile', 'writeAtomic', 'http', 'exportSave', 'importSave',
     'openGame', 'quit', 'copyText', 'openUrl', 'setFocusable', 'setAutoStart',
     'setTray', 'setBounds', 'safeArea'
   ]
@@ -40,6 +40,32 @@ export class Native {
     fs.writeSync(file.fd, text)
     fs.closeSync(file)
     fs.renameSync(tmp, `${dir}/${name}`)
+  }
+
+  private validStateName(name: string): boolean {
+    if (name.length === 0) return false
+    if (name === "." || name === "..") return false
+    if (name.includes("/")) return false
+    if (name.includes("\\")) return false
+    return true
+  }
+  readStateFile(name: string): string | null {
+    if (this.validStateName(name) === false) return null
+    try {
+      return fs.readTextSync(`${host().context.filesDir}/${name}`)
+    } catch (_e) {
+      return null
+    }
+  }
+
+  writeAtomic(name: string, text: string): boolean {
+    if (this.validStateName(name) === false) return false
+    try {
+      this.write(name, text)
+      return true
+    } catch (_e) {
+      return false
+    }
   }
 
   http(id: number | string, method: string, url: string, headers: string, body: string): void {

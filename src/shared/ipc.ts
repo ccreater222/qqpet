@@ -1,6 +1,9 @@
 import type { ShapeRect } from './hit-shape'
 import type { LanPeer } from './lan'
 import type { WebhookMsg } from './webhook'
+import type { OrderedEvent } from './pet-runtime/events'
+import type { LocalRepositoryHostProjection, LocalRepositoryHostStatus } from './local-repository/host'
+import type { CommandKey, CommandResult, PetCommand } from './sync/protocol'
 import type { SaveData, SavePatch, Sex } from './save'
 
 export const IPC = {
@@ -208,12 +211,28 @@ export interface QQPetApi {
     autoStart?: boolean; autoStartReason?: string
     clipboardWatch?: boolean; clipboardWatchReason?: string
     frontWatch?: boolean; frontWatchReason?: string
+    /** Mobile hosts explicitly report false; no pairing/WSS/RemoteRepository bundle exists. */
+    serverMode?: false
+    /** True only when this renderer is using the explicit dev local-runtime-v2 authority. */
+    localRepositoryV2?: boolean
+    localRepositoryV2Reason?: string
   }
   load(): Promise<SaveData>
   /** Merges object groups field by field, replaces other keys, then persists. */
   save(patch: SavePatch): void
   /** Resolves after previously submitted saves reach persistent storage. */
   flush?(): Promise<void>
+  /** Semantic local/server command; present only under the explicit v2 dev flag. */
+  command?<K extends CommandKey>(
+    command: Extract<PetCommand, { type: K }>,
+    options?: { opId?: string },
+  ): Promise<CommandResult<K>>
+  setAdvanceWhileEmpty?(enabled: boolean): Promise<void>
+  onProjection?(listener: (projection: LocalRepositoryHostProjection, events: OrderedEvent[]) => void): void
+  onCommandResult?(listener: (result: CommandResult) => void): void
+  onSyncStatus?(listener: (status: LocalRepositoryHostStatus) => void): void
+  getProjection?(): LocalRepositoryHostProjection | null
+  getStatus?(): LocalRepositoryHostStatus
   /** Buries the pet and relaunches into egg selection, or straight into a newborn of `sex`. */
   resetPet(sex?: Sex): void
   /** Asks where to write the save; false when cancelled. */

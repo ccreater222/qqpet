@@ -35,9 +35,12 @@ import android.widget.FrameLayout
 import org.json.JSONObject
 import java.io.File
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.Executors
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -323,6 +326,33 @@ class PetService : Service() {
             val tmp = File(filesDir, "$name.tmp")
             tmp.writeText(text)
             tmp.renameTo(File(filesDir, name))
+        }
+
+        private fun stateFile(name: String): File? {
+            if (name.isEmpty() || name == "." || name == ".." || name.contains('/') || name.contains('\\')) return null
+            return File(filesDir, name)
+        }
+
+        /** C5b local-v2 state: missing is null so an empty existing file stays distinguishable. */
+        @JavascriptInterface
+        fun readStateFile(name: String): String? = stateFile(name)?.takeIf { it.isFile }?.readText()
+
+        /** Replace a complete C5b state file with fsync+ATOMIC_MOVE; false means fail closed. */
+        @JavascriptInterface
+        fun writeAtomic(name: String, text: String): Boolean {
+            val target = stateFile(name) ?: return false
+            val tmp = File(filesDir, "." + target.name + "." + System.nanoTime() + ".tmp")
+            return try {
+                FileOutputStream(tmp).use { output ->
+                    output.write(text.toByteArray(Charsets.UTF_8))
+                    output.fd.sync()
+                }
+                Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                true
+            } catch (_e: Exception) {
+                tmp.delete()
+                false
+            }
         }
 
         @JavascriptInterface

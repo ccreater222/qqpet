@@ -63,6 +63,20 @@ static NSString *QPJSON(id value) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:value ?: NSNull.null options:NSJSONWritingFragmentsAllowed error:NULL];
     return data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"null";
 }
+static BOOL QPLocalStateName(NSString *name, BOOL writable) {
+    if (name == nil || name.length == 0 || name.length > 128) return NO;
+    if ([name isEqual:@"save.json"]) return writable == NO;
+    if ([name isEqual:@"save.v2.json"] || [name isEqual:@"save.v2.json.bak"] || [name isEqual:@"save.json.bak"]) return YES;
+    NSString *prefix = @"save.v2.json.corrupt-";
+    if ([name hasPrefix:prefix] == NO) return NO;
+    NSString *suffix = [name substringFromIndex:prefix.length];
+    if (suffix.length == 0) return NO;
+    for (NSUInteger index = 0; index < suffix.length; index++) {
+        unichar value = [suffix characterAtIndex:index];
+        if (value < '0' || value > '9') return NO;
+    }
+    return YES;
+}
 static CGRect QPBox(NSDictionary *box) { return CGRectMake([box[@"x"] doubleValue],[box[@"y"] doubleValue],[box[@"width"] doubleValue],[box[@"height"] doubleValue]); }
 static NSDictionary *QPRectState(CGRect rect) { return @{@"x":@(rect.origin.x),@"y":@(rect.origin.y),@"width":@(rect.size.width),@"height":@(rect.size.height)}; }
 static NSDictionary *QPSizeState(CGSize size) { return @{@"width":@(size.width),@"height":@(size.height)}; }
@@ -514,12 +528,28 @@ static UIEdgeInsets QPRotateSafeArea(UIEdgeInsets inset, UIInterfaceOrientation 
     void (^reply)(id,NSString *)=^(id value,NSString *error){ dispatch_async(dispatch_get_main_queue(),^{ [weakSelf resolve:request value:value error:error page:page]; }); };
     // Only the existing persistence barrier may finish after a fatal runtime
     // error. Stale focus, editor or game requests cannot reopen the HUD.
-    if (self.rendererFailed&&![@[@"writeSave",@"flushReady",@"cancel",@"status",@"rufflePanic",@"swfTerminalFailure",@"quit"] containsObject:op]) { reply(nil,@"The Flash runtime has stopped. Restart it from the manager."); return; }
+    if (self.rendererFailed&&![@[@"writeSave",@"flushReady",@"cancel",@"status",@"rufflePanic",@"swfTerminalFailure",@"quit",@"readLocalStateFile",@"writeLocalStateFileAtomic"] containsObject:op]) { reply(nil,@"The Flash runtime has stopped. Restart it from the manager."); return; }
     if ([op isEqual:@"bootstrap"]) {
-        NSDictionary *capabilities=@{@"autoStart":@NO,@"autoStartReason":@"iOS 版由管理 App 手动启动，不安装后台守护程序。",@"clipboardWatch":@NO,@"frontWatch":@NO};
+        NSDictionary *capabilities=@{@"autoStart":@NO,@"autoStartReason":@"iOS 版由管理 App 手动启动，不安装后台守护程序。",@"clipboardWatch":@NO,@"frontWatch":@NO,@"localRuntimeV2Storage":@YES};
         UIUserInterfaceIdiom idiom=UIDevice.currentDevice.userInterfaceIdiom;
         NSString *deviceKind=idiom==UIUserInterfaceIdiomPad?@"tablet":(idiom==UIUserInterfaceIdiomPhone?@"phone":@"other");
         dispatch_async(self.state.fileQueue,^{ reply(@{@"save":[self.state readText:@"save.json"] ?: (id)NSNull.null,@"generation":self.state.generation,@"capabilities":capabilities,@"deviceKind":deviceKind},nil); });
+    } else if ([op isEqual:@"readLocalStateFile"] || [op isEqual:@"writeLocalStateFileAtomic"]) {
+        if ([self.role isEqual:@"pet"] == NO) { reply(nil,@"Only the pet renderer can access local runtime state."); return; }
+        NSString *name=args[@"name"];
+        BOOL writable=[op isEqual:@"writeLocalStateFileAtomic"];
+        if (QPLocalStateName(name,writable) == NO) { reply(nil,@"Invalid local state filename."); return; }
+        if (writable == NO) {
+            dispatch_async(self.state.fileQueue,^{ reply([self.state readText:name] ?: (id)NSNull.null,nil); });
+            return;
+        }
+        NSString *text=args[@"text"];
+        if ([text isKindOfClass:NSString.class] == NO) { reply(nil,@"Invalid local state content."); return; }
+        dispatch_async(self.state.fileQueue,^{
+            NSError *error=nil;
+            BOOL ok=[self.state writeText:text name:name error:&error];
+            reply(@(ok),error.localizedDescription);
+        });
     } else if ([@[@"writeSave",@"replaceSave",@"preserveCorrupt"] containsObject:op]) {
         if (![self.role isEqual:@"pet"]) { reply(nil,@"Only the pet renderer can write canonical save data."); return; }
         NSString *generation=args[@"generation"], *text=args[@"text"];
