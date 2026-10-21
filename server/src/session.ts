@@ -293,8 +293,9 @@ export class SessionService {
       return
     }
     const snapshot = this.store.loadCanonical(authenticated.petId)
-    if (this.authorityProblem(hello, snapshot)) {
-      this.authorityReset(socket, hello, authenticated.issuedToken)
+    const authorityProblem = this.authorityProblem(hello, snapshot)
+    if (authorityProblem !== undefined) {
+      this.authorityReset(socket, hello, authenticated.issuedToken, authorityProblem)
       return
     }
     const at = this.now()
@@ -532,17 +533,25 @@ export class SessionService {
     })
   }
 
-  private authorityProblem(hello: ClientHello, snapshot: ReturnType<DatabaseStore['loadCanonical']>): boolean {
+  private authorityProblem(
+    hello: ClientHello,
+    snapshot: ReturnType<DatabaseStore['loadCanonical']>,
+  ): 'restore_rollback' | 'authority_mismatch' | 'cache_newer' | undefined {
     const cached = hello.cachedAuthority
-    if (cached === undefined || snapshot.authority.state === 'archived') return false
-    return cached.authorityId !== snapshot.authority.authorityId ||
-      cached.restoreGeneration > snapshot.authority.restoreGeneration ||
-      cached.epoch > snapshot.authority.epoch ||
-      snapshot.authority.state === 'reset' ||
-      cached.restoreGeneration < snapshot.authority.restoreGeneration
+    if (cached === undefined || snapshot.authority.state === 'archived') return undefined
+    if (cached.epoch > snapshot.authority.epoch) return 'cache_newer'
+    if (cached.restoreGeneration !== snapshot.authority.restoreGeneration) return 'restore_rollback'
+    if (snapshot.authority.state === 'reset') return 'restore_rollback'
+    if (cached.authorityId !== snapshot.authority.authorityId) return 'authority_mismatch'
+    return undefined
   }
 
-  private authorityReset(socket: WebSocket, hello: ClientHello, issuedToken: string | undefined): void {
+  private authorityReset(
+    socket: WebSocket,
+    hello: ClientHello,
+    issuedToken: string | undefined,
+    reason: 'restore_rollback' | 'authority_mismatch' | 'cache_newer',
+  ): void {
     const pet = hello.petId === undefined ? this.store.listPets()[0] : this.store.getPet(hello.petId)
     const authority = pet === undefined ? undefined : this.store.getAuthority(pet.id)
     if (pet === undefined || authority === undefined || issuedToken !== undefined) {
@@ -564,7 +573,7 @@ export class SessionService {
         handoffId: authority.handoffId,
         detachedAtWallMs: authority.detachedAtMs ?? 0,
       },
-      reason: 'restore_rollback',
+      reason,
       requireFullSnapshot: true,
     })
     this.close(socket, CLOSE_SUPERSEDED, 'authority_reset_required')
