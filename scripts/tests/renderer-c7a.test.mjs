@@ -220,3 +220,16 @@ test('converted Group E panels keep their runtime branches and legacy fallbacks'
   assert.match(smallgame, /function openSmallGame/)
   assert.match(smallgame, /function startRuntimeSmallGame/)
 })
+
+test('runtime navigation exposes converted panels and keeps unconverted E-F entries hidden', () => {
+  const control = readFileSync(new URL('../../src/renderer/ui/control.ts', import.meta.url), 'utf8')
+  assert.match(control, /visibleMenu/)
+  assert.match(control, /child\.name === '池塘' \|\| child\.name === '游戏'/)
+  assert.match(control, /runtimeProjectionMode/)
+  const main = readFileSync(new URL('../../src/renderer/main.ts', import.meta.url), 'utf8')
+  assert.match(main, /if \(save\.settings\.petBar\) showControl\(\)/)
+  const menu = readFileSync(new URL('../../src/renderer/ui/runtime-menu.ts', import.meta.url), 'utf8')
+  assert.match(menu, /openFishing/)
+  assert.match(menu, /openGames/)
+  assert.doesNotMatch(menu, /openFarm|openIsland|openCommunity|openMstx|visitFriend|sendLetter/)
+})

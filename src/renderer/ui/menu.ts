@@ -3,6 +3,8 @@ import type { TrayMenuItem } from '../../shared/ipc'
 import { info, runtimeProjectionMode, save, setPaused, setTray, update } from '../pet/store'
 import { openChat } from './chat'
 import { openGoods } from './control'
+import { openFishing } from './fishing'
+import { openGames } from './games'
 import './css/menu.css'
 import { button, div } from './dom'
 import { frame } from './frame'
@@ -89,7 +91,25 @@ function togglePaused(): void {
 
 function items(adopt: () => void): Item[] {
   const leave = { label: '退出宠物', run: quit }
-  if (runtimeProjectionMode) return runtimeMenuItems(save.havePet, adopt, quit)
+  if (runtimeProjectionMode) {
+    return runtimeMenuItems(save.havePet, {
+      adopt,
+      leave: quit,
+      openState: () => openState(innerWidth / 2, innerHeight / 2),
+      openShop,
+      openGoods,
+      openPetInfo,
+      openSetup,
+      openFishing,
+      openGames,
+      readopt,
+      bury: () => bury(),
+      togglePaused,
+      paused: save.settings.paused,
+      dead: info.health === 0,
+      buried: save.isBury,
+    })
+  }
   if (!save.havePet) return [{ label: '选择宠物', run: adopt }, leave]
   if (save.isBury) {
     const title = '点击将会清空当前宠物数据，并且重置为未领养状态，请慎重选择'

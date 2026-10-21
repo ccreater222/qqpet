@@ -265,7 +265,8 @@ const petInput = createPetInput({
   begin: () => {
     clearFacePoints()
     closeMenu()
-    if (projectionMode === false && save.settings.petBar) showControl()
+    // Converted panels are reachable from the runtime control bar too.
+    if (save.settings.petBar) showControl()
     catchDiudiule()
   },
   active: (on) => {
