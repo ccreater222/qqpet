@@ -8,6 +8,7 @@ import {
 } from '../../src/shared/sync/index'
 import type { DatabaseStore, PetRecord } from './db'
 import type { Logger } from './logging'
+import { assertPublicEvent, assertPublicSave } from './validation'
 
 export interface LiveConnection {
   socket: WebSocket
@@ -29,6 +30,7 @@ export class SocketHub {
     private readonly store: DatabaseStore,
     private readonly logger: Logger,
     private readonly now: () => number = Date.now,
+    private readonly maxFrameBytes: number = 16 * 1024 * 1024,
   ) {}
 
   add(connection: LiveConnection): void {
@@ -58,7 +60,13 @@ export class SocketHub {
 
   send(connection: LiveConnection, message: ServerToClient): void {
     if (connection.socket.readyState !== connection.socket.OPEN) return
-    connection.socket.send(JSON.stringify(message))
+    const text = JSON.stringify(message)
+    if (Buffer.byteLength(text) > this.maxFrameBytes) {
+      this.logger.warn('socket.frame_too_large', { connectionId: connection.connectionId, bytes: Buffer.byteLength(text) })
+      connection.socket.close(4005, 'payload_too_large')
+      return
+    }
+    connection.socket.send(text)
   }
 
   broadcast(petId: string, message: ServerToClient, except?: LiveConnection): void {
@@ -71,6 +79,13 @@ export class SocketHub {
     const authority = this.authority(petId)
     const settings = this.store.getSettings(petId)
     const snapshot = this.store.loadCanonical(petId)
+    try {
+      assertPublicSave(snapshot.engine.save)
+      for (const event of events) assertPublicEvent(event)
+    } catch (error) {
+      this.logger.error('projection.boundary_rejected', { petId, error })
+      return
+    }
     const message = {
       t: 'projection' as const,
       v: PROTOCOL_VERSION,

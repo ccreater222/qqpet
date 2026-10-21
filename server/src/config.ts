@@ -9,6 +9,7 @@ export interface ServerConfig {
   backupDir: string
   adminSocket: string
   restoreGenerationFile?: string
+  ownerAdminCredential?: string
   timeZone: string
   weatherLocation: string
   advanceWhileEmpty: boolean
@@ -37,6 +38,7 @@ export interface ServerConfigInput extends Partial<Omit<ServerConfig, 'dbPath' |
   backupDir?: string
   adminSocket?: string
   restoreGenerationFile?: string
+  ownerAdminCredential?: string
 }
 
 function integer(value: string | number | undefined, fallback: number, name: string, min: number, max = Number.MAX_SAFE_INTEGER): number {
@@ -78,6 +80,7 @@ export function createServerConfig(input: ServerConfigInput = {}, env: NodeJS.Pr
   const timeZone = input.timeZone ?? env.QQPET_SYNC_TIME_ZONE ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC'
   assertTimeZone(timeZone)
   const restoreGenerationFile = input.restoreGenerationFile ?? env.QQPET_SYNC_RESTORE_GENERATION_FILE
+  const ownerAdminCredential = input.ownerAdminCredential ?? env.QQPET_OWNER_ADMIN_CREDENTIAL
   return {
     bind: input.bind ?? env.QQPET_SYNC_BIND ?? '127.0.0.1',
     port: integer(input.port ?? env.QQPET_SYNC_PORT, 8787, 'QQPET_SYNC_PORT', 0, 65_535),
@@ -87,6 +90,9 @@ export function createServerConfig(input: ServerConfigInput = {}, env: NodeJS.Pr
     ...(restoreGenerationFile === undefined || restoreGenerationFile === ''
       ? {}
       : { restoreGenerationFile: absolutePath(restoreGenerationFile, 'QQPET_SYNC_RESTORE_GENERATION_FILE') }),
+    ...(ownerAdminCredential === undefined || ownerAdminCredential === ''
+      ? {}
+      : { ownerAdminCredential: absolutePath(ownerAdminCredential, 'QQPET_OWNER_ADMIN_CREDENTIAL') }),
     timeZone,
     weatherLocation: input.weatherLocation ?? env.QQPET_SYNC_WEATHER_LOCATION ?? '',
     advanceWhileEmpty: boolean(

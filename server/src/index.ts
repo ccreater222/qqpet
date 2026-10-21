@@ -55,7 +55,7 @@ export class SyncServer {
       perMessageDeflate: false,
     })
     this.http.on('upgrade', (request, socket, head) => {
-      if (request.url !== '/sync') {
+      if (request.url !== '/sync' && request.url !== '/v1/sync') {
         socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
         socket.destroy()
         return
@@ -90,7 +90,7 @@ export class SyncServer {
     this.logger.info('server.started', {
       bind: this.address().address,
       port: this.address().port,
-      wsPath: '/sync',
+      wsPath: '/v1/sync',
     })
   }
 
@@ -100,6 +100,7 @@ export class SyncServer {
       return
     }
     this.started = false
+    this.store.finalizeCoverageOperationsOnShutdown(Date.now())
     this.sessions.stop()
     await new Promise<void>(resolve => {
       this.wss.close(() => resolve())

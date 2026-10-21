@@ -10,6 +10,8 @@ import { PROTOCOL_VERSION, type ServerToClient } from '../../src/shared/sync/ind
 import { createServerConfig, type ServerConfig, type ServerConfigInput } from '../src/config.js'
 import { initializePet, openDatabase } from '../src/db.js'
 import { SyncServer } from '../src/index.js'
+import { finalizeSurvivor } from '../src/coverage.js'
+import type { CoverageSurvivor } from '../../src/shared/pet-runtime/index.js'
 
 interface Harness {
   directory: string
@@ -60,7 +62,7 @@ async function createHarness(t: test.TestContext, input: ServerConfigInput = {})
     dbPath,
     config,
     server,
-    url: 'ws://127.0.0.1:' + address.port + '/sync',
+    url: 'ws://127.0.0.1:' + address.port + '/v1/sync',
     pairingCode: init.pairingCode,
     async close() {
       await server.stop()
@@ -762,4 +764,414 @@ test('restore --accept-rollback mints new authority and fences stale restore gen
   const stale = openDatabase(dbPath)
   assert.throws(() => stale.verifyRestoreGeneration(generationFile), /older than the recorded restore generation/)
   stale.close()
+})
+
+test('finalizeSurvivor preserves existing ends and caps provenance at a known suspend', () => {
+  const survivor: CoverageSurvivor = {
+    kind: 'server_connection',
+    connectionId: 'c1',
+    deviceId: 'd1',
+    lastHeartbeatWallMs: 1_000,
+    eligible: true,
+  }
+  const skipped = finalizeSurvivor(
+    { ...survivor, activeEndWallMs: 900, activeEndProvenance: 'disconnect' },
+    { commitWallMs: 100, eventBoundaryMs: 500, eventReason: 'crash_repaired', terminal: true },
+  )
+  assert.equal(skipped.skipped, true)
+  assert.equal(skipped.endWallMs, 900)
+
+  const terminal = finalizeSurvivor(survivor, {
+    commitWallMs: 100,
+    eventBoundaryMs: 500,
+    eventReason: 'disconnect',
+    terminal: true,
+  })
+  assert.equal(terminal.survivor.eligible, false)
+  assert.equal(terminal.endWallMs, 500)
+  assert.equal(terminal.provenance, 'disconnect')
+
+  const suspended = finalizeSurvivor(survivor, {
+    commitWallMs: 100,
+    eventBoundaryMs: 500,
+    eventReason: 'shutdown',
+    terminal: true,
+    suspendedAtMs: 300,
+  })
+  assert.equal(suspended.endWallMs, 300)
+  assert.equal(suspended.provenance, 'suspend')
+
+  const knownSuspend = finalizeSurvivor(survivor, {
+    commitWallMs: 100,
+    eventBoundaryMs: 400,
+    eventReason: 'suspend',
+    terminal: false,
+    suspendedAtMs: 300,
+  })
+  assert.equal(knownSuspend.survivor.eligible, true)
+  assert.equal(knownSuspend.provenance, 'suspend')
+
+  const clamped = finalizeSurvivor(survivor, {
+    commitWallMs: 100,
+    eventBoundaryMs: 50,
+    eventReason: 'disconnect',
+    terminal: true,
+  })
+  assert.equal(clamped.endWallMs, 100)
+})
+
+test('canonical load assembles engine state from canonical tables', async t => {
+  const harness = await createHarness(t)
+  const owner = await pairOwner(harness)
+  const store = openDatabase(harness.dbPath)
+  const snapshot = store.loadCanonical('default')
+  assert.equal(snapshot.engine.gameTimeMs, snapshot.pet.gameTimeMs)
+  assert.equal(snapshot.engine.timeZone, snapshot.settings.timeZone)
+  assert.ok(snapshot.engine.sessionCoverage.some(interval => interval.disconnectedAtWallMs === undefined))
+  store.replaceScheduledJobs('default', [{
+    id: 7,
+    type: 'work',
+    dueAtGameMs: snapshot.pet.gameTimeMs + 60_000,
+    payload: { jobId: 'assembled' },
+    status: 'pending',
+  }])
+  const reloaded = store.loadCanonical('default')
+  assert.equal(reloaded.engine.scheduledJobs.length, 1)
+  assert.equal(reloaded.engine.scheduledJobs[0].id, 7)
+  store.close()
+  await owner.close()
+})
+
+test('pet.reset closes open coverage with pet_reset, persists exact survivors, and reopens them at commit wall', async t => {
+  const harness = await createHarness(t)
+  const owner = await pairOwner(harness)
+  const store0 = openDatabase(harness.dbPath)
+  const playerCode = store0.issuePairingCode('default', 'player', 10 * 60_000).code
+  store0.close()
+  const player = await connect(harness, { kind: 'pairing', code: playerCode, deviceLabel: 'Player phone' })
+  await player.next('ready')
+
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'adopt-before-reset',
+    opId: 'adopt-before-reset-1',
+    command: { type: 'pet.adopt', payload: { sex: 'GG' } },
+  })
+  await owner.next('commandResult')
+  await owner.next('projection')
+  await player.next('projection')
+
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'reset',
+    opId: 'reset-1',
+    command: { type: 'pet.reset', payload: {} },
+  })
+  const result = await owner.next('commandResult')
+  if (result.t !== 'commandResult') throw new Error('missing reset result')
+  assert.equal(result.status, 'applied')
+  await owner.next('projection')
+  await player.next('projection')
+
+  const store = openDatabase(harness.dbPath)
+  assert.equal(store.listOpenCoverageOperations('default').length, 0)
+  const operation = store.db.prepare(
+    'SELECT * FROM coverage_operations WHERE pet_id = ? ORDER BY commit_wall_ms DESC LIMIT 1',
+  ).get('default') as { operation_id: string; state: string; commit_wall_ms: number; survivors_json: string }
+  assert.equal(operation.state, 'completed')
+  const survivors = JSON.parse(operation.survivors_json) as CoverageSurvivor[]
+  assert.equal(survivors.length, 2)
+  assert.ok(survivors.every(survivor => survivor.kind === 'server_connection' && survivor.eligible === true))
+  const rows = store.db.prepare(
+    'SELECT coverage_id, connected_at_ms, disconnected_at_ms, close_reason FROM session_coverage WHERE pet_id = ?',
+  ).all('default') as Array<Record<string, unknown>>
+  const open = rows.filter(row => row.disconnected_at_ms === null)
+  const closed = rows.filter(row => row.disconnected_at_ms !== null)
+  assert.equal(open.length, 2)
+  assert.equal(closed.length, 2)
+  assert.ok(open.every(row => String(row.coverage_id).startsWith(operation.operation_id + ':')))
+  assert.ok(open.every(row => Number(row.connected_at_ms) === Number(operation.commit_wall_ms)))
+  assert.ok(closed.every(row => row.close_reason === 'pet_reset'))
+  store.close()
+
+  // The rebound live coverage id must be the one a later disconnect closes.
+  await owner.close()
+  await player.close()
+  const afterClose = openDatabase(harness.dbPath)
+  let stillOpen = { count: 1 }
+  for (let attempt = 0; attempt < 50 && stillOpen.count !== 0; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+    stillOpen = afterClose.db.prepare(
+      'SELECT COUNT(*) AS count FROM session_coverage WHERE pet_id = ? AND disconnected_at_ms IS NULL',
+    ).get('default') as { count: number }
+  }
+  assert.equal(stillOpen.count, 0)
+  afterClose.close()
+})
+
+test('startup repair finalizes pending and suspended coverage operations monotonically', async t => {
+  const harness = await createHarness(t)
+  const store = openDatabase(harness.dbPath)
+  const now = Date.now()
+  const commitWall = now - 120_000
+  const pendingSurvivor: CoverageSurvivor = {
+    kind: 'server_connection',
+    connectionId: 'c-pending',
+    deviceId: 'd-pending',
+    lastHeartbeatWallMs: now - 60_000,
+    eligible: true,
+  }
+  store.closeAndCreateCoverageOperation('default', 'op-pending', commitWall, [pendingSurvivor], 'pet_reset')
+  assert.equal(store.listOpenCoverageOperations('default').length, 1)
+  const repaired = store.repairCoverageOnStartup(now)
+  assert.equal(repaired, 1)
+  const pending = store.getCoverageOperation('default', 'op-pending')
+  assert.equal(pending?.state, 'completed')
+  assert.equal(pending?.survivors[0].eligible, false)
+  const pendingRow = store.db.prepare(
+    'SELECT connected_at_ms, disconnected_at_ms, close_reason FROM session_coverage WHERE coverage_id = ?',
+  ).get('op-pending:c-pending') as Record<string, unknown>
+  assert.equal(Number(pendingRow.connected_at_ms), commitWall)
+  assert.equal(Number(pendingRow.disconnected_at_ms), pendingSurvivor.lastHeartbeatWallMs + 30_000)
+  assert.equal(pendingRow.close_reason, 'crash_repaired')
+
+  const suspendedAt = now - 10_000
+  const suspendedSurvivor: CoverageSurvivor = {
+    kind: 'server_connection',
+    connectionId: 'c-suspended',
+    deviceId: 'd-suspended',
+    lastHeartbeatWallMs: now - 60_000,
+    eligible: true,
+  }
+  store.closeAndCreateCoverageOperation('default', 'op-suspended', commitWall, [suspendedSurvivor], 'pet_reset')
+  assert.equal(store.markCoverageOperationSuspended('default', 'op-suspended', suspendedAt), 1)
+  const suspendedRowBefore = store.db.prepare(
+    'SELECT connected_at_ms, disconnected_at_ms, close_reason FROM session_coverage WHERE coverage_id = ?',
+  ).get('op-suspended:c-suspended') as Record<string, unknown>
+  assert.equal(Number(suspendedRowBefore.disconnected_at_ms), suspendedAt)
+  assert.equal(suspendedRowBefore.close_reason, 'suspend')
+
+  // A crash long after the suspend must preserve the suspend row/end and never credit suspend time.
+  store.repairCoverageOnStartup(now + 3_600_000)
+  const suspended = store.getCoverageOperation('default', 'op-suspended')
+  assert.equal(suspended?.state, 'completed')
+  assert.equal(suspended?.survivors[0].eligible, false)
+  const suspendedRowAfter = store.db.prepare(
+    'SELECT connected_at_ms, disconnected_at_ms, close_reason FROM session_coverage WHERE coverage_id = ?',
+  ).get('op-suspended:c-suspended') as Record<string, unknown>
+  assert.equal(Number(suspendedRowAfter.connected_at_ms), commitWall)
+  assert.equal(Number(suspendedRowAfter.disconnected_at_ms), suspendedAt)
+  assert.equal(suspendedRowAfter.close_reason, 'suspend')
+  store.close()
+})
+
+test('retention cannot delete stable rows referenced by a pending coverage operation', async t => {
+  const harness = await createHarness(t)
+  const store = openDatabase(harness.dbPath)
+  const now = Date.now()
+  const survivor: CoverageSurvivor = {
+    kind: 'server_connection',
+    connectionId: 'c-retain',
+    deviceId: 'd-retain',
+    lastHeartbeatWallMs: now - 1_000,
+    eligible: true,
+  }
+  store.closeAndCreateCoverageOperation('default', 'op-retain', now - 1_000, [survivor], 'pet_reset')
+  const insert = store.db.prepare(
+    `INSERT INTO session_coverage
+     (pet_id, coverage_id, device_id, connected_at_ms, disconnected_at_ms, last_heartbeat_at_ms, close_reason)
+     VALUES ('default', ?, ?, ?, ?, ?, 'pet_reset')`,
+  )
+  insert.run('op-retain:c-retain', 'd-retain', now - 2_000, now - 1_500, now - 1_500)
+  insert.run('old-unrelated', 'd-old', now - 9_000, now - 8_000, now - 8_000)
+  const deleted = store.pruneClosedCoverage('default', now)
+  assert.equal(deleted, 1)
+  const blocked = store.db.prepare('SELECT COUNT(*) AS count FROM session_coverage WHERE coverage_id = ?').get('op-retain:c-retain') as { count: number }
+  const unrelated = store.db.prepare('SELECT COUNT(*) AS count FROM session_coverage WHERE coverage_id = ?').get('old-unrelated') as { count: number }
+  assert.equal(blocked.count, 1)
+  assert.equal(unrelated.count, 0)
+  store.close()
+})
+
+test('owner server settings commands persist and appear in status without secrets', async t => {
+  const harness = await createHarness(t)
+  const owner = await pairOwner(harness)
+  for (const command of [
+    { type: 'server.setAdvanceWhileEmpty' as const, payload: { enabled: false } },
+    { type: 'server.setWeatherCity' as const, payload: { city: '上海' } },
+    { type: 'server.setTimeZone' as const, payload: { timeZone: 'America/New_York' } },
+  ]) {
+    owner.send({
+      t: 'command',
+      v: PROTOCOL_VERSION,
+      requestId: command.type,
+      opId: command.type,
+      command,
+    })
+    const result = await owner.next('commandResult')
+    if (result.t !== 'commandResult') throw new Error('missing result for ' + command.type)
+    assert.equal(result.status, 'applied')
+    await owner.next('projection')
+  }
+  const store = openDatabase(harness.dbPath)
+  const settings = store.getSettings('default')
+  assert.equal(settings?.advanceWhileEmpty, false)
+  assert.equal(settings?.weatherLocation, '上海')
+  const snapshot = store.loadCanonical('default')
+  assert.equal(snapshot.engine.timeZone, 'America/New_York')
+  store.close()
+
+  const response = await fetch('http://127.0.0.1:' + harness.server.address().port + '/status')
+  const body = await response.json() as { pets: Array<Record<string, unknown>> }
+  assert.equal(body.pets[0].advanceWhileEmpty, false)
+  assert.equal(body.pets[0].weatherLocation, '上海')
+  assert.doesNotMatch(JSON.stringify(body), /token|hash|save_json|payload/i)
+
+  const store2 = openDatabase(harness.dbPath)
+  const playerCode = store2.issuePairingCode('default', 'player', 10 * 60_000).code
+  store2.close()
+  const player = await connect(harness, { kind: 'pairing', code: playerCode, deviceLabel: 'Player' })
+  await player.next('ready')
+  player.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'player-setting',
+    opId: 'player-setting-1',
+    command: { type: 'server.setAdvanceWhileEmpty', payload: { enabled: true } },
+  })
+  const denied = await player.next('commandResult')
+  if (denied.t !== 'commandResult') throw new Error('missing result')
+  assert.equal(denied.status, 'rejected')
+  assert.equal(denied.error?.code, 'unauthorized')
+  await owner.close()
+  await player.close()
+})
+
+test('oversized command frames are closed with 4005 before dispatch', async t => {
+  const harness = await createHarness(t, { maxFrameBytes: 4096, maxCommandBytes: 1024 })
+  const owner = await pairOwner(harness)
+  const closed = nextClose(owner.ws)
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'oversized',
+    opId: 'oversized-1',
+    command: { type: 'pet.rename', payload: { name: 'x'.repeat(2048) } },
+  })
+  const close = await closed
+  assert.equal(close.code, 4005)
+  assert.equal(close.reason, 'payload_too_large')
+})
+
+test('command rate limiting closes with 4003 after the burst is exhausted', async t => {
+  const harness = await createHarness(t, { commandRatePerSecond: 1, commandRateBurst: 1 })
+  const owner = await pairOwner(harness)
+  const closed = nextClose(owner.ws)
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'rate-1',
+    opId: 'rate-1',
+    command: { type: 'pet.adopt', payload: { sex: 'GG' } },
+  })
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'rate-2',
+    opId: 'rate-2',
+    command: { type: 'pet.adopt', payload: { sex: 'MM' } },
+  })
+  const close = await closed
+  assert.equal(close.code, 4003)
+  assert.equal(close.reason, 'rate_limited')
+})
+
+test('connections per pet limit closes the extra socket with 4002', async t => {
+  const harness = await createHarness(t, { maxConnectionsPerPet: 1 })
+  const owner = await pairOwner(harness)
+  const store = openDatabase(harness.dbPath)
+  const playerCode = store.issuePairingCode('default', 'player', 10 * 60_000).code
+  store.close()
+  await assert.rejects(
+    connect(harness, { kind: 'pairing', code: playerCode, deviceLabel: 'Extra' }),
+    /socket closed: 4002/,
+  )
+  await owner.close()
+})
+
+test('expired pairing codes are rejected with auth_failed', async t => {
+  const harness = await createHarness(t)
+  const store = openDatabase(harness.dbPath)
+  const code = store.issuePairingCode('default', 'player', 1).code
+  store.close()
+  await assert.rejects(
+    connect(harness, { kind: 'pairing', code, deviceLabel: 'Late' }),
+    /socket closed: 4000/,
+  )
+})
+
+test('opId idempotency is scoped to the authenticated device', async t => {
+  const harness = await createHarness(t)
+  const owner = await pairOwner(harness)
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'scoped-owner',
+    opId: 'shared-op-id',
+    command: { type: 'pet.adopt', payload: { sex: 'GG' } },
+  })
+  const ownerResult = await owner.next('commandResult')
+  if (ownerResult.t !== 'commandResult') throw new Error('missing result')
+  const store = openDatabase(harness.dbPath)
+  const playerCode = store.issuePairingCode('default', 'player', 10 * 60_000).code
+  store.close()
+  const player = await connect(harness, { kind: 'pairing', code: playerCode, deviceLabel: 'Player' })
+  await player.next('ready')
+  player.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'scoped-player',
+    opId: 'shared-op-id',
+    command: { type: 'pet.pokeFace', payload: { spotId: 'face-1' } },
+  })
+  const playerResult = await player.next('commandResult')
+  if (playerResult.t !== 'commandResult') throw new Error('missing result')
+  assert.equal(playerResult.status, 'applied')
+  assert.equal(playerResult.commandSeq, ownerResult.commandSeq + 1)
+  assert.notEqual(playerResult.commandSeq, ownerResult.commandSeq)
+  await owner.close()
+  await player.close()
+})
+
+test('ctl revoke-device uses the owner-authenticated socket control path', async t => {
+  const harness = await createHarness(t)
+  const owner = await pairOwner(harness)
+  const store = openDatabase(harness.dbPath)
+  const playerCode = store.issuePairingCode('default', 'player', 10 * 60_000).code
+  store.close()
+  const player = await connect(harness, { kind: 'pairing', code: playerCode, deviceLabel: 'Player phone' })
+  await player.next('ready')
+  const credentialFile = join(harness.directory, 'owner-credential.txt')
+  await writeFile(credentialFile, owner.token + '\n', { mode: 0o600 })
+  const playerClosed = nextClose(player.ws)
+  const run = await runCli([
+    'ctl', 'revoke-device', player.deviceId,
+    '--pet-id', 'default',
+    '--db', harness.dbPath,
+    '--port', String(harness.server.address().port),
+    '--owner-admin-credential', credentialFile,
+  ])
+  const output = JSON.parse(run.stdout) as { t: string; status: string; commandType: string }
+  assert.equal(output.t, 'commandResult')
+  assert.equal(output.status, 'applied')
+  assert.equal(output.commandType, 'device.revoke')
+  const close = await playerClosed
+  assert.equal(close.code, 4002)
+  await assert.rejects(
+    connect(harness, { kind: 'token', token: player.token }),
+    /socket closed: 4002/,
+  )
+  await owner.close()
 })

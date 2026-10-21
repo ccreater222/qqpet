@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import {
   commandRole,
   type CommandPayloadMap,
@@ -5,6 +6,7 @@ import {
   type WireCommandResult,
 } from '../../src/shared/sync/index'
 import type { OrderedEvent } from '../../src/shared/pet-runtime/events'
+import type { CoverageSurvivor } from '../../src/shared/pet-runtime/index'
 import { PROTOCOL_VERSION } from '../../src/shared/sync/protocol'
 import { AuthService } from './auth'
 import type { CommandRecord, DatabaseStore, PetRecord } from './db'
@@ -23,6 +25,16 @@ export interface CommandCommit {
     pet: PetRecord
     events: OrderedEvent[]
   }
+  /** Present when a pet.reset committed a pending close-and-reopen coverage operation. */
+  coverageReopen?: {
+    operationId: string
+    commitWallMs: number
+    survivors: CoverageSurvivor[]
+  }
+}
+
+export interface CoverageSource {
+  currentSurvivors(petId: string): CoverageSurvivor[]
 }
 
 function storedResult(row: CommandRecord, requestId: string): WireCommandResult {
@@ -54,6 +66,7 @@ function duplicateResult(row: CommandRecord, requestId: string): WireCommandResu
 
 export class CommandService {
   private readonly queues = new Map<string, Promise<unknown>>()
+  private coverageSource: CoverageSource | undefined
 
   constructor(
     private readonly store: DatabaseStore,
@@ -62,6 +75,10 @@ export class CommandService {
     private readonly logger: Logger,
     private readonly now: () => number = Date.now,
   ) {}
+
+  setCoverageSource(source: CoverageSource): void {
+    this.coverageSource = source
+  }
 
   async enqueue<T>(petId: string, operation: () => T | Promise<T>): Promise<T> {
     const previous = this.queues.get(petId) ?? Promise.resolve()
@@ -174,6 +191,10 @@ export class CommandService {
       })
     }
     const applied = computed.outcome
+    const resetSurvivors = command.type === 'pet.reset'
+      ? (this.coverageSource === undefined ? [] : this.coverageSource.currentSurvivors(context.petId))
+      : undefined
+    const coverageOperationId = resetSurvivors === undefined ? undefined : randomUUID()
     return this.store.transaction(() => {
       const nextPet = this.store.replaceEngineAndRevision(context.petId, computed.engine, snapshot.pet.revision, true, at)
       const nextCommand = this.store.db.prepare(
@@ -208,6 +229,15 @@ export class CommandService {
         eventSeq,
         createdAtMs: at,
       })
+      if (coverageOperationId !== undefined && resetSurvivors !== undefined) {
+        this.store.closeAndCreateCoverageOperation(
+          context.petId,
+          coverageOperationId,
+          at,
+          resetSurvivors,
+          'pet_reset',
+        )
+      }
       const committedPet = { ...nextPet, commandSeq, eventSeq }
       const result: WireCommandResult = {
         t: 'commandResult',
@@ -229,7 +259,13 @@ export class CommandService {
         revision: committedPet.revision,
         eventSeq,
       })
-      return { result, projection: { pet: committedPet, events } }
+      return {
+        result,
+        projection: { pet: committedPet, events },
+        ...(coverageOperationId === undefined || resetSurvivors === undefined
+          ? {}
+          : { coverageReopen: { operationId: coverageOperationId, commitWallMs: at, survivors: resetSurvivors } }),
+      }
     })
   }
 

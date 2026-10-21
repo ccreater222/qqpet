@@ -15,6 +15,8 @@ import {
   type Welcome,
 } from '../../src/shared/sync/index'
 import { PORTABLE_BUNDLE_FORMAT, PORTABLE_BUNDLE_SCHEMA_VERSION } from '../../src/shared/sync/portable'
+import type { CoverageSurvivor } from '../../src/shared/pet-runtime/index'
+import { assertPublicEvent, assertPublicSave } from './validation'
 import { AuthenticationError, RevokedDeviceError, type AuthService } from './auth'
 import type { CommandService } from './command-service'
 import type { ServerConfig } from './config'
@@ -71,7 +73,21 @@ export class SessionService {
     private readonly logger: Logger,
     private readonly now: () => number = Date.now,
   ) {
-    this.hub = new SocketHub(store, logger, now)
+    this.hub = new SocketHub(store, logger, now, config.maxFrameBytes)
+    this.commands.setCoverageSource({ currentSurvivors: petId => this.currentSurvivors(petId) })
+  }
+
+  private currentSurvivors(petId: string): CoverageSurvivor[] {
+    const at = this.now()
+    return this.hub.listConnections(petId)
+      .filter(connection => connection.authenticated)
+      .map(connection => ({
+        kind: 'server_connection' as const,
+        connectionId: connection.connectionId,
+        deviceId: connection.deviceId,
+        lastHeartbeatWallMs: at,
+        eligible: true,
+      }))
   }
 
   start(): void {
@@ -369,11 +385,16 @@ export class SessionService {
         type: row.type,
         payload: JSON.parse(row.payloadJson) as OrderedEvent['payload'],
       }))
+      .map(event => {
+        assertPublicEvent(event)
+        return event
+      })
   }
 
   private snapshot(pet: PetRecord, petId: string, save: unknown): SnapshotMessage {
     const settings = this.store.getSettings(petId)
     if (settings === undefined) throw new Error('settings missing')
+    assertPublicSave(save)
     return {
       t: 'snapshot',
       v: PROTOCOL_VERSION,
@@ -410,6 +431,27 @@ export class SessionService {
         deviceId: connection.deviceId,
         role: connection.role,
       }, request.requestId, request.opId, request.command, request.observedRevision)
+      if (committed.coverageReopen !== undefined) {
+        const live = new Map(
+          this.hub.listConnections(connection.petId)
+            .filter(candidate => candidate.authenticated)
+            .map(candidate => [candidate.connectionId, candidate.deviceId]),
+        )
+        this.store.completeCoverageReopen(
+          connection.petId,
+          committed.coverageReopen.operationId,
+          committed.coverageReopen.commitWallMs,
+          live,
+          this.now(),
+        )
+        const reopenedSurvivors = new Set(committed.coverageReopen.survivors.map(survivor =>
+          survivor.kind === 'server_connection' ? survivor.connectionId : survivor.appInstanceId,
+        ))
+        for (const candidate of this.hub.listConnections(connection.petId)) {
+          if (candidate.authenticated === false || reopenedSurvivors.has(candidate.connectionId) === false) continue
+          candidate.coverageId = committed.coverageReopen.operationId + ':' + candidate.connectionId
+        }
+      }
       this.hub.send(connection, committed.result)
       if (request.command.type === 'device.revoke' && committed.result.status === 'applied') {
         const target = request.command.payload.deviceId
@@ -533,7 +575,13 @@ export class SessionService {
   }
 
   private send(socket: WebSocket, message: ServerToClient): void {
-    if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(message))
+    if (socket.readyState !== socket.OPEN) return
+    const text = JSON.stringify(message)
+    if (Buffer.byteLength(text) > this.config.maxFrameBytes) {
+      this.close(socket, CLOSE_PAYLOAD_TOO_LARGE, 'payload_too_large')
+      return
+    }
+    socket.send(text)
   }
 
   private close(socket: WebSocket, code: number, reason: string): void {

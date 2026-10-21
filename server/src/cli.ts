@@ -145,7 +145,7 @@ async function restore(args: ParsedArgs): Promise<void> {
   const from = stringFlag(args, 'from', true)
   if (from === undefined) throw new Error('--from is required')
   if (args.flags.get('accept-rollback') !== true) throw new Error('--accept-rollback is required')
-  const credentialPath = stringFlag(args, 'owner-admin-credential', true)
+  const credentialPath = stringFlag(args, 'owner-admin-credential') ?? config.ownerAdminCredential
   if (credentialPath === undefined) throw new Error('--owner-admin-credential is required')
   const credential = (await readFile(credentialPath, 'utf8')).trim()
   if (credential.length === 0) throw new Error('owner credential file is empty')
@@ -199,11 +199,11 @@ async function controlRevoke(args: ParsedArgs): Promise<void> {
   const config = configFrom(args)
   const petId = stringFlag(args, 'pet-id') ?? 'default'
   const deviceId = args.positional[0] ?? stringFlag(args, 'device-id', true)
-  const credentialPath = stringFlag(args, 'owner-admin-credential', true)
+  const credentialPath = stringFlag(args, 'owner-admin-credential') ?? config.ownerAdminCredential
   if (credentialPath === undefined) throw new Error('--owner-admin-credential is required')
   const credential = (await readFile(credentialPath, 'utf8')).trim()
   if (credential.length === 0) throw new Error('owner credential file is empty')
-  const socket = new WebSocket('ws://' + config.bind + ':' + config.port + '/sync')
+  const socket = new WebSocket('ws://' + config.bind + ':' + config.port + '/v1/sync')
   const messages: ServerToClient[] = []
   socket.on('message', data => messages.push(JSON.parse(data.toString()) as ServerToClient))
   await new Promise<void>((resolve, reject) => {

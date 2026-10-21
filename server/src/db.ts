@@ -4,7 +4,9 @@ import { backup as sqliteBackup, DatabaseSync } from 'node:sqlite'
 import { createRngState, dayKeyAt, nextDailyBoundaryMs, type EngineState } from '../../src/shared/pet-runtime/index'
 import { emptyEggSave } from '../../src/shared/pet-runtime/handlers-a'
 import { assertEngineState } from '../../src/shared/sync/portable'
+import type { CoverageEndProvenance, CoverageSurvivor } from '../../src/shared/pet-runtime/index'
 import type { DeviceRole, WireAuthority } from '../../src/shared/sync/index'
+import { finalizeSurvivor, stableCoverageId, survivorDeviceId, survivorKey } from './coverage'
 
 export const SCHEMA_VERSION = 1
 export const COVERAGE_CRASH_GRACE_MS = 30_000
@@ -236,6 +238,16 @@ export interface EventRecord {
   type: string
   payloadJson: string
   createdAtMs: number
+}
+
+export interface CoverageOperationRecord {
+  petId: string
+  operationId: string
+  commitWallMs: number
+  survivors: CoverageSurvivor[]
+  state: 'pending' | 'suspended' | 'completed'
+  suspendedAtMs: number | null
+  completedAtMs: number | null
 }
 
 export interface CanonicalPetSnapshot {
@@ -577,7 +589,20 @@ export class DatabaseStore {
     if (pet === undefined || settings === undefined || authority === undefined) throw new Error('pet not found or incomplete: ' + petId)
     let engine: EngineState
     try {
-      engine = JSON.parse(pet.engineJson) as EngineState
+      const parsed = JSON.parse(pet.engineJson) as EngineState
+      const save = JSON.parse(pet.saveJson) as EngineState['save']
+      engine = {
+        ...parsed,
+        save,
+        gameTimeMs: pet.gameTimeMs,
+        lastSchedulerWallMs: pet.lastSchedulerWallMs,
+        timeZone: settings.timeZone,
+        advanceWhileEmpty: settings.advanceWhileEmpty,
+        weatherLocation: settings.weatherLocation === null ? parsed.weatherLocation : settings.weatherLocation,
+        scheduledJobs: this.listScheduledJobs(petId),
+        gameSessions: this.listGameSessions(petId),
+        sessionCoverage: this.listSessionCoverage(petId),
+      }
       assertEngineState(engine)
     } catch (error) {
       throw new Error('canonical engine state is corrupt: ' + (error instanceof Error ? error.message : 'invalid JSON'))
@@ -738,17 +763,306 @@ export class DatabaseStore {
   }
 
   repairCoverageOnStartup(at: number): number {
+    return this.finalizeOpenCoverageOperations({
+      at,
+      reason: 'crash_repaired',
+      plainReason: 'crash_repaired',
+      heartbeatGrace: true,
+    })
+  }
+
+  finalizeCoverageOperationsOnShutdown(at: number): number {
+    return this.finalizeOpenCoverageOperations({
+      at,
+      reason: 'shutdown',
+      plainReason: 'shutdown',
+      heartbeatGrace: false,
+    })
+  }
+
+  getCoverageOperation(petId: string, operationId: string): CoverageOperationRecord | undefined {
+    const row = this.db.prepare(
+      'SELECT * FROM coverage_operations WHERE pet_id = ? AND operation_id = ?',
+    ).get(petId, operationId) as Record<string, unknown> | undefined
+    return row === undefined ? undefined : mapCoverageOperation(row)
+  }
+
+  listOpenCoverageOperations(petId?: string): CoverageOperationRecord[] {
+    const rows = (petId === undefined
+      ? this.db.prepare(
+        "SELECT * FROM coverage_operations WHERE state IN ('pending', 'suspended') ORDER BY commit_wall_ms, operation_id",
+      ).all()
+      : this.db.prepare(
+        "SELECT * FROM coverage_operations WHERE pet_id = ? AND state IN ('pending', 'suspended') ORDER BY commit_wall_ms, operation_id",
+      ).all(petId)) as Record<string, unknown>[]
+    return rows.map(mapCoverageOperation)
+  }
+
+  private coverageCloseReasonFor(petId: string, operationId: string, survivor: CoverageSurvivor): CoverageEndProvenance | undefined {
+    const row = this.db.prepare(
+      'SELECT close_reason FROM session_coverage WHERE pet_id = ? AND coverage_id = ?',
+    ).get(petId, stableCoverageId(operationId, survivor)) as { close_reason?: unknown } | undefined
+    if (row === undefined || row.close_reason === null || row.close_reason === undefined) return undefined
+    return String(row.close_reason) as CoverageEndProvenance
+  }
+
+  private upsertStableCoverageRow(
+    petId: string,
+    operationId: string,
+    survivor: CoverageSurvivor,
+    connectedAtMs: number,
+    endWallMs: number,
+    closeReason: CoverageEndProvenance,
+  ): void {
+    const coverageId = stableCoverageId(operationId, survivor)
+    const key = survivorKey(survivor)
+    this.db.prepare(
+      `INSERT INTO session_coverage
+       (pet_id, coverage_id, device_id, connection_id, authenticated_session_id,
+        connected_at_ms, disconnected_at_ms, last_heartbeat_at_ms, close_reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(pet_id, coverage_id) DO UPDATE SET
+         disconnected_at_ms = excluded.disconnected_at_ms,
+         last_heartbeat_at_ms = MAX(session_coverage.last_heartbeat_at_ms, excluded.last_heartbeat_at_ms),
+         close_reason = CASE
+           WHEN session_coverage.close_reason = 'suspend' THEN session_coverage.close_reason
+           ELSE excluded.close_reason
+         END
+       WHERE session_coverage.disconnected_at_ms IS NULL`,
+    ).run(
+      petId,
+      coverageId,
+      survivorDeviceId(survivor),
+      key,
+      key,
+      connectedAtMs,
+      endWallMs,
+      endWallMs,
+      closeReason,
+    )
+  }
+
+  /** Close every open interval at the commit boundary and record a pending operation. */
+  closeAndCreateCoverageOperation(
+    petId: string,
+    operationId: string,
+    commitWallMs: number,
+    survivors: CoverageSurvivor[],
+    reason: 'pet_reset' | 'import_replaced' | 'authority_handoff',
+  ): void {
+    this.db.prepare(
+      `UPDATE session_coverage
+       SET disconnected_at_ms = MAX(connected_at_ms, ?),
+           last_heartbeat_at_ms = MAX(last_heartbeat_at_ms, ?),
+           close_reason = ?
+       WHERE pet_id = ? AND disconnected_at_ms IS NULL`,
+    ).run(commitWallMs, commitWallMs, reason, petId)
+    this.db.prepare(
+      `INSERT INTO coverage_operations
+       (pet_id, operation_id, commit_wall_ms, survivors_json, state, suspended_at_ms, completed_at_ms)
+       VALUES (?, ?, ?, ?, 'pending', NULL, NULL)`,
+    ).run(petId, operationId, commitWallMs, JSON.stringify(survivors))
+  }
+
+  commitCoverageOperation(
+    petId: string,
+    operationId: string,
+    commitWallMs: number,
+    survivors: CoverageSurvivor[],
+    reason: 'pet_reset' | 'import_replaced' | 'authority_handoff',
+  ): void {
+    this.transaction(() => {
+      this.closeAndCreateCoverageOperation(petId, operationId, commitWallMs, survivors, reason)
+    })
+  }
+
+  /**
+   * After a reset/import commit, reopen exactly one interval for each exact
+   * persisted survivor that is still authenticated, then complete the operation.
+   * `live` maps connectionId/appInstanceId to the authenticated device id.
+   */
+  completeCoverageReopen(
+    petId: string,
+    operationId: string,
+    commitWallMs: number,
+    live: Map<string, string>,
+    at: number,
+  ): number {
     return this.transaction(() => {
+      const operation = this.getCoverageOperation(petId, operationId)
+      if (operation === undefined || operation.state === 'completed') return 0
+      const insert = this.db.prepare(
+        `INSERT OR IGNORE INTO session_coverage
+         (pet_id, coverage_id, device_id, connection_id, authenticated_session_id,
+          connected_at_ms, disconnected_at_ms, last_heartbeat_at_ms, close_reason)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL)`,
+      )
+      let reopened = 0
+      for (const survivor of operation.survivors) {
+        if (survivor.eligible === false) continue
+        const key = survivorKey(survivor)
+        if (live.get(key) !== survivorDeviceId(survivor)) continue
+        const result = insert.run(
+          petId,
+          stableCoverageId(operationId, survivor),
+          survivorDeviceId(survivor),
+          key,
+          key,
+          commitWallMs,
+          at,
+        )
+        if (Number(result.changes) === 1) reopened += 1
+      }
+      this.db.prepare(
+        'UPDATE coverage_operations SET state = ?, completed_at_ms = ? WHERE pet_id = ? AND operation_id = ?',
+      ).run('completed', at, petId, operationId)
+      return reopened
+    })
+  }
+
+  /** Known suspend: non-terminal-finalize eligible survivors and keep the operation resumable. */
+  markCoverageOperationSuspended(petId: string, operationId: string, at: number): number {
+    return this.transaction(() => {
+      const operation = this.getCoverageOperation(petId, operationId)
+      if (operation === undefined || operation.state === 'completed') return 0
+      let finalized = 0
+      const survivors = operation.survivors.map(original => {
+        if (original.eligible === false || original.activeEndWallMs !== undefined) return original
+        const existing = this.coverageCloseReasonFor(petId, operationId, original)
+        const result = finalizeSurvivor(original, {
+          commitWallMs: operation.commitWallMs,
+          eventBoundaryMs: at,
+          eventReason: 'suspend',
+          terminal: false,
+          suspendedAtMs: at,
+          ...(existing === undefined ? {} : { existingCloseReason: existing }),
+        })
+        if (result.materialize) {
+          this.upsertStableCoverageRow(petId, operationId, original, operation.commitWallMs, result.endWallMs, 'suspend')
+          finalized += 1
+        }
+        return result.survivor
+      })
+      this.db.prepare(
+        'UPDATE coverage_operations SET state = ?, suspended_at_ms = ?, survivors_json = ? WHERE pet_id = ? AND operation_id = ?',
+      ).run('suspended', at, JSON.stringify(survivors), petId, operationId)
+      return finalized
+    })
+  }
+
+  /** Same-process resume opens fresh intervals at the actual resume wall and completes the operation. */
+  resumeCoverageOperation(petId: string, operationId: string, live: Map<string, string>, at: number): number {
+    return this.transaction(() => {
+      const operation = this.getCoverageOperation(petId, operationId)
+      if (operation === undefined || operation.state === 'completed') return 0
+      const insert = this.db.prepare(
+        `INSERT OR IGNORE INTO session_coverage
+         (pet_id, coverage_id, device_id, connection_id, authenticated_session_id,
+          connected_at_ms, disconnected_at_ms, last_heartbeat_at_ms, close_reason)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL)`,
+      )
+      let reopened = 0
+      for (const survivor of operation.survivors) {
+        if (survivor.eligible === false) continue
+        const key = survivorKey(survivor)
+        if (live.get(key) !== survivorDeviceId(survivor)) continue
+        const result = insert.run(
+          petId,
+          operationId + ':' + key + ':resume',
+          survivorDeviceId(survivor),
+          key,
+          key,
+          at,
+          at,
+        )
+        if (Number(result.changes) === 1) reopened += 1
+      }
+      this.db.prepare(
+        'UPDATE coverage_operations SET state = ?, completed_at_ms = ? WHERE pet_id = ? AND operation_id = ?',
+      ).run('completed', at, petId, operationId)
+      return reopened
+    })
+  }
+
+  /**
+   * Startup/shutdown reconciliation. Pending operations are terminal-finalized
+   * monotonically using the crash bound (or the known suspend cap); plain open
+   * intervals are repaired separately. Never reopens old sockets.
+   */
+  finalizeOpenCoverageOperations(options: {
+    at: number
+    reason: CoverageEndProvenance
+    plainReason: CoverageEndProvenance
+    heartbeatGrace: boolean
+  }): number {
+    return this.transaction(() => {
+      let finalized = 0
+      for (const operation of this.listOpenCoverageOperations()) {
+        const suspendedAt = operation.state === 'suspended' ? operation.suspendedAtMs : null
+        const survivors = operation.survivors.map(original => {
+          if (original.eligible === false || original.activeEndWallMs !== undefined) return original
+          const heartbeatBound = options.heartbeatGrace
+            ? Math.min(options.at, original.lastHeartbeatWallMs + COVERAGE_CRASH_GRACE_MS)
+            : options.at
+          const boundary = suspendedAt === null ? heartbeatBound : Math.min(suspendedAt, heartbeatBound)
+          const existing = this.coverageCloseReasonFor(operation.petId, operation.operationId, original)
+          const result = finalizeSurvivor(original, {
+            commitWallMs: operation.commitWallMs,
+            eventBoundaryMs: boundary,
+            eventReason: options.reason,
+            terminal: true,
+            ...(suspendedAt === null ? {} : { suspendedAtMs: suspendedAt }),
+            ...(existing === undefined ? {} : { existingCloseReason: existing }),
+          })
+          if (result.materialize) {
+            this.upsertStableCoverageRow(
+              operation.petId,
+              operation.operationId,
+              original,
+              operation.commitWallMs,
+              result.endWallMs,
+              result.provenance,
+            )
+            finalized += 1
+          }
+          return result.survivor
+        })
+        this.db.prepare(
+          'UPDATE coverage_operations SET state = ?, completed_at_ms = ?, survivors_json = ? WHERE pet_id = ? AND operation_id = ?',
+        ).run('completed', options.at, JSON.stringify(survivors), operation.petId, operation.operationId)
+      }
       const rows = this.db.prepare(
         'SELECT pet_id, coverage_id, connected_at_ms, last_heartbeat_at_ms FROM session_coverage WHERE disconnected_at_ms IS NULL',
       ).all() as Array<Record<string, unknown>>
       for (const row of rows) {
-        const bound = Math.min(at, Number(row.last_heartbeat_at_ms) + COVERAGE_CRASH_GRACE_MS)
+        const bound = options.heartbeatGrace
+          ? Math.max(Number(row.connected_at_ms), Math.min(options.at, Number(row.last_heartbeat_at_ms) + COVERAGE_CRASH_GRACE_MS))
+          : Math.max(Number(row.connected_at_ms), options.at)
         this.db.prepare(
-          'UPDATE session_coverage SET disconnected_at_ms = ?, close_reason = ? WHERE pet_id = ? AND coverage_id = ? AND disconnected_at_ms IS NULL',
-        ).run(Math.max(Number(row.connected_at_ms), bound), 'crash_repaired', String(row.pet_id), String(row.coverage_id))
+          'UPDATE session_coverage SET disconnected_at_ms = ?, last_heartbeat_at_ms = MAX(last_heartbeat_at_ms, ?), close_reason = ? WHERE pet_id = ? AND coverage_id = ? AND disconnected_at_ms IS NULL',
+        ).run(bound, bound, options.plainReason, String(row.pet_id), String(row.coverage_id))
       }
-      return rows.length
+      return finalized
+    })
+  }
+
+  /** Retention/compaction must never delete a stable row referenced by a pending/suspended operation. */
+  pruneClosedCoverage(petId: string, beforeMs: number): number {
+    return this.transaction(() => {
+      const blocked = new Set<string>()
+      for (const operation of this.listOpenCoverageOperations(petId)) {
+        for (const survivor of operation.survivors) blocked.add(stableCoverageId(operation.operationId, survivor))
+      }
+      const rows = this.db.prepare(
+        'SELECT coverage_id FROM session_coverage WHERE pet_id = ? AND disconnected_at_ms IS NOT NULL AND disconnected_at_ms < ?',
+      ).all(petId, beforeMs) as Array<{ coverage_id: string }>
+      let deleted = 0
+      const remove = this.db.prepare('DELETE FROM session_coverage WHERE pet_id = ? AND coverage_id = ?')
+      for (const row of rows) {
+        if (blocked.has(String(row.coverage_id))) continue
+        deleted += Number(remove.run(petId, String(row.coverage_id)).changes)
+      }
+      return deleted
     })
   }
 
@@ -908,6 +1222,20 @@ export function initializePet(store: DatabaseStore, options: InitializePetOption
 
 export function openDatabase(path: string): DatabaseStore {
   return new DatabaseStore(path)
+}
+
+function mapCoverageOperation(row: Record<string, unknown>): CoverageOperationRecord {
+  const survivors = JSON.parse(String(row.survivors_json)) as CoverageSurvivor[]
+  if (Array.isArray(survivors) === false) throw new Error('coverage operation survivors_json is invalid')
+  return {
+    petId: String(row.pet_id),
+    operationId: String(row.operation_id),
+    commitWallMs: Number(row.commit_wall_ms),
+    survivors,
+    state: String(row.state) as CoverageOperationRecord['state'],
+    suspendedAtMs: row.suspended_at_ms === null ? null : Number(row.suspended_at_ms),
+    completedAtMs: row.completed_at_ms === null ? null : Number(row.completed_at_ms),
+  }
 }
 
 function mapPet(row: Record<string, unknown>): PetRecord {
