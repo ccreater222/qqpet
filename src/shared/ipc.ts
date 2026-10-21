@@ -10,6 +10,7 @@ import type {
 import type { CommandKey, CommandResult, PetCommand } from './sync/protocol'
 import type { DeviceLocalOverlay, DeviceLocalOverlayPatch } from './sync/data-boundary'
 import type { SaveData, SavePatch, Sex } from './save'
+import type { StorageApi } from './storage'
 
 export const IPC = {
   load: 'pet:load',
@@ -33,6 +34,22 @@ export const IPC = {
   remoteStatus: 'pet:remote-status',
   remotePair: 'pet:remote-pair',
   remoteRevoke: 'pet:remote-revoke',
+  storageStatus: 'storage:status',
+  storageSetMode: 'storage:set-mode',
+  storagePair: 'storage:pair',
+  storageUnpair: 'storage:unpair',
+  storageDeviceList: 'storage:device-list',
+  storageDeviceRevoke: 'storage:device-revoke',
+  storageSetTimeZone: 'storage:set-time-zone',
+  storageSetWeatherCity: 'storage:set-weather-city',
+  storageExportBundle: 'storage:export-bundle',
+  storageImportBundle: 'storage:import-bundle',
+  storageImportDialog: 'storage:import-dialog',
+  storageRetryHandoff: 'storage:retry-handoff',
+  storageRollbackHandoff: 'storage:rollback-handoff',
+  storageCreateBackup: 'storage:create-backup',
+  storageStatusEvent: 'storage:status-event',
+  storageDevicesEvent: 'storage:devices-event',
   openGame: 'game:open',
   calendar: 'app:calendar',
   gamePlayed: 'game:played',
@@ -268,8 +285,10 @@ export interface QQPetApi {
   flush(): Promise<void>
   /** Whether this renderer is attached to an explicit local-runtime-v2 authority. */
   runtimeInfo(): Promise<RendererRuntimeInfo>
-  /** Desktop-only C10 server mode; omitted on mobile builds and disabled by default. */
+  /** Desktop-only C10 server mode; omitted on mobile builds. Kept for compatibility. */
   remote?: DesktopRemoteApi
+  /** C11 storage/mode/admin surface; absent on mobile builds, which always stay local. */
+  storage?: StorageApi
   /** Executes one semantic command through the local/remote repository. */
   command<K extends CommandKey>(
     command: Extract<PetCommand, { type: K }>,

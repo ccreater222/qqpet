@@ -24,6 +24,7 @@ import {
   migratePortablePetBundle, LOCAL_DOCUMENT_FORMAT, LOCAL_DOCUMENT_SCHEMA_VERSION,
   type AuthorityStamp, type LocalEventHistoryEntry, type LocalPetDocumentV2, type PortablePetBundleV1,
 } from '../shared/sync/portable'
+import type { StorageBackupStatus, StorageMigrationStatus } from '../shared/storage'
 
 export const LOCAL_REPOSITORY_ENV_FLAG = 'QQPET_LOCAL_REPOSITORY_V2'
 export const LOCAL_V2_ACTIVE_ENV_FLAG = 'QQPET_LOCAL_V2_ACTIVE'
@@ -196,6 +197,8 @@ export class LocalRepository {
   private stopped = false
   private appInstanceId = ''
   private detachRollback: LocalPetDocumentV2 | null = null
+  private migrationStatus: StorageMigrationStatus = { state: 'unavailable' }
+  private backupStatus: StorageBackupStatus = { available: false }
   private yieldToEventLoop: () => Promise<void>
   private startTimer: (tick: () => void, intervalMs: number) => () => void
 
@@ -250,6 +253,26 @@ export class LocalRepository {
   getProjection(): LocalPetProjection | null { return this.lastProjectionValue === null ? null : cloneProjection(this.lastProjectionValue) }
   getDocument(): LocalPetDocumentV2 | null { return this.localDocument === null ? null : JSON.parse(JSON.stringify(this.localDocument)) as LocalPetDocumentV2 }
   getRecentEvents(): LocalEventHistoryEntry[] { return JSON.parse(JSON.stringify(this.events)) as LocalEventHistoryEntry[] }
+  getMigrationStatus(): StorageMigrationStatus { return JSON.parse(JSON.stringify(this.migrationStatus)) as StorageMigrationStatus }
+  getBackupStatus(): StorageBackupStatus {
+    const fallback = this.options.documentBackupPath || this.options.documentPath + '.bak'
+    const path = this.backupStatus.path ?? fallback
+    return {
+      ...this.backupStatus,
+      available: existsSync(path),
+      path,
+    }
+  }
+
+  /** Writes the current committed document to the backup slot before a destructive replacement. */
+  createBackup(reason: 'import' | 'manual' | 'mode_switch' = 'manual'): string | null {
+    if (this.localDocument === null) return null
+    const base = this.options.documentBackupPath || this.options.documentPath + '.bak'
+    const target = reason === 'import' ? base : base.replace(/\.bak$/, '.' + reason + '.bak')
+    this.writeDocumentAt(target, this.localDocument)
+    this.backupStatus = { available: true, path: target, reason, createdAtWallMs: this.now() }
+    return target
+  }
 
   async load(): Promise<LocalPetProjection | null> {
     if (this.loaded) return this.getProjection()
@@ -292,6 +315,90 @@ export class LocalRepository {
       this.emitProjection()
       return null
     }
+  }
+
+  /**
+   * C11: load the local v2 document without becoming the running authority.
+   * Used while server mode owns canonical state; the scheduler stays stopped and
+   * the projection is served read-only until a validated import replaces it.
+   */
+  async loadFenced(): Promise<LocalPetProjection | null> {
+    return this.enqueue(() => this.loadFencedNow())
+  }
+
+  private async loadFencedNow(): Promise<LocalPetProjection | null> {
+    if (this.stopped) throw new Error('LocalRepository has been stopped')
+    if (this.loaded) {
+      this.stopScheduler()
+      this.state = 'read_only'
+      this.error = 'authority_fenced'
+      this.emitProjection()
+      return this.getProjection()
+    }
+    try {
+      const loaded = this.loadOrMigrate()
+      this.localDocument = loaded.document
+      this.idempotency = loaded.idempotency
+      this.localDeviceIdValue = loaded.document.device.localDeviceId
+      this.events = (loaded.document.eventHistory ?? [])
+        .filter(event => event.eventSeq <= loaded.document.eventSeq)
+        .map(event => ({
+          ...event,
+          revision: event.revision ?? loaded.document.revision,
+          gameTimeMs: event.gameTimeMs ?? loaded.document.bundle.engine.gameTimeMs,
+        }))
+        .slice(-512)
+      this.loaded = true
+      if (loaded.document.authority.state === 'handoff_pending') this.detachRollback = this.loadDetachRollback()
+      this.stopScheduler()
+      this.state = 'read_only'
+      this.error = 'authority_fenced'
+      this.emitProjection()
+      return this.getProjection()
+    } catch (error) {
+      this.error = error instanceof Error ? error.message : String(error)
+      this.state = 'read_only'
+      this.emitProjection()
+      return null
+    }
+  }
+
+  /**
+   * C11 "use server pet": archive the local authority without an upload. The
+   * cache is backed up first and the scheduler never ticks while archived.
+   */
+  archiveAuthority(reason: 'use_server' | 'mode_switch' = 'use_server'): Promise<LocalPetProjection | null> {
+    return this.enqueue(async () => {
+      if (this.localDocument === null) {
+        if (this.loaded) return this.getProjection()
+        const loadedProjection = await this.loadFencedNow()
+        if (loadedProjection === null || this.localDocument === null) return loadedProjection
+      }
+      const document = this.localDocument
+      if (document === null) return null
+      if (document.authority.state === 'archived') {
+        this.stopScheduler()
+        this.state = 'read_only'
+        this.emitProjection()
+        return this.getProjection()
+      }
+      this.createBackup(reason === 'use_server' ? 'mode_switch' : reason)
+      const candidate = cloneDocument(document)
+      const at = this.now()
+      this.closeAllOpenCoverageOn(candidate, at, 'authority_handoff')
+      candidate.authority.state = 'archived'
+      this.syncAuthorityOn(candidate, at)
+      this.persistCandidate(candidate)
+      this.localDocument = candidate
+      this.idempotency = candidate.idempotency ?? this.idempotency
+      this.openCoverageId = undefined
+      this.detachRollback = null
+      this.stopScheduler()
+      this.state = 'read_only'
+      this.error = undefined
+      this.emitProjection()
+      return this.getProjection()
+    })
   }
 
   pump(): Promise<void> { return this.enqueue(async () => { await this.pollScheduler() }) }
@@ -656,6 +763,7 @@ export class LocalRepository {
       const rawRecord = raw as Record<string, unknown>
       const rawAuthority = rawRecord.authority as Record<string, unknown> | null
       const rawStamp = rawAuthority && typeof rawAuthority.stamp === 'object' ? rawAuthority.stamp as Record<string, unknown> : null
+      this.migrationStatus = { state: 'native_v2', source: 'save.v2.json' }
       if (rawAuthority === null || rawAuthority.state !== 'active' || rawStamp === null || rawStamp.owner !== 'local') return loaded
       const runtime = rawRecord.runtime as Record<string, unknown> | null
       const duplicateIdentity = runtime !== null && typeof runtime === 'object' && 'localDeviceId' in runtime
@@ -667,6 +775,13 @@ export class LocalRepository {
       if (duplicateIdentity || missingIdempotency || missingEventMetadata) {
         this.backup(this.options.documentBackupPath || documentPath + '.bak', documentPath)
         this.writeDocument(loaded.document)
+        this.migrationStatus = {
+          state: 'migrated_v2',
+          source: 'save.v2.json',
+          backupPath: this.options.documentBackupPath || documentPath + '.bak',
+          migratedAtWallMs: this.now(),
+        }
+        this.backupStatus = { available: true, path: this.migrationStatus.backupPath, reason: 'migration', createdAtWallMs: this.now() }
       }
       this.appInstanceId = this.options.appInstanceId || this.newUuid()
       loaded.document.runtime = { appInstanceId: this.appInstanceId, startedAtWallMs: this.now() }
@@ -681,9 +796,18 @@ export class LocalRepository {
         this.backup(this.options.legacyBackupPath || legacyPath + '.bak', legacyPath)
         throw new Error('legacy save is not valid JSON: ' + String(error))
       }
-      this.backup(this.options.legacyBackupPath || legacyPath + '.bak', legacyPath)
+      const legacyBackup = this.options.legacyBackupPath || legacyPath + '.bak'
+      this.backup(legacyBackup, legacyPath)
+      this.migrationStatus = {
+        state: 'migrated_legacy',
+        source: 'save.json',
+        backupPath: legacyBackup,
+        migratedAtWallMs: this.now(),
+      }
+      this.backupStatus = { available: true, path: legacyBackup, reason: 'migration', createdAtWallMs: this.now() }
       return this.migrateLegacy(raw)
     }
+    this.migrationStatus = { state: 'fresh', migratedAtWallMs: this.now() }
     if (this.options.initialSave !== undefined) return this.migrateLegacy(this.options.initialSave)
     return this.migrateLegacy(startSave(null))
   }

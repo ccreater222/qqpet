@@ -19,8 +19,9 @@ import { readopt, setHidden } from './menu'
 import { pageZoom, windowDirectionAvailable } from './viewport'
 import { checkUpdate, ipcError, packReady } from './update'
 import { windowView } from './window-view'
+import { storageTab } from './storage'
 
-type Option = { label: string; title?: string } & (
+export type Option = { label: string; title?: string } & (
   | { type: 'radio'; on: () => boolean; run: () => void }
   | { type: 'slider'; value: () => number; step: (d: number) => void }
   | { type: 'button'; run: () => void }
@@ -570,6 +571,8 @@ export function openSetup(): void {
   const right = div('rightScroll fC', title, list)
   const draw = (): void => {
     const tabs = TABS.filter((t) => t.label !== '作弊' || s.cheatTab)
+    // C11 storage pane; kept dynamic so its async status can repaint the open panel.
+    tabs.splice(Math.min(2, tabs.length), 0, storageTab(draw))
     const current = tabs.find((t) => t.label === tab) ?? tabs[0]
     tab = current.label
     const pick = (label: string) => (): void => {

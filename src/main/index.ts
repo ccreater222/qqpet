@@ -1,8 +1,8 @@
-import { app, clipboard, dialog, ipcMain, net, powerMonitor, session, shell } from 'electron'
+import { app, clipboard, dialog, ipcMain, net, powerMonitor, safeStorage, session, shell } from 'electron'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { IPC, type TrayMenuItem, type TrayState } from '../shared/ipc'
-import type { SavePatch, Sex } from '../shared/save'
+import type { SaveData, SavePatch, Sex } from '../shared/save'
 import { aiChat, aiModels } from '../shared/ai'
 import { webSearch } from '../shared/websearch'
 import { calendar } from '../shared/calendar'
@@ -24,9 +24,13 @@ import { addFacts, clearMemory, loadDialogueState, loadHistory, loadMemory, rewr
 import { DEFAULT_HOTKEY, parseHotkey, watchHotkey, type KeyWatcher } from './hotkey'
 import { preloadAsr, transcribe } from './asr'
 import { DesktopRendererRuntime, installRendererRuntimeIpc } from './renderer-runtime'
-import { desktopServerModeEnabled, desktopStartupAuthority, LOCAL_V2_DOCUMENT_NAME } from './renderer-runtime-flags'
+import { desktopStartupAuthority, LOCAL_V2_DOCUMENT_NAME } from './renderer-runtime-flags'
 import { shouldStartVoice } from './voice-startup'
-import { DesktopServerModeController, installServerModeIpc } from './server-mode'
+import { DesktopStorageController, type StorageRemoteFactoryOptions } from './storage-controller'
+import { installStorageIpc } from './storage-ipc'
+import { PairingStore } from './pairing-store'
+import { RemoteRepository } from './remote-repository'
+import { createWebSocketTransport } from './remote-websocket-transport'
 
 // A test sidecar (QQPET_USER_DATA) runs beside the real pet: own save, own id, own lock.
 if (process.env.QQPET_USER_DATA) app.setPath('userData', process.env.QQPET_USER_DATA)
@@ -58,12 +62,28 @@ app.whenReady().then(async () => {
   // coexistence still fails closed before either writer touches disk.
   const v2Document = join(app.getPath('userData'), LOCAL_V2_DOCUMENT_NAME)
   const startupAuthority = desktopStartupAuthority(existsSync(v2Document))
+  const userDataPath = app.getPath('userData')
   let rendererRuntime: DesktopRendererRuntime | null = null
+  let storage: DesktopStorageController | null = null
   if (startupAuthority === 'runtime') {
-    // The window must exist before catch-up can take time. This provisional view
-    // provides placement only; the repository's first projection replaces it.
+    // C7: the window must exist before catch-up can take time. This provisional
+    // view provides placement only; the repository's first projection replaces it.
     loadEmptySaveView()
-    rendererRuntime = new DesktopRendererRuntime({ userDataPath: app.getPath('userData') })
+    rendererRuntime = new DesktopRendererRuntime({ userDataPath })
+    // C11: the storage controller picks the authoritative repository (local or
+    // paired server) before any renderer command; server mode fences the local
+    // writer via loadFenced and never lets both tick. Initialization runs after
+    // the window is created so catch-up cannot delay app startup.
+    storage = new DesktopStorageController({
+      userDataPath,
+      appVersion: app.getVersion(),
+      local: rendererRuntime,
+      createRemote: (options: StorageRemoteFactoryOptions) => new RemoteRepository({
+        ...options,
+        transport: createWebSocketTransport(),
+      }),
+      createTokenStore: () => new PairingStore({ userDataPath, safeStorage }),
+    })
   } else if (startupAuthority === 'blocked') {
     console.error('local runtime v2 document exists; refusing to start the legacy writer')
     dialog.showErrorBox(
@@ -75,16 +95,20 @@ app.whenReady().then(async () => {
   } else {
     loadSave()
   }
-  installRendererRuntimeIpc(rendererRuntime)
-  const runtimeReady = rendererRuntime === null
-    ? Promise.resolve()
-    : rendererRuntime.start().then(setSaveView)
-  // C10 desktop-only server mode stays behind an explicit dev flag until C11
-  // exposes storage/mode UI. A null controller keeps every remote IPC failing closed.
-  const serverMode = desktopServerModeEnabled() ? new DesktopServerModeController({ userDataPath: app.getPath('userData') }) : null
-  installServerModeIpc(serverMode)
+  installRendererRuntimeIpc(storage)
+  installStorageIpc(storage)
+  // C7 readiness: start the C11 authority asynchronously so the window and the
+  // renderer exist before local catch-up; renderer commands wait on the chosen
+  // authority through the storage controller.
+  const runtimeReady = (() => {
+    if (storage === null) {
+      return rendererRuntime === null ? Promise.resolve() : rendererRuntime.start().then(setSaveView)
+    }
+    const authority = storage
+    return authority.initialize().then(() => authority.load()).then(setSaveView)
+  })()
   const assertTrustedRenderer = (sender: unknown): void => {
-    if (rendererRuntime !== null && rendererRuntime.acceptsSender(sender) === false) {
+    if (storage !== null && storage.acceptsSender(sender) === false) {
       throw new Error('unauthorized: unknown renderer')
     }
   }
@@ -102,7 +126,8 @@ app.whenReady().then(async () => {
   }
 
   const win = createPetWindow()
-  rendererRuntime?.attachWindow(win)
+  storage?.attachWindow(win)
+  if (storage === null) rendererRuntime?.attachWindow(win)
   void runtimeReady.catch((error: unknown) => {
     console.error('QQPet local runtime v2 failed to start:', error)
     dialog.showErrorBox('QQPet 本地运行时启动失败', error instanceof Error ? error.message : String(error))
@@ -239,7 +264,8 @@ app.whenReady().then(async () => {
     if (!win.isDestroyed()) win.webContents.send(IPC.trayHoverLeave)
   })
   const appliedSettings = { ...getSave().settings }
-  rendererRuntime?.onView((view) => {
+  const viewHost: { onView(listener: (view: SaveData) => void): () => void } | null = storage ?? rendererRuntime
+  viewHost?.onView((view) => {
     if (win.isDestroyed()) return
     const next = view.settings
     if (next.zoom !== appliedSettings.zoom) win.webContents.setZoomFactor(next.zoom)
@@ -265,7 +291,11 @@ app.whenReady().then(async () => {
     tray.destroy()
     lan.stop()
     webhook.stop()
-    if (serverMode !== null) void serverMode.dispose()
+    if (storage !== null) {
+      event.preventDefault()
+      void storage.stop().finally(() => app.quit())
+      return
+    }
     if (rendererRuntime === null) return
     event.preventDefault()
     void rendererRuntime.stop().finally(() => app.quit())
@@ -288,9 +318,17 @@ app.whenReady().then(async () => {
 
   ipcMain.handle(IPC.load, (event) => {
     assertTrustedRenderer(event.sender)
+    if (storage !== null) return storage.load()
     return rendererRuntime === null ? getSave() : rendererRuntime.load()
   })
   ipcMain.on(IPC.save, (event, patch: SavePatch) => {
+    if (storage !== null) {
+      assertTrustedRenderer(event.sender)
+      void storage.savePatch(patch).catch((error: unknown) => {
+        console.error('runtime save(patch) rejected:', error)
+      })
+      return
+    }
     if (rendererRuntime !== null) {
       assertTrustedRenderer(event.sender)
       void rendererRuntime.savePatch(patch).catch((error: unknown) => {
@@ -320,6 +358,13 @@ app.whenReady().then(async () => {
     if (patch.settings?.voice !== undefined) (patch.settings.voice ? startVoice : stopVoice)()
   })
   ipcMain.on(IPC.resetPet, (event, sex?: Sex) => {
+    if (storage !== null) {
+      assertTrustedRenderer(event.sender)
+      void storage.resetPet().then(relaunch, (error: unknown) => {
+        console.error('runtime resetPet rejected:', error)
+      })
+      return
+    }
     if (rendererRuntime !== null) {
       assertTrustedRenderer(event.sender)
       void rendererRuntime.reset().then(relaunch, (error: unknown) => {
@@ -335,6 +380,11 @@ app.whenReady().then(async () => {
     const day = new Date().toISOString().slice(0, 10)
     const r = await dialog.showSaveDialog(win, { defaultPath: `QQPet-${day}.json`, filters: [{ name: 'QQ宠物存档', extensions: ['json'] }] })
     if (r.canceled || !r.filePath) return false
+    if (storage !== null) {
+      const report = await storage.exportBundle()
+      writeFileSync(r.filePath, report.json)
+      return true
+    }
     if (rendererRuntime !== null) {
       writeFileSync(r.filePath, await rendererRuntime.exportPortableBundleJson())
       return true
@@ -346,6 +396,12 @@ app.whenReady().then(async () => {
     assertTrustedRenderer(event.sender)
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'QQ宠物存档', extensions: ['json'] }] })
     if (r.canceled) return
+    if (storage !== null) {
+      const report = await storage.importBundle({ json: readFileSync(r.filePaths[0], 'utf8') })
+      if (report.status !== 'applied') throw new Error(report.message ?? report.errorCode ?? 'import failed')
+      relaunch()
+      return
+    }
     if (rendererRuntime !== null) {
       await rendererRuntime.importPortableBundleJson(readFileSync(r.filePaths[0], 'utf8'))
       relaunch()
@@ -354,7 +410,19 @@ app.whenReady().then(async () => {
     importSave(r.filePaths[0])
     relaunch()
   })
+  ipcMain.handle(IPC.storageImportDialog, async (event, options?: { allowClamp?: boolean; rebindLocalSessions?: boolean }) => {
+    assertTrustedRenderer(event.sender)
+    if (storage === null) throw new Error('storage_unavailable: local runtime v2 is not active')
+    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'QQ宠物存档', extensions: ['json'] }] })
+    if (r.canceled || r.filePaths.length === 0) return null
+    return storage.importBundle({
+      json: readFileSync(r.filePaths[0], 'utf8'),
+      allowClamp: options?.allowClamp === true,
+      rebindLocalSessions: options?.rebindLocalSessions === true,
+    })
+  })
   ipcMain.handle(IPC.calendar, () => calendar(net.fetch))
+
   ipcMain.handle(IPC.aiModels, (_e, c) => aiModels(net.fetch, c))
   ipcMain.handle(IPC.aiChat, (_e, c, messages) => aiChat(net.fetch, c, messages))
   ipcMain.handle(IPC.webSearch, (_e, query: string) => webSearch(net.fetch, query, 6, getSave().settings.searchBackend, getSave().settings.searchKey))
@@ -365,11 +433,11 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.openGame, (event, swf: string, windowId?: number) => {
     // Runtime v2 keeps the SWF window as presentation; the renderer settles the
     // game session from the gamePlayed event when this window closes.
-    if (rendererRuntime !== null) assertTrustedRenderer(event.sender)
+    if (storage !== null || rendererRuntime !== null) assertTrustedRenderer(event.sender)
     const start = Date.now()
     // Quitting with a game open closes the pet window first.
     openGameWindow(swf, panel ? win : undefined).on('closed', () => {
-      if (!win.isDestroyed()) win.webContents.send(IPC.gamePlayed, (Date.now() - start) / 60000, windowId)
+      if (win.isDestroyed() === false) win.webContents.send(IPC.gamePlayed, (Date.now() - start) / 60000, windowId)
     })
   })
   ipcMain.on(IPC.quit, () => app.quit())
