@@ -10,7 +10,17 @@ import {
  * renderer-capable host. No default environment path reaches this function
  * with `canActivate: true`.
  */
+export const LOCAL_V2_ROLLBACK_ENV_FLAG = 'QQPET_LOCAL_V2_ROLLBACK'
+
+/** Explicit escape hatch back to the legacy renderer writer after cutover. */
+export function desktopRuntimeRollbackRequested(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[LOCAL_V2_ROLLBACK_ENV_FLAG] === '1'
+}
+
 export function desktopRendererRuntimeCapability(env: NodeJS.ProcessEnv = process.env): LocalRepositoryCapability {
+  if (desktopRuntimeRollbackRequested(env)) {
+    return { flagEnabled: true, canActivate: false, activation: 'c6-renderer-capability', reason: 'rollback_flag' }
+  }
   const c6RendererCapability = env[LOCAL_V2_ACTIVE_ENV_FLAG] === '1'
   return localRepositoryCapability(env, false, c6RendererCapability)
 }

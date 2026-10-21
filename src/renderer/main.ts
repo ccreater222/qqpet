@@ -2,7 +2,8 @@ import { createPetInput, type PetPointerInput } from './pet/input'
 import { clipAsk, IDLE, note } from './pet/ai'
 import { resumeTask } from './pet/jobs'
 import { machine, speak, startPet } from './pet/pet'
-import { applyEdge, info, onInfoChange, petSize, save, setInfo, stage, update } from './pet/store'
+import { applyEdge, info, onInfoChange, onStoreSyncStatus, petSize, save, setInfo, stage, update } from './pet/store'
+import { runtimeReadinessNotice } from './pet/readiness'
 import type { DesktopCursor } from '../shared/ipc'
 import { pageZoom, setDesktopSize, viewportSize } from './ui/viewport'
 import { adopt, adoptProjection } from './ui/adopt'
@@ -31,6 +32,23 @@ window.addEventListener('qqpet-command-error', (event) => {
   if (detail === undefined || typeof detail.message !== 'string') return
   windowView({ title: '操作失败', msg: detail.message })
 })
+
+const readinessHost = document.body
+const readiness = typeof document.createElement === 'function' && readinessHost !== undefined && readinessHost !== null
+  ? document.createElement('div')
+  : null
+if (readiness !== null && typeof readinessHost.appendChild === 'function') {
+  readiness.id = 'runtimeReadiness'
+  readiness.hidden = true
+  readinessHost.appendChild(readiness)
+}
+if (projectionMode && readiness !== null && typeof onStoreSyncStatus === 'function') {
+  onStoreSyncStatus((status) => {
+    const notice = runtimeReadinessNotice(status)
+    readiness.hidden = notice === null
+    readiness.textContent = notice ?? ''
+  })
+}
 
 let lastPlatformError = ''
 let lastPlatformErrorAt = -Infinity

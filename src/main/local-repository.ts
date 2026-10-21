@@ -103,7 +103,7 @@ export interface LocalRepositoryCapability {
   flagEnabled: boolean
   canActivate: boolean
   activation: 'c6-renderer-capability'
-  reason?: 'flag_disabled' | 'c6_activation_missing' | 'renderer_capability_missing' | 'legacy_authority_active'
+  reason?: 'flag_disabled' | 'c6_activation_missing' | 'renderer_capability_missing' | 'legacy_authority_active' | 'rollback_flag'
 }
 
 export function localRepositoryCapability(env: NodeJS.ProcessEnv = process.env, legacyAuthorityActive = false, rendererCapability = false): LocalRepositoryCapability {
