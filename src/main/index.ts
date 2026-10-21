@@ -354,10 +354,9 @@ app.whenReady().then(async () => {
   // A focusable pet window holds a full panel (社区, 密室...) that would cover a normal game window.
   let panel = false
   ipcMain.on(IPC.openGame, (event, swf: string) => {
-    if (rendererRuntime !== null) {
-      assertTrustedRenderer(event.sender)
-      return
-    }
+    // Runtime v2 keeps the SWF window as presentation; the renderer settles the
+    // game session from the gamePlayed event when this window closes.
+    if (rendererRuntime !== null) assertTrustedRenderer(event.sender)
     const start = Date.now()
     // Quitting with a game open closes the pet window first.
     openGameWindow(swf, panel ? win : undefined).on('closed', () => win.isDestroyed() || win.webContents.send(IPC.gamePlayed, (Date.now() - start) / 60000))

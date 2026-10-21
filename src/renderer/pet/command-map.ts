@@ -40,6 +40,15 @@ export const uiCommands = {
   completeTravelCollection: (): CommandFor<'travel.completeCollection'> =>
     command('travel.completeCollection', {}),
 
+  gameStart: (gameId: string, kind: 'small' | 'flash'): CommandFor<'game.startSession'> =>
+    command('game.startSession', { gameId, kind }),
+  gameReward: (sessionToken: string): CommandFor<'game.reward'> => command('game.reward', { sessionToken }),
+  gameAbandon: (sessionToken: string): CommandFor<'game.abandonSession'> =>
+    command('game.abandonSession', { sessionToken }),
+  diudiuleStart: (): CommandFor<'diudiule.startSession'> => command('diudiule.startSession', {}),
+  diudiuleReward: (sessionToken: string): CommandFor<'diudiule.reward'> =>
+    command('diudiule.reward', { sessionToken }),
+
   signIn: (): CommandFor<'signin.sign'> => command('signin.sign', {}),
   drawGrowth: (): CommandFor<'signin.drawGrowth'> => command('signin.drawGrowth', {}),
   claimOnlineGift: (): CommandFor<'signin.claimOnlineGift'> => command('signin.claimOnlineGift', {}),
