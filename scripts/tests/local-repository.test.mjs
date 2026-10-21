@@ -195,22 +195,42 @@ test('crash restart repairs coverage and replays the persisted opId without reap
   assert.ok(ybAfter >= yb + 7)
 })
 
-test('default legacy path stays untouched unless the explicit local repository flag is set', async () => {
-  assert.equal(localRepositoryEnabled({}), false)
+test('local repository is default-on with an explicit legacy disable switch', async () => {
+  assert.equal(localRepositoryEnabled({}), true)
   assert.equal(localRepositoryEnabled({ QQPET_LOCAL_REPOSITORY_V2: '0' }), false)
   const dir = tempDir()
   const options = repoOptions(dir, { value: WALL_TIME_MS })
-  assert.equal(startLocalRepositoryIfEnabled(options, {}), null)
+  assert.equal(startLocalRepositoryIfEnabled(options, {}), null, 'missing authority state stays fail-closed')
   assert.equal(existsSync(join(dir, 'save.json')), false)
   assert.equal(localRepositoryCapability({}, false).canActivate, false)
-  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1' }, false).reason, 'c6_activation_missing')
-  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }, false).reason, 'renderer_capability_missing')
-  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }, true, true).reason, 'legacy_authority_active')
-  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }, false, true).canActivate, true)
+  assert.equal(localRepositoryCapability({}, false, false).reason, 'renderer_capability_missing')
+  assert.equal(localRepositoryCapability({}, true, true).reason, 'legacy_authority_active')
+  assert.equal(localRepositoryCapability({}, false, true).canActivate, true)
+  assert.equal(localRepositoryCapability({ QQPET_LOCAL_REPOSITORY_V2: '0' }, false, true).reason, 'flag_disabled')
   assert.equal(startLocalRepositoryIfEnabled({ ...options, authorityState: 'legacy-active' }, { QQPET_LOCAL_REPOSITORY_V2: '1' }), null)
-  const activated = startLocalRepositoryIfEnabled({ ...options, authorityState: 'local-v2-active', rendererCapability: true }, { QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' })
+  const activated = startLocalRepositoryIfEnabled({ ...options, authorityState: 'local-v2-active', rendererCapability: true }, {})
   assert.ok(activated)
   await activated.stop()
+})
+
+test('default desktop local repository starts with an empty environment and no v2 document', async () => {
+  const dir = tempDir()
+  const repo = createLocalRepository({
+    ...repoOptions(dir, { value: WALL_TIME_MS }),
+    documentPath: join(dir, 'save.v2.json'),
+    legacySavePath: join(dir, 'save.json'),
+  }, {
+    authorityState: 'local-v2-active',
+    rendererCapability: true,
+    env: {},
+  })
+  const projection = await repo.load()
+  assert.ok(projection)
+  assert.equal(projection.save.havePet, false)
+  assert.equal(repo.getStatus().state, 'ready')
+  assert.equal(existsSync(join(dir, 'save.v2.json')), true)
+  assert.equal(existsSync(join(dir, 'save.json')), false)
+  await repo.stop()
 })
 
 test('suspend/resume closes exact segment without counting suspended time; malformed documents fail read-only', async () => {

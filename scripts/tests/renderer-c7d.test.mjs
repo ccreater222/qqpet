@@ -12,7 +12,11 @@ registerHooks({
   },
 })
 
-const { runtimeReadinessNotice, runtimeReady } = await import('../../src/renderer/pet/readiness.ts')
+const {
+  RuntimeReadinessBanner,
+  runtimeReadinessNotice,
+  runtimeReady,
+} = await import('../../src/renderer/pet/readiness.ts')
 const {
   desktopRendererRuntimeCapability,
   desktopRuntimeRollbackRequested,
@@ -58,11 +62,34 @@ test('mobile capability never advertises server mode', () => {
   assert.equal(capability.serverMode, false)
 })
 
-test('renderer installs the readiness banner from sync status', () => {
-  const main = readFileSync(new URL('../../src/renderer/main.ts', import.meta.url), 'utf8')
-  assert.match(main, /runtimeReadinessNotice/)
-  assert.match(main, /onStoreSyncStatus/)
-  assert.match(main, /runtimeReadiness/)
+test('readiness stays visible when startup catch-up completes before the listener and replays after replacement', async () => {
+  const statusListeners = []
+  const status = { connection: 'catching_up', catchingUp: true }
+  const source = {
+    onSyncStatus(listener) {
+      statusListeners.splice(0, statusListeners.length, listener)
+    },
+    async getStatus() {
+      return status
+    },
+  }
+  const element = { hidden: true, textContent: '' }
+  new RuntimeReadinessBanner(element, source)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(element.hidden, false)
+  assert.equal(element.textContent, '宠物数据同步中，请稍候…')
+
+  statusListeners[0]({ connection: 'local' })
+  assert.equal(element.hidden, true)
+  statusListeners[0]({ connection: 'offline', readOnly: true })
+  assert.equal(element.hidden, false)
+  assert.equal(element.textContent, '宠物数据暂时只读，同步完成后可继续操作')
+
+  source.getStatus = () => ({ connection: 'catching_up', catchingUp: true })
+  new RuntimeReadinessBanner(element, source)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(element.hidden, false)
+  assert.equal(element.textContent, '宠物数据同步中，请稍候…')
   const css = readFileSync(new URL('../../src/renderer/base.css', import.meta.url), 'utf8')
   assert.match(css, /#runtimeReadiness/)
 })

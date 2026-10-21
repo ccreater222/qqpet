@@ -14,9 +14,9 @@ export function desktopRuntimeRollbackRequested(env: NodeJS.ProcessEnv = process
 
 export function desktopRendererRuntimeCapability(env: NodeJS.ProcessEnv = process.env): LocalRepositoryCapability {
   if (desktopRuntimeRollbackRequested(env)) {
-    return { flagEnabled: true, canActivate: false, activation: 'c6-renderer-capability', reason: 'rollback_flag' }
+    return { flagEnabled: true, canActivate: false, activation: 'default-local-v2', reason: 'rollback_flag' }
   }
-  return { flagEnabled: true, canActivate: true, activation: 'c6-renderer-capability' }
+  return { flagEnabled: true, canActivate: true, activation: 'default-local-v2' }
 }
 
 export function desktopRendererRuntimeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {

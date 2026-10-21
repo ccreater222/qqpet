@@ -3,7 +3,7 @@ import { clipAsk, IDLE, note } from './pet/ai'
 import { resumeTask } from './pet/jobs'
 import { machine, speak, startPet } from './pet/pet'
 import { applyEdge, info, onInfoChange, onStoreSyncStatus, petSize, save, setInfo, stage, update } from './pet/store'
-import { runtimeReadinessNotice } from './pet/readiness'
+import { RuntimeReadinessBanner } from './pet/readiness'
 import type { DesktopCursor } from '../shared/ipc'
 import { pageZoom, setDesktopSize, viewportSize } from './ui/viewport'
 import { adopt, adoptProjection } from './ui/adopt'
@@ -42,11 +42,11 @@ if (readiness !== null && typeof readinessHost.appendChild === 'function') {
   readiness.hidden = true
   readinessHost.appendChild(readiness)
 }
-if (projectionMode && readiness !== null && typeof onStoreSyncStatus === 'function') {
-  onStoreSyncStatus((status) => {
-    const notice = runtimeReadinessNotice(status)
-    readiness.hidden = notice === null
-    readiness.textContent = notice ?? ''
+if (projectionMode && readiness !== null && typeof onStoreSyncStatus === 'function' && typeof window.qqpet.getStatus === 'function') {
+  const getStatus = window.qqpet.getStatus
+  new RuntimeReadinessBanner(readiness, {
+    onSyncStatus: window.qqpet.onSyncStatus,
+    getStatus,
   })
 }
 

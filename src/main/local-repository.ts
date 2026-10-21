@@ -102,15 +102,15 @@ export interface LocalRepositoryOptions {
 export interface LocalRepositoryCapability {
   flagEnabled: boolean
   canActivate: boolean
-  activation: 'c6-renderer-capability'
-  reason?: 'flag_disabled' | 'c6_activation_missing' | 'renderer_capability_missing' | 'legacy_authority_active' | 'rollback_flag'
+  activation: 'default-local-v2'
+  reason?: 'flag_disabled' | 'renderer_capability_missing' | 'legacy_authority_active' | 'rollback_flag'
 }
 
 export function localRepositoryCapability(env: NodeJS.ProcessEnv = process.env, legacyAuthorityActive = false, rendererCapability = false): LocalRepositoryCapability {
+  const legacyFlagDisabled = env[LOCAL_REPOSITORY_ENV_FLAG] === '0'
   const flagEnabled = localRepositoryEnabled(env)
-  const activation = 'c6-renderer-capability' as const
-  if (flagEnabled === false) return { flagEnabled, canActivate: false, activation, reason: 'flag_disabled' }
-  if (env[LOCAL_V2_ACTIVE_ENV_FLAG] !== '1') return { flagEnabled, canActivate: false, activation, reason: 'c6_activation_missing' }
+  const activation = 'default-local-v2' as const
+  if (legacyFlagDisabled) return { flagEnabled, canActivate: false, activation, reason: 'flag_disabled' }
   if (rendererCapability === false) return { flagEnabled, canActivate: false, activation, reason: 'renderer_capability_missing' }
   if (legacyAuthorityActive) return { flagEnabled, canActivate: false, activation, reason: 'legacy_authority_active' }
   return { flagEnabled, canActivate: true, activation }
@@ -900,7 +900,7 @@ export class LocalRepository {
 }
 
 export function localRepositoryEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env[LOCAL_REPOSITORY_ENV_FLAG] === '1'
+  return env[LOCAL_REPOSITORY_ENV_FLAG] !== '0'
 }
 
 export function startLocalRepositoryIfEnabled(options: LocalRepositoryOptions, env: NodeJS.ProcessEnv = process.env): LocalRepository | null {
