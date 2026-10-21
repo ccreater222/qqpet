@@ -1,4 +1,4 @@
-import { elapsed, stopTask, stopTaskResult } from '../pet/activity'
+import { elapsed, onStopTaskPending, stopTask, stopTaskPending } from '../pet/activity'
 import { goodOf, type TimedType } from '../pet/data/goods'
 import { pay } from '../pet/items'
 import { speak } from '../pet/pet'
@@ -24,8 +24,6 @@ const BUSY = [
 ] as const
 
 let panel: HTMLElement | null = null
-/** True while a runtime activity.stop command is awaiting its result. */
-let stopping = false
 /** Bars show their numbers always instead of on hover; toggled by clicking the growth bar. */
 let showNums = false
 
@@ -44,19 +42,11 @@ export function age(minutes: number): string {
 }
 
 function stop(): void {
-  if (runtimeProjectionMode && stopping) return
+  // Shared with the travel panel: never emit a second stop while one is pending.
+  if (runtimeProjectionMode && stopTaskPending()) return
   const k = stopTask()
   const b = BUSY.find((x) => x.key === k)
   if (b) speak({ c: 'state', s: b.stop, now: true }, 'speak')
-  if (runtimeProjectionMode) {
-    stopping = true
-    render()
-    void stopTaskResult().then(() => {
-      stopping = false
-      render()
-    })
-    return
-  }
   render()
 }
 
@@ -71,7 +61,11 @@ export function status(): (Node | string)[] {
   // activity kind, so never show a fake 0-minute elapsed value.
   const progress = runtimeProjectionMode ? [] : [` (${elapsed() | 0}分钟) `]
   const stopButton = button('stopDoActive butDo', stop, ' 停止 ')
-  if (runtimeProjectionMode && stopping) stopButton.classList.add('disable')
+  if (runtimeProjectionMode && stopTaskPending()) {
+    stopButton.classList.add('disable')
+    stopButton.setAttribute('disabled', '')
+    stopButton.setAttribute('aria-disabled', 'true')
+  }
   return [`${b.name} `, div('fc', ...progress, stopButton)]
 }
 
@@ -290,6 +284,11 @@ export function openState(x: number, y: number, closesItself = false, focusTaken
   autoClose = closesItself
   entered = false
 }
+
+// A stop started from either surface disables/repaints both buttons.
+onStopTaskPending(() => {
+  if (runtimeProjectionMode && panel !== null) render()
+})
 
 let queued = 0
 onSettingsChange((change) => {

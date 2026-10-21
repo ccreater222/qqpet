@@ -588,8 +588,8 @@ test('converted panels render from projection events, not optimistic canonical w
     assert.match(read(file), pattern, file + ' must repaint from its ordered projection events')
   }
   // Canonical SavePatch writes stay in the one guarded legacy flusher.
-  // The busy-state stop guard must await the single in-flight command.
-  assert.match(read('src/renderer/ui/state.ts'), /stopTaskResult\(\)[\s\S]*stopping = false/)
+  // The busy-state stop guard observes the shared pending state.
+  assert.match(read('src/renderer/ui/state.ts'), /onStopTaskPending/)
 
   const store = read('src/renderer/pet/store.ts')
   assert.match(store, /if \(runtimeProjectionMode \|\| Object\.keys\(patch\)\.length === 0\) return[\s\S]*window\.qqpet\.save\(patch as SavePatch\)/)
@@ -701,14 +701,18 @@ test('runtime activity.stop is single-flight and settles exactly once', async ()
     setActivity: () => {},
     update: () => {},
     refreshTray: () => {},
-  }, 'stopTask, stopTaskPending, stopTaskResult')
+  }, 'stopTask, stopTaskPending, stopTaskResult, onStopTaskPending')
+  const pendingEvents = []
+  runtime.onStopTaskPending((pending) => pendingEvents.push(pending))
   assert.equal(runtime.stopTask(), 'work')
   assert.equal(runtime.stopTask(), 'work')
   assert.equal(dispatches.length, 1, 'the second click must not dispatch while the first is pending')
   assert.equal(runtime.stopTaskPending(), true)
+  assert.deepEqual(pendingEvents, [true], 'every surface observes the shared pending transition')
   resolveRequest({ status: 'applied' })
   assert.equal(await runtime.stopTaskResult(), true)
   assert.equal(runtime.stopTaskPending(), false)
+  assert.deepEqual(pendingEvents, [true, false])
   assert.equal(runtime.stopTask(), 'work')
   assert.equal(dispatches.length, 2, 'a new stop is allowed after the first settles')
   resolveRequest(null)
@@ -716,31 +720,31 @@ test('runtime activity.stop is single-flight and settles exactly once', async ()
   assert.equal(runtime.stopTaskPending(), false)
 })
 
-test('runtime busy-state stop button guards a pending command and re-enables after it settles', async () => {
-  let resolveStop
+test('runtime busy-state stop guard releases when the shared pending command settles', () => {
+  let pending = false
+  const listeners = []
   const calls = { stopTask: 0, speak: 0 }
-  const pending = new Promise((resolve) => { resolveStop = resolve })
   const state = loadConvertedModule('../../src/renderer/ui/state.ts', {
     window: { qqpet: {}, addEventListener: () => {} },
     onSettingsChange: () => {},
     onStoreEvent: () => {},
     onInfoChange: () => {},
+    onStopTaskPending: (listener) => { listeners.push(listener); return () => {} },
     runtimeProjectionMode: true,
-    stopTask: () => { calls.stopTask += 1; return 'work' },
-    stopTaskResult: () => pending,
+    stopTaskPending: () => pending,
+    stopTask: () => { calls.stopTask += 1; pending = true; listeners.forEach((listener) => listener(true)); return 'work' },
     speak: () => { calls.speak += 1 },
     info: { health: 5 },
-    save: { settings: {}, petComputedlInfo: {} },
+    save: { settings: { paused: false }, petComputedlInfo: {} },
   }, 'stop')
   state.stop()
   state.stop()
-  assert.equal(calls.stopTask, 1, 'the second click must not issue another stop')
+  assert.equal(calls.stopTask, 1, 'the second click must not issue another stop while shared pending is set')
   assert.equal(calls.speak, 1, 'the stop line is spoken once')
-  resolveStop(true)
-  await Promise.resolve()
-  await Promise.resolve()
+  pending = false
+  listeners.forEach((listener) => listener(false))
   state.stop()
-  assert.equal(calls.stopTask, 2, 'the guard releases after the command settles')
+  assert.equal(calls.stopTask, 2, 'the guard releases when the shared pending state clears')
 })
 
 async function extractTopLevelSnippets(relativePath, names) {
@@ -766,7 +770,7 @@ async function extractTopLevelSnippets(relativePath, names) {
   return snippets.join('\n')
 }
 
-test('runtime chat cheats dispatch semantic commands and legacy chat cheats stay unchanged', async () => {
+test('runtime chat cheats await the applied command result and legacy chat cheats stay unchanged', async () => {
   const snippets = await extractTopLevelSnippets('../../src/renderer/ui/chat.ts', ['cheat', 'CHEAT', 'STATS'])
   const runtimeCalls = { dispatch: [], update: [], addInfo: [], setInfo: [] }
   const runtimeContext = {
@@ -776,7 +780,8 @@ test('runtime chat cheats dispatch semantic commands and legacy chat cheats stay
     update: (...args) => runtimeCalls.update.push(args),
     addInfo: (...args) => runtimeCalls.addInfo.push(args),
     setInfo: (...args) => runtimeCalls.setInfo.push(args),
-    dispatchRuntimeCommand: (command) => { runtimeCalls.dispatch.push(command); return Promise.resolve(null) },
+    dispatchRuntimeCommand: (command) => { runtimeCalls.dispatch.push(command); return Promise.resolve({ status: 'applied' }) },
+    commandSucceeded: (result) => Boolean(result && result.status === 'applied'),
     uiCommands: {
       setShared: (key, value) => ({ type: 'settings.setShared', payload: { key, value } }),
       grantCheat: (stat, amount) => ({ type: 'admin.grantCheat', payload: { stat, amount } }),
@@ -784,9 +789,9 @@ test('runtime chat cheats dispatch semantic commands and legacy chat cheats stay
   }
   runInNewContext(stripTypeScriptTypes(snippets, { mode: 'transform' }) + '\nthis.__cheat = cheat', runtimeContext)
   const cheat = runtimeContext.__cheat
-  assert.equal(cheat('不要死'), '好的主人，宠宝以后再也不会死啦！')
-  cheat('元宝+100000')
-  cheat('心情+50')
+  assert.equal(await cheat('不要死'), '好的主人，宠宝以后再也不会死啦！')
+  assert.equal(await cheat('元宝+100000'), '主人，元宝+100000，宠宝收到啦！')
+  assert.equal(await cheat('心情+50'), '主人，心情+50，宠宝收到啦！')
   assert.deepEqual(runtimeCalls.dispatch, [
     { type: 'settings.setShared', payload: { key: 'undying', value: true } },
     { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 100000 } },
@@ -795,6 +800,22 @@ test('runtime chat cheats dispatch semantic commands and legacy chat cheats stay
   assert.deepEqual(runtimeCalls.update, [])
   assert.deepEqual(runtimeCalls.addInfo, [])
   assert.deepEqual(runtimeCalls.setInfo, [])
+
+  const rejectedCalls = { dispatch: [] }
+  const rejectedContext = {
+    runtimeProjectionMode: true,
+    info: { host: '主人', name: '宠宝', mood: 100, yb: 100, growth: 100 },
+    save: { petComputedlInfo: { moodMax: 1000, ybMax: 9999, growthMax: 99999 } },
+    update: () => {},
+    addInfo: () => {},
+    setInfo: () => {},
+    dispatchRuntimeCommand: (command) => { rejectedCalls.dispatch.push(command); return Promise.resolve({ status: 'rejected', error: { code: 'invalid_payload', message: 'too large', refreshProjection: false } }) },
+    commandSucceeded: () => false,
+    uiCommands: { grantCheat: (stat, amount) => ({ type: 'admin.grantCheat', payload: { stat, amount } }) },
+  }
+  runInNewContext(stripTypeScriptTypes(snippets, { mode: 'transform' }) + '\nthis.__cheat = cheat', rejectedContext)
+  assert.equal(await rejectedContext.__cheat('元宝+999999999'), null, 'a rejected cheat must not report success')
+  assert.deepEqual(rejectedCalls.dispatch, [{ type: 'admin.grantCheat', payload: { stat: 'yb', amount: 999999999 } }])
 
   const legacyCalls = { dispatch: [], update: [], addInfo: [], setInfo: [] }
   const legacyContext = {
@@ -809,11 +830,102 @@ test('runtime chat cheats dispatch semantic commands and legacy chat cheats stay
   }
   runInNewContext(stripTypeScriptTypes(snippets, { mode: 'transform' }) + '\nthis.__cheat = cheat', legacyContext)
   const legacyCheat = legacyContext.__cheat
-  legacyCheat('不要死')
-  legacyCheat('元宝+5')
-  legacyCheat('心情+5')
+  await legacyCheat('不要死')
+  await legacyCheat('元宝+5')
+  await legacyCheat('心情+5')
   assert.deepEqual(legacyCalls.dispatch, [])
   assert.equal(legacyCalls.update.length, 1)
   assert.equal(legacyCalls.addInfo.length, 1)
   assert.equal(legacyCalls.setInfo.length, 1)
+})
+
+test('a rejected runtime chat cheat surfaces an error line instead of speaking success', async () => {
+  const talkSource = await extractTopLevelSnippets('../../src/renderer/ui/chat.ts', ['talkToPet'])
+  const calls = { speak: [] }
+  const context = {
+    save: { settings: { chatCheat: true } },
+    noteUserSpoke: () => {},
+    cheat: async () => null,
+    aiOn: () => true,
+    SILLY: [],
+    info: { name: '宠宝' },
+    speak: (...args) => calls.speak.push(args),
+  }
+  runInNewContext(stripTypeScriptTypes(talkSource, { mode: 'transform' }) + '\nthis.__talk = talkToPet', context)
+  assert.equal(await context.__talk('元宝+999999999'), '这个操作没有生效哦~')
+  assert.deepEqual(calls.speak, [], 'the error dialog is the surface; no success bubble is spoken')
+})
+
+test('shared stop-pending state disables the status stop button with a real attribute and style class', () => {
+  let pending = false
+  const buttons = []
+  const state = loadConvertedModule('../../src/renderer/ui/state.ts', {
+    window: { qqpet: {}, addEventListener: () => {} },
+    onSettingsChange: () => {},
+    onStoreEvent: () => {},
+    onInfoChange: () => {},
+    onStopTaskPending: () => () => {},
+    runtimeProjectionMode: true,
+    stopTaskPending: () => pending,
+    stopTask: () => null,
+    speak: () => {},
+    info: { health: 5 },
+    save: { settings: { paused: false }, petComputedlInfo: {} },
+    activity: (key) => (key === 'work' ? 'job-1' : null),
+    elapsed: () => 0,
+    button: (cls, click, ...children) => {
+      const classes = new Set(cls.split(' ').filter(Boolean))
+      const attrs = {}
+      const element = {
+        className: cls,
+        children,
+        classList: {
+          add: (name) => classes.add(name),
+          remove: (name) => classes.delete(name),
+          contains: (name) => classes.has(name),
+          toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)),
+        },
+        setAttribute: (name, value) => { attrs[name] = value },
+        getAttribute: (name) => (Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null),
+        removeAttribute: (name) => { delete attrs[name] },
+        addEventListener: () => {},
+      }
+      buttons.push(element)
+      return element
+    },
+    div: (cls, ...children) => ({
+      className: cls,
+      children,
+      classList: { add: () => {}, remove: () => {}, contains: () => false, toggle: () => {} },
+      setAttribute: () => {},
+      getAttribute: () => null,
+      removeAttribute: () => {},
+    }),
+  }, 'status')
+  assert.ok(state.status().length > 0)
+  const idle = buttons.at(-1)
+  assert.equal(idle.classList.contains('disable'), false)
+  assert.equal(idle.getAttribute('disabled'), null)
+  pending = true
+  state.status()
+  const disabled = buttons.at(-1)
+  assert.equal(disabled.classList.contains('disable'), true)
+  assert.equal(disabled.getAttribute('disabled'), '')
+  assert.equal(disabled.getAttribute('aria-disabled'), 'true')
+})
+
+test('travel and status stop buttons share one pending disabled rule', async () => {
+  const travelSource = await extractTopLevelSnippets('../../src/renderer/ui/travel.ts', ['travelStopDisabled'])
+  const context = {}
+  runInNewContext(stripTypeScriptTypes(travelSource, { mode: 'transform' }) + '\nthis.__travelStopDisabled = travelStopDisabled', context)
+  const disabled = context.__travelStopDisabled
+  assert.equal(disabled('北京', false), false)
+  assert.equal(disabled('北京', true), true, 'a stop initiated from the status panel disables the travel button')
+  assert.equal(disabled(null, false), true)
+  const travel = readFileSync(new URL('../../src/renderer/ui/travel.ts', import.meta.url), 'utf8')
+  const status = readFileSync(new URL('../../src/renderer/ui/state.ts', import.meta.url), 'utf8')
+  assert.match(travel, /onStopTaskPending/)
+  assert.match(status, /onStopTaskPending/)
+  assert.match(travel, /stop\.setAttribute\('disabled'/)
+  assert.match(status, /stopButton\.setAttribute\('disabled'/)
 })

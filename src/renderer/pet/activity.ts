@@ -19,9 +19,23 @@ let task: (Task & { done: number }) | null = null
 export const elapsed = (): number => task?.done ?? 0
 
 let runtimeStopRequest: Promise<boolean> | null = null
+let runtimeStopPending = false
+const stopPendingListeners = new Set<(pending: boolean) => void>()
 
 /** True while a runtime `activity.stop` command is awaiting its result. */
-export const stopTaskPending = (): boolean => runtimeStopRequest !== null
+export const stopTaskPending = (): boolean => runtimeStopPending
+
+/** Both the status and travel buttons observe this shared pending transition. */
+export function onStopTaskPending(listener: (pending: boolean) => void): () => void {
+  stopPendingListeners.add(listener)
+  return () => { stopPendingListeners.delete(listener) }
+}
+
+function publishStopPending(pending: boolean): void {
+  if (runtimeStopPending === pending) return
+  runtimeStopPending = pending
+  for (const listener of stopPendingListeners) listener(pending)
+}
 
 /** Resolves when the pending runtime stop settles; true when no stop is pending. */
 export const stopTaskResult = (): Promise<boolean> => runtimeStopRequest ?? Promise.resolve(true)
@@ -46,8 +60,12 @@ export function stopTask(): Key | null {
       const request = dispatchRuntimeCommand(uiCommands.stopActivity())
         .then((result) => commandSucceeded(result), () => false)
       runtimeStopRequest = request
+      publishStopPending(true)
       void request.then(() => {
-        if (runtimeStopRequest === request) runtimeStopRequest = null
+        if (runtimeStopRequest === request) {
+          runtimeStopRequest = null
+          publishStopPending(false)
+        }
       })
     }
     return key
