@@ -28,7 +28,6 @@ const {
 } = await import('../../src/shared/sync/index.ts')
 const { IPC } = await import('../../src/shared/ipc.ts')
 const {
-  DESKTOP_SERVER_MODE_ENV_FLAG,
   desktopServerModeCapability,
 } = await import('../../src/main/renderer-runtime-flags.ts')
 const { createSyncFixtures, GAME_TIME_MS } = await import('./sync-fixtures.mjs')
@@ -849,22 +848,23 @@ test('PairingStore encrypts the token with safeStorage and fails closed when una
   await assert.rejects(unavailable.saveToken(TOKEN), /safeStorage unavailable/)
 })
 
-test('desktop server-mode feature flag keeps mobile explicitly disabled', () => {
-  const disabled = desktopServerModeCapability({}, 'linux')
-  assert.equal(disabled.flagEnabled, false)
-  assert.equal(disabled.canActivate, false)
-  assert.equal(disabled.serverMode, false)
-  assert.equal(disabled.reason, 'flag_disabled')
-  const enabled = desktopServerModeCapability({ [DESKTOP_SERVER_MODE_ENV_FLAG]: '1' }, 'linux')
-  assert.equal(enabled.canActivate, true)
-  assert.equal(enabled.serverMode, true)
-  const mobile = desktopServerModeCapability({ [DESKTOP_SERVER_MODE_ENV_FLAG]: '1' }, 'android')
+test('C11 enables desktop server mode by default while mobile stays explicitly disabled', () => {
+  const desktop = desktopServerModeCapability({}, 'linux')
+  assert.equal(desktop.flagEnabled, true)
+  assert.equal(desktop.canActivate, true)
+  assert.equal(desktop.serverMode, true)
+  assert.equal(desktopServerModeCapability({}, 'darwin').canActivate, true)
+  assert.equal(desktopServerModeCapability({}, 'win32').canActivate, true)
+  const mobile = desktopServerModeCapability({}, 'android')
   assert.equal(mobile.canActivate, false)
   assert.equal(mobile.serverMode, false)
   assert.equal(mobile.reason, 'mobile_server_mode_forbidden')
+  assert.equal(desktopServerModeCapability({}, 'ios').reason, 'mobile_server_mode_forbidden')
   assert.equal(typeof IPC.remoteStatus, 'string')
   assert.equal(typeof IPC.remotePair, 'string')
   assert.equal(typeof IPC.remoteRevoke, 'string')
+  assert.equal(typeof IPC.storageStatus, 'string')
+  assert.equal(typeof IPC.storageSetMode, 'string')
 })
 
 test('mobile builds never import the desktop remote implementation', () => {

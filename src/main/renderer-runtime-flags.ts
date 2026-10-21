@@ -41,29 +41,28 @@ export function desktopStartupAuthority(
   return v2DocumentExists ? 'blocked' : 'legacy'
 }
 
-export const DESKTOP_SERVER_MODE_ENV_FLAG = 'QQPET_SERVER_MODE'
-
-export type DesktopServerModeReason = 'flag_disabled' | 'mobile_server_mode_forbidden'
+export type DesktopServerModeReason = 'mobile_server_mode_forbidden' | 'unsupported_platform'
 
 export interface DesktopServerModeCapability {
+  /** Kept for compatibility with the C10 capability shape; server mode is on by default. */
   flagEnabled: boolean
   canActivate: boolean
   serverMode: boolean
   reason?: DesktopServerModeReason
 }
 
+/**
+ * C11: server mode needs no developer flag on desktop. Mobile hosts stay
+ * explicitly local-only and must not bundle the WSS/RemoteRepository surface.
+ */
 export function desktopServerModeCapability(
-  env: NodeJS.ProcessEnv = process.env,
+  _env: NodeJS.ProcessEnv = process.env,
   platform: string = process.platform,
 ): DesktopServerModeCapability {
-  const flagEnabled = env[DESKTOP_SERVER_MODE_ENV_FLAG] === '1'
-  if (flagEnabled === false) {
-    return { flagEnabled, canActivate: false, serverMode: false, reason: 'flag_disabled' }
-  }
   if (platform === 'android' || platform === 'ios') {
-    return { flagEnabled, canActivate: false, serverMode: false, reason: 'mobile_server_mode_forbidden' }
+    return { flagEnabled: true, canActivate: false, serverMode: false, reason: 'mobile_server_mode_forbidden' }
   }
-  return { flagEnabled, canActivate: true, serverMode: true }
+  return { flagEnabled: true, canActivate: true, serverMode: true }
 }
 
 export function desktopServerModeEnabled(

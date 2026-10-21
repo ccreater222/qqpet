@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, type QQPetApi } from '../shared/ipc'
+import type { StorageApi } from '../shared/storage'
 import { createRendererRuntimePreload } from './renderer-api'
 
 const send =
@@ -9,10 +10,39 @@ const send =
 
 const runtime = createRendererRuntimePreload(ipcRenderer)
 
+/** C11 storage/admin surface; desktop-only and routed through the storage controller. */
+const storage: StorageApi = {
+  status: () => ipcRenderer.invoke(IPC.storageStatus),
+  setMode: (input) => ipcRenderer.invoke(IPC.storageSetMode, input),
+  pair: (input) => ipcRenderer.invoke(IPC.storagePair, input),
+  unpair: () => ipcRenderer.invoke(IPC.storageUnpair),
+  listDevices: () => ipcRenderer.invoke(IPC.storageDeviceList),
+  revokeDevice: (deviceId) => ipcRenderer.invoke(IPC.storageDeviceRevoke, deviceId),
+  setAdvanceWhileEmpty: (enabled) => ipcRenderer.invoke(IPC.setAdvanceWhileEmpty, enabled),
+  setTimeZone: (timeZone) => ipcRenderer.invoke(IPC.storageSetTimeZone, timeZone),
+  setWeatherCity: (city) => ipcRenderer.invoke(IPC.storageSetWeatherCity, city),
+  exportBundle: () => ipcRenderer.invoke(IPC.storageExportBundle),
+  importBundle: (input) => ipcRenderer.invoke(IPC.storageImportBundle, input),
+  importBundleDialog: (options) => ipcRenderer.invoke(IPC.storageImportDialog, options),
+  retryHandoff: () => ipcRenderer.invoke(IPC.storageRetryHandoff),
+  rollbackHandoff: () => ipcRenderer.invoke(IPC.storageRollbackHandoff),
+  createBackup: () => ipcRenderer.invoke(IPC.storageCreateBackup),
+  onStatus: (listener) => {
+    ipcRenderer.removeAllListeners(IPC.storageStatusEvent)
+    ipcRenderer.on(IPC.storageStatusEvent, (_e, value) => listener(value))
+  },
+  onDevices: (listener) => {
+    ipcRenderer.removeAllListeners(IPC.storageDevicesEvent)
+    ipcRenderer.on(IPC.storageDevicesEvent, (_e, value) => listener(value))
+  },
+}
+
 const api: QQPetApi = {
+  capabilities: { serverMode: true },
   load: () => ipcRenderer.invoke(IPC.load),
   save: send(IPC.save),
   ...runtime,
+  storage,
   remote: {
     status: () => ipcRenderer.invoke(IPC.remoteStatus),
     pair: (input) => ipcRenderer.invoke(IPC.remotePair, input),

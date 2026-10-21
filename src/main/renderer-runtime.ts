@@ -30,6 +30,8 @@ import {
   type DeviceLocalOverlayPatch,
 } from '../shared/sync/data-boundary'
 import type { CommandKey, CommandResult, PetCommand } from '../shared/sync/protocol'
+import type { PortablePetBundleV1 } from '../shared/sync/portable'
+import type { StorageBackupStatus, StorageMigrationStatus } from '../shared/storage'
 import {
   createLocalRepository,
   type LocalPetProjection,
@@ -65,6 +67,7 @@ export class DesktopRendererRuntime {
   private readonly legacySavePath: string
   private window: BrowserWindow | null = null
   private currentProjection: RendererProjection | null = null
+  private sendEnabled = true
   private cursor: ProjectionCursor | null = null
   private readonly viewListeners = new Set<(save: SaveData) => void>()
 
@@ -138,6 +141,68 @@ export class DesktopRendererRuntime {
   requestResync(): void {
     if (this.currentProjection === null) return
     this.send(IPC.resync, clone(this.currentProjection), [])
+  }
+
+  /**
+   * C11 mode fencing: while server mode owns canonical state the local runtime
+   * must not push projections, command results or status into the renderer.
+   */
+  setSendEnabled(enabled: boolean): void {
+    this.sendEnabled = enabled
+  }
+
+  async loadFenced(): Promise<SaveData> {
+    const projection = await this.repository.loadFenced()
+    if (projection === null) {
+      throw new Error(this.repository.getStatus().error ?? 'local runtime v2 could not be loaded for fencing')
+    }
+    if (this.currentProjection === null) this.acceptProjection(projection)
+    return clone(this.requireProjection().save)
+  }
+
+  async archiveAuthority(reason: 'use_server' | 'mode_switch' = 'use_server'): Promise<void> {
+    const projection = await this.repository.archiveAuthority(reason)
+    if (projection === null) throw new Error('local authority could not be archived')
+  }
+
+  exportForDetach(incomingEpoch: number): Promise<PortablePetBundleV1> {
+    return this.repository.exportForDetach(incomingEpoch)
+  }
+
+  rollbackDetach(): Promise<unknown> {
+    return this.repository.rollbackDetach()
+  }
+
+  importPortableBundle(bundle: PortablePetBundleV1 | string, options: Parameters<LocalRepository['importPortableBundle']>[1] = {}): ReturnType<LocalRepository['importPortableBundle']> {
+    return this.repository.importPortableBundle(bundle, options)
+  }
+
+  createBackup(reason: 'import' | 'manual' | 'mode_switch'): string | null {
+    return this.repository.createBackup(reason)
+  }
+
+  getMigrationStatus(): StorageMigrationStatus {
+    return this.repository.getMigrationStatus()
+  }
+
+  getBackupStatus(): StorageBackupStatus {
+    return this.repository.getBackupStatus()
+  }
+
+  exportPortableBundle(): PortablePetBundleV1 | null {
+    return this.repository.exportPortableBundle()
+  }
+
+  getLocalStatus(): RendererRepositoryStatus {
+    return createRendererStatus(this.repository.getStatus(), this.currentProjection)
+  }
+
+  getDeviceOverlay(): DeviceLocalOverlay | null {
+    return this.repository.getDeviceOverlay()
+  }
+
+  getWeatherCity(): string {
+    return this.repository.getDocument()?.bundle.engine.weatherLocation ?? ''
   }
 
   loadLocalSettings(): DeviceLocalOverlay {
@@ -266,6 +331,7 @@ export class DesktopRendererRuntime {
   }
 
   private onRepositoryProjection(projection: LocalPetProjection): void {
+    if (this.sendEnabled === false) return
     const next = this.toProjection(projection)
     const events = this.deltaEvents(projection)
     const delivery = classifyProjectionDelivery(this.cursor, next, events)
@@ -276,19 +342,38 @@ export class DesktopRendererRuntime {
   }
 
   private onRepositoryStatus(status: Parameters<typeof createRendererStatus>[0]): void {
+    if (this.sendEnabled === false) return
     const projection = this.repository.getProjection()
     const current = projection === null ? this.currentProjection : this.toProjection(projection)
     this.send(IPC.syncStatus, createRendererStatus(status, current))
   }
 
   private send(channel: string, ...payload: unknown[]): void {
+    if (this.sendEnabled === false) return
     if (this.window === null || this.window.isDestroyed()) return
     this.window.webContents.send(channel, ...payload)
   }
 }
 
+/** The narrow runtime host surface the unified renderer IPC needs; server mode can supply its own. */
+export interface RendererRuntimeHost {
+  info(): RendererRuntimeInfo
+  acceptsSender(sender: unknown): boolean
+  command<K extends CommandKey>(
+    command: Extract<PetCommand, { type: K }>,
+    options?: { opId?: string },
+  ): Promise<CommandResult<K>>
+  setAdvanceWhileEmpty(enabled: boolean): Promise<unknown>
+  loadLocalSettings(): DeviceLocalOverlay | Promise<DeviceLocalOverlay>
+  updateLocalSettings(value: unknown): Promise<DeviceLocalOverlay>
+  flush(): Promise<void>
+  getProjection(): RendererProjection | null
+  getStatus(): RendererRepositoryStatus
+  requestResync(): void
+}
+
 /** Registers the unified renderer IPC handlers, including fail-closed legacy stubs. */
-export function installRendererRuntimeIpc(runtime: DesktopRendererRuntime | null): void {
+export function installRendererRuntimeIpc(runtime: RendererRuntimeHost | null): void {
   const requireTrustedSender = (event: IpcMainInvokeEvent): void => {
     if (runtime !== null && runtime.acceptsSender(event.sender) === false) {
       throw new Error('unauthorized: unknown renderer')
