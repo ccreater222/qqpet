@@ -26,6 +26,12 @@ import { hitCover, type Box } from '../mobile/overlay'
 /** Mirrors the store flag; kept local so legacy source-level renderer tests can run without the full graph. */
 const projectionMode = window.__qqpetRuntimeV2 === true
 
+window.addEventListener('qqpet-command-error', (event) => {
+  const detail = (event as CustomEvent<{ message?: unknown }>).detail
+  if (detail === undefined || typeof detail.message !== 'string') return
+  windowView({ title: '操作失败', msg: detail.message })
+})
+
 let lastPlatformError = ''
 let lastPlatformErrorAt = -Infinity
 // The native adapter reports errors before and after bootstrap; only the initialized UI opens dialogs.
@@ -439,6 +445,9 @@ const begin = (): void => {
 /** Projection mode owns all game rules; only the SWF pose/clock runs locally. */
 const beginProjection = (): void => {
   petEl.hidden = false
+  // Show the authoritative dead/buried state before the first projection update.
+  if (save.isBury) machine.play({ a: 'bury' })
+  else if (info.health === 0) machine.play({ a: 'dying', s: () => machine.add({ a: 'die' }) })
   machine.start()
 }
 const adoptPet = (): void => adopt(begin)

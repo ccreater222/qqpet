@@ -5,11 +5,14 @@ import { DEAD, illOf } from './data/ills'
 import { addGood, hasGood, startTimed, takeGood } from './goods'
 import { speak } from './pet'
 import { emitEvent } from './said'
-import { activity, addInfo, info, save, setInfo } from './store'
+import { activity, addInfo, info, runtimeProjectionMode, save, setInfo } from './store'
+import { uiCommands } from './command-map'
+import { commandResultData, commandSucceeded, dispatchRuntimeCommand } from './runtime-command'
 import { addCount, type Counter } from './tasks'
 
 /** Deducts 元宝; on shortage shows the original's alert and returns false. */
 export function pay(price: number): boolean {
+  if (runtimeProjectionMode) return false
   if (info.yb < price) {
     windowView({ msg: '抱歉您的余额不足' })
     return false
@@ -20,6 +23,7 @@ export function pay(price: number): boolean {
 
 /** Stat effects of a good; eating and cleaning come with `extra` mood. */
 export function apply(g: Good, extra = 0): void {
+  if (runtimeProjectionMode) return
   const c = save.petComputedlInfo
   if (g.hunger) setInfo('hunger', Math.min(info.hunger + g.hunger, c.hungerMax))
   if (g.clean) setInfo('clean', Math.min(info.clean + g.clean, c.cleanMax))
@@ -53,6 +57,7 @@ const happened = (g: Good): void => emitEvent((HAPPENED[g.type] ?? ((n: string) 
 
 /** Uses a food/clean/toy good without any words, for time the pet spent unattended. */
 export function useItemQuietly(g: Good): void {
+  if (runtimeProjectionMode) return
   const d = DAILY[g.type as TimedType]
   if (!takeGood(g)) return
   if (g.useTimeing) startTimed(g as Good & { type: TimedType })
@@ -66,6 +71,37 @@ export function useItemQuietly(g: Good): void {
  * preempted costs nothing. `text` replaces the everyday goods' usual line.
  */
 export function useItem(g: Good, free = false, text?: string): void {
+  if (runtimeProjectionMode) {
+    if (g.type === 'nums') {
+      return windowView({
+        title: `使用-${g.name}`,
+        msg: '选择使用数量',
+        goods: [g],
+        max: g.num,
+        ok: (close, n) => {
+          close()
+          void dispatchRuntimeCommand(uiCommands.use(g.type, g.id, n))
+        },
+      })
+    }
+    if (g.type === 'medicine') {
+      const wasDead = info.health === 0
+      void dispatchRuntimeCommand(uiCommands.treatOwned(g.id)).then((result) => {
+        const data = commandResultData<{ correct?: boolean; cured?: boolean; health?: number }>(result)
+        if (data === null) return
+        if (wasDead) speak({ s: '[host],我复活啦~', now: true }, 'revival')
+        else if (data.correct === false) speak({ s: '[host]，这个药好像不对症呢……', now: true }, 'cure')
+        else speak({ s: '[host],病治好啦~', now: true }, 'recover')
+      })
+      return
+    }
+    const d = DAILY[g.type as TimedType]
+    void dispatchRuntimeCommand(uiCommands.use(g.type, g.id)).then((result) => {
+      if (commandSucceeded(result) === false) return
+      speak(text ? { s: text, now: true } : { c: d.c, s: g.type, now: true }, d.action)
+    })
+    return
+  }
   if (g.type !== 'medicine' && info.health === 0) return speak({ c: 'state', s: 'die' })
   if (!free && !hasGood(g.type, g.id)) return
   const take = (): boolean => takeGood(g) || free
@@ -141,6 +177,11 @@ function medicine(g: Good, take: () => boolean): void {
 
 /** Puts won goods in the inventory and has the pet say `text`. */
 export function give(goods: Good[], text: string): void {
+  if (runtimeProjectionMode) {
+    // Commands already granted canonical goods; legacy reward presentation is local only.
+    speak({ s: text, now: true }, 'speak')
+    return
+  }
   for (const g of goods) addGood(g.type, g.id, g.num)
   speak({ s: text, now: true }, 'speak')
 }
@@ -153,6 +194,13 @@ export const price = (g: Good): number => (info.pinkDiamond ? discount(g.price!)
 
 /** Buys n of a good; `quiet` skips the thank-you line (cart checkout). */
 export function buy(g: Good, n = 1, quiet = false): boolean {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.buy(g.type, g.id, n)).then((result) => {
+      if (quiet || commandSucceeded(result) === false) return
+      speak({ c: 'pay', s: g.type, now: true }, 'speak')
+    })
+    return true
+  }
   if (g.needLevel && save.petComputedlInfo.level < g.needLevel) {
     speak({ s: '[host],我现在没到购买年龄哦~~' }, 'speak')
     return false
@@ -169,6 +217,28 @@ export function buy(g: Good, n = 1, quiet = false): boolean {
 
 /** The doctor: a consultation by health, then the cure, from the inventory or bought on the spot (price +20%). */
 export function doctor(): void {
+  if (runtimeProjectionMode) {
+    const line = activity('ill')
+    if (info.health === 0) {
+      void dispatchRuntimeCommand(uiCommands.treatDoctor()).then((result) => {
+        if (commandSucceeded(result)) speak({ s: '[host],我复活啦~', now: true }, 'revival')
+      })
+      return
+    }
+    if (line === null) return speak({ s: '[host],我不需要看病的~', now: true }, 'speak')
+    const fee = (5 - info.health) * 10
+    windowView({
+      title: '看病',
+      msg: `当前需要花费${fee}元宝，点击确认进行看病~`,
+      ok: (close) => {
+        close()
+        void dispatchRuntimeCommand(uiCommands.treatDoctor()).then((result) => {
+          if (commandSucceeded(result)) speak({ s: '[host],病治好啦~', now: true }, 'recover')
+        })
+      },
+    })
+    return
+  }
   const line = activity('ill')
   if (info.health === 0) return prescribe(goodOf('medicine', DEAD.cure.id), '您的宠物已经死亡，需要使用')
   if (!line) return speak({ s: '[host],我不需要看病的~', now: true }, 'speak')

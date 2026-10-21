@@ -497,8 +497,7 @@ const expectedMutationSiteCounts = {
     'src/renderer/ui/island.ts|update|saveJsonData': 1,
     'src/renderer/ui/menu.ts|update|settings': 1,
     'src/renderer/ui/petinfo.ts|setInfo|': 1,
-    'src/renderer/ui/setup.ts|addInfo|growth': 1,
-    'src/renderer/ui/setup.ts|addInfo|yb': 1,
+    'src/renderer/ui/setup.ts|addInfo|': 1,
     'src/renderer/ui/setup.ts|give|': 1,
     'src/renderer/ui/setup.ts|setInfo|health': 1,
     'src/renderer/ui/setup.ts|setInfo|lastX': 1,
@@ -600,8 +599,9 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
     'src/shared/pet-runtime/tick.ts': 'scheduler/minute engine, no client command surface',
   }
   const requiredSites = {
-    'src/renderer/ui/setup.ts|addInfo|yb': ['admin.grantCheat'],
-    'src/renderer/ui/setup.ts|addInfo|growth': ['admin.grantCheat'],
+    // The setup cheat helper applies a runtime-selected stat; the call site has
+    // no literal key, so the coverage key is the bare addInfo identity.
+    'src/renderer/ui/setup.ts|addInfo|': ['admin.grantCheat'],
     'src/renderer/ui/setup.ts|give|': ['admin.grantRandomGoods'],
     'src/renderer/ui/chat.ts|addInfo|': ['admin.grantCheat'],
     'src/renderer/ui/chat.ts|setInfo|': ['admin.grantCheat'],

@@ -6,6 +6,8 @@ import type { DeviceLocalOverlayPatch } from '../../shared/sync/data-boundary'
 import { classifyProjectionDelivery, type ProjectionCursor, type RendererProjection, type RendererRepositoryStatus } from '../../shared/renderer-api'
 import { applyLocalOverlayInPlace, applyPresentationInPlace, assertDeviceLocalSavePatch, hydrateSaveProjection, type InfoChange, type SaveHydrationResult } from '../../shared/renderer-projection'
 import { invalidateProjectionCaches } from './projection-cache'
+import { uiCommands } from './command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from './runtime-command'
 import { petSizeFor } from '../../shared/layout'
 import { goodOf, type TimedType } from './data/goods'
 import { levelOf, stageOf, type Stage } from './level'
@@ -158,6 +160,9 @@ function receiveProjection(projection: RendererProjection, events: OrderedEvent[
   }
   notifyInfoChanges(result.infoChanges)
   notifySettingsChanges(result.settingsChanges)
+  // The tray mirrors authoritative state; a projection can change health,
+  // activity, pause or inventory without any local info-change callback.
+  refreshTray()
   invalidateProjectionCaches({
     full,
     changedJsonKeys: result.changedJsonKeys,
@@ -336,6 +341,12 @@ export function setTray(s: TrayState): void {
 }
 
 export function setPaused(on: boolean): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.setPaused(on)).then((result) => {
+      if (commandSucceeded(result)) refreshTray()
+    })
+    return
+  }
   update('settings', { paused: on })
   refreshTray()
 }

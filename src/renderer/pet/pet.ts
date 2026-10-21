@@ -26,6 +26,7 @@ import {
   info,
   mood,
   onInfoChange,
+  onStoreEvent,
   petSize,
   playingDesk,
   refreshTray,
@@ -43,6 +44,8 @@ import { harvestNews } from './harvest'
 import { resetSignIn, tickGift } from './signin'
 import { resetTasks, rollDaily } from './tasks'
 import { dayStart, newDay } from './vip'
+import { uiCommands } from './command-map'
+import { dispatchRuntimeCommand } from './runtime-command'
 import { weatherNews, weatherStrain } from './weather'
 
 let idleTimer = 0
@@ -53,9 +56,13 @@ const petSwf = new PetSwf(document.getElementById('pet')!)
 export const applyPetSound = (): void => petSwf.applySound()
 
 export const machine = new Machine(petSwf, (over, next) => {
-  // Projection mode owns all gameplay. Pose transitions remain visual, but no
-  // idle timer, rest/gameplay callback or action hook may run in the renderer.
-  if (runtimeProjectionMode) return
+  // Projection mode owns all gameplay timers and transitions, but speech and
+  // animation callbacks are presentation-only and must still run locally.
+  if (runtimeProjectionMode) {
+    over.e?.()
+    next.s?.()
+    return
+  }
   clearTimeout(idleTimer)
   // Anything else (drag, click, a queued action) ends the rest.
   if (next.a !== 'liedown' && next.a !== 'lying') endRest()
@@ -289,6 +296,10 @@ export function revive(done?: () => void): void {
 
 let burying = false
 export function bury(done?: () => void): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.bury())
+    return
+  }
   if (burying) return
   burying = true
   update('isBury', true)
@@ -313,6 +324,16 @@ if (runtimeProjectionMode === false) {
     } else if (key === 'hunger' || key === 'clean' || key === 'yb') {
       maybeLead()
     }
+  })
+} else {
+  // Projection mode owns death/revival state; only the pose is local.
+  onStoreEvent((event) => {
+    if (event.type !== 'pet.died') return
+    setTray('dead')
+    machine.play(save.isBury ? { a: 'bury' } : { a: 'dying', s: () => machine.add({ a: 'die' }) })
+  })
+  onInfoChange((key, previous) => {
+    if (key === 'health' && previous === 0 && info.health > 0) machine.play({ a: 'revival' })
   })
 }
 

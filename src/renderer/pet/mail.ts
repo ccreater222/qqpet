@@ -2,7 +2,7 @@ import type { CalendarDay } from '../../shared/ipc'
 import { isBuddy, type Shot } from './album'
 import { allGoods, goodOf, type Good } from './data/goods'
 import { rand } from './rand'
-import { info, save, scaleYb, update } from './store'
+import { info, runtimeProjectionMode, save, scaleYb, update } from './store'
 
 /** saveJsonData.email entries, keyed by `d` (unix seconds); a deleted mail keeps only its keys. */
 export interface Live {
@@ -23,7 +23,10 @@ export interface Live {
 export type Mail = Live | { d: number; e: true; k?: string }
 
 export const readMails = (): Record<string, Mail> => JSON.parse(save.saveJsonData.email || '{}')
-export const writeMails = (mails: Record<string, Mail>): void => update('saveJsonData', { email: JSON.stringify(mails) })
+export const writeMails = (mails: Record<string, Mail>): void => {
+  if (runtimeProjectionMode) return
+  update('saveJsonData', { email: JSON.stringify(mails) })
+}
 
 /** n different goods of a type, 1-3 of each. */
 function some(type: 'food' | 'toy', n: number): Good[] {
@@ -48,6 +51,7 @@ function send(mails: Record<string, Mail>, k: string, l: string, yb: number, m: 
 
 /** The photo from a trip, as a mail without goods. */
 export function mailPhoto(s: Shot): void {
+  if (runtimeProjectionMode) return
   const mails = readMails()
   const d = slot(mails)
   const l = isBuddy(s.id) ? `在${s.city}遇到了旅游搭子！` : `来自${s.city}的明信片`
@@ -57,6 +61,7 @@ export function mailPhoto(s: Shot): void {
 
 /** Welcome, birthday and holiday mails due today; true when any arrived. */
 export function deliverMails(today?: CalendarDay): boolean {
+  if (runtimeProjectionMode) return false
   const mails = readMails()
   const now = new Date()
   const born = new Date(info.birthDay * 1000)

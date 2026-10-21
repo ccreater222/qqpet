@@ -25,7 +25,7 @@ registerHooks({
   load(url, context, nextLoad) {
     if (url.endsWith('/pet/store.ts')) return {
       format: 'module', shortCircuit: true,
-      source: 'export const save = globalThis.backgroundTestSave; export const update = (key, value) => Object.assign(save[key], value)',
+      source: 'export const save = globalThis.backgroundTestSave; export const update = (key, value) => Object.assign(save[key], value); export const runtimeProjectionMode = false; export const onStoreEvent = () => () => {}',
     }
     if (url.endsWith('/pet/data/goods.json')) return {
       format: 'module', shortCircuit: true,

@@ -2,7 +2,9 @@ import { elapsed, stopTask } from '../pet/activity'
 import { goodOf, type TimedType } from '../pet/data/goods'
 import { pay } from '../pet/items'
 import { speak } from '../pet/pet'
-import { activity, growthPerMinute, info, onInfoChange, save, setInfo } from '../pet/store'
+import { activity, growthPerMinute, info, onInfoChange, onSettingsChange, onStoreEvent, runtimeProjectionMode, save, setInfo } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { addSweetHeart, openPinkDiamond } from '../pet/vip'
 import { openGoods } from './control'
 import './css/state.css'
@@ -53,12 +55,44 @@ export function status(): (Node | string)[] {
   if (activity('ill')) return ['生病了']
   const b = BUSY.find((x) => activity(x.key))
   if (!b) return ['正在成长']
-  return [`${b.name} `, div('fc', ` (${elapsed() | 0}分钟) `, button('stopDoActive butDo', stop, ' 停止 '))]
+  // Runtime mode has no renderer task clock; the projection only carries the
+  // activity kind, so never show a fake 0-minute elapsed value.
+  const progress = runtimeProjectionMode ? [] : [` (${elapsed() | 0}分钟) `]
+  return [`${b.name} `, div('fc', ...progress, button('stopDoActive butDo', stop, ' 停止 '))]
 }
 
 /** Buying sweetheart days, or switching a booked one on and off. */
 function sweetHeart(): void {
-  if (!info.sweetHeartOverTime) {
+  if (runtimeProjectionMode) {
+    if (info.sweetHeartOverTime === 0) {
+      return windowView({
+        msg: '托管费用：300元宝/一天',
+        max: 30,
+        sweet: true,
+        ok: (close, n) => {
+          close()
+          void dispatchRuntimeCommand(uiCommands.buySweetheart(n)).then((result) => {
+            if (commandSucceeded(result) === false) return
+            speak({ s: '[host],贴心宝贝开通啦~', now: true }, 'speak')
+          })
+        },
+      })
+    }
+    const on = info.sweetHeart === false
+    return windowView({
+      title: '贴心宝贝',
+      msg: on ? '当前贴心宝贝已开启，开启自动喂食以及贴心宝贝效果，是否继续？~~' : '关闭后只是关闭自动喂养功能，是否继续？~~',
+      sweet: true,
+      ok: (close) => {
+        close()
+        void dispatchRuntimeCommand(uiCommands.setSweetheart(on)).then((result) => {
+          if (commandSucceeded(result) === false) return
+          speak({ s: on ? '[host],开启了贴心宝贝，我真是太爱你了！~' : '[host],我依然还是爱你的，天地可鉴！~', now: true }, 'speak')
+        })
+      },
+    })
+  }
+  if (info.sweetHeartOverTime === 0) {
     return windowView({
       msg: '托管费用：300元宝/一天',
       max: 30,
@@ -86,6 +120,22 @@ function sweetHeart(): void {
 
 /** Opening or extending pink diamond with yuanbao; 365 days or more is the yearly membership. */
 function pinkDiamond(): void {
+  if (runtimeProjectionMode) {
+    windowView({
+      title: '粉钻贵族',
+      msg: info.pinkDiamond ? `粉钻${formatDate(info.PDiamondExpirationDate)}到期，续费：300元宝/一天` : '开通粉钻：300元宝/一天，一次开通365天即为年费粉钻',
+      max: 365,
+      init: 30,
+      ok: (close, n) => {
+        close()
+        void dispatchRuntimeCommand(uiCommands.buyPinkDiamond(n)).then((result) => {
+          if (commandSucceeded(result) === false) return
+          speak({ s: '[host],粉钻开通啦，谢谢你！~', now: true }, 'appear')
+        })
+      },
+    })
+    return
+  }
   windowView({
     title: '粉钻贵族',
     msg: info.pinkDiamond ? `粉钻${formatDate(info.PDiamondExpirationDate)}到期，续费：300元宝/一天` : '开通粉钻：300元宝/一天，一次开通365天即为年费粉钻',
@@ -228,6 +278,14 @@ export function openState(x: number, y: number, closesItself = false, focusTaken
 }
 
 let queued = 0
+onSettingsChange((change) => {
+  if (change.paused !== undefined && panel !== null) render()
+})
+// Activity is canonical and arrives only through the projection, so refresh the
+// open status panel from its ordered events instead of the optimistic click.
+onStoreEvent((event) => {
+  if (panel !== null && (event.type === 'activity.started' || event.type === 'activity.completed')) render()
+})
 // Position is not shown, and a walk moves it 12 times a second: redrawing then replaces a button between press and release, eating the click.
 onInfoChange((key) => {
   if (panel && !queued && key !== 'lastX' && key !== 'lastY')

@@ -57,6 +57,7 @@ export function createLegacyStoreAdapter() {
     save: {},
     goodOf: () => ({}),
     busy: () => false,
+    runtimeProjectionMode: false,
   }
   vm.createContext(context)
   vm.runInContext(script, context)
@@ -93,6 +94,7 @@ export function createLegacyGoodApplyAdapter() {
   const context = {
     info: {},
     save: {},
+    runtimeProjectionMode: false,
     moodEffects: [],
     setInfo(key, value) {
       context.info[key] = value

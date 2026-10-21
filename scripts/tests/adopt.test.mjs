@@ -22,6 +22,7 @@ function fixture(options = {}) {
     setInfo: (key, value) => writes.push([key, value]),
     update: (key, value) => writes.push([key, value]),
     save,
+    runtimeProjectionMode: false,
     onProjectionApplied(listener) {
       projectionListeners.push(listener)
       return () => {

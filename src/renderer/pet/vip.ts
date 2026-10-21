@@ -1,5 +1,7 @@
 import { resetFish } from './fishing'
-import { info, setInfo } from './store'
+import { info, runtimeProjectionMode, setInfo } from './store'
+import { uiCommands } from './command-map'
+import { dispatchRuntimeCommand } from './runtime-command'
 
 const DAY = 86400
 /** PDgrowth at which pink diamond levels 1..7 start. */
@@ -29,6 +31,10 @@ function settle(today: number): void {
 
 /** Drops the membership now. Growth history stays; the window skin goes gold. */
 export function clearPinkDiamond(): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.clearPinkDiamond())
+    return
+  }
   setInfo('PDiamondExpirationDate', 0)
   setInfo('PDiamondBeginDate', 0)
   settle(dayStart())
@@ -36,6 +42,10 @@ export function clearPinkDiamond(): void {
 
 /** Opens pink diamond for `days` from today's 06:00, or extends a running one. */
 export function openPinkDiamond(days: number): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.buyPinkDiamond(days))
+    return
+  }
   const today = dayStart()
   const extend = info.pinkDiamond
   if (extend) {
@@ -53,12 +63,17 @@ export function openPinkDiamond(days: number): void {
 
 /** Books sweetheart for `days` more, from today's 06:00 when none is booked, and switches it on. */
 export function addSweetHeart(days: number): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.buySweetheart(days))
+    return
+  }
   setInfo('sweetHeartOverTime', (info.sweetHeartOverTime || dayStart()) + days * DAY)
   setInfo('sweetHeart', true)
 }
 
 /** 06:00 accounting: pink diamond growth for the days since it was last counted, and VIP expiry. */
 export function newDay(today: number): void {
+  if (runtimeProjectionMode) return
   if (info.pinkDiamond) {
     setInfo('PDgrowth', info.PDgrowth + (info.PDgrowthValue * (Math.min(today, info.PDiamondExpirationDate) - info.PDiamondBeginDate)) / DAY)
     setInfo('PDiamondBeginDate', today)

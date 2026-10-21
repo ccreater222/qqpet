@@ -1,11 +1,17 @@
 import { goodOf, type Good, type GoodType, type TimedType } from './data/goods'
-import { save, update } from './store'
+import { onStoreEvent, runtimeProjectionMode, save, update } from './store'
 
 type Listener = (type: GoodType) => void
 const listeners: Listener[] = []
 /** Inventory or timed goods of `type` changed. */
 export const onGoodsChange = (l: Listener): void => void listeners.push(l)
 const changed = (type: GoodType): void => listeners.forEach((l) => l(type))
+const changedAll = (): void => {
+  for (const type of Object.keys(save.selfGoodDatas) as GoodType[]) changed(type)
+}
+onStoreEvent((event) => {
+  if (event.type === 'inventory.changed' || event.type === 'item.consumed' || event.type === 'reward.granted') changedAll()
+})
 
 /** Entries are `_<id>*<count>`; returns the index of `id` or -1. */
 const indexOf = (type: GoodType, id: string): number => save.selfGoodDatas[type].findIndex((e) => e.startsWith(`_${id}*`))
@@ -34,6 +40,7 @@ export const hasGood = (type: GoodType, id: string): boolean => indexOf(type, id
 
 /** Adds (or with a negative n removes) n of a good; also records it as seen. */
 export function addGood(type: GoodType, id: string, n: number): void {
+  if (runtimeProjectionMode) return
   if (!save.illustrated.includes(id)) update('illustrated', [...save.illustrated, id])
   const list = [...save.selfGoodDatas[type]]
   const i = indexOf(type, id)
@@ -47,6 +54,7 @@ export function addGood(type: GoodType, id: string, n: number): void {
 
 /** Takes n of a good from the inventory; false when not owned. */
 export function takeGood(good: Good, n = 1): boolean {
+  if (runtimeProjectionMode) return false
   if (!hasGood(good.type, good.id)) return false
   addGood(good.type, good.id, -n)
   return true
@@ -54,12 +62,14 @@ export function takeGood(good: Good, n = 1): boolean {
 
 /** Puts a timed good in effect for its full duration, replacing the previous one of its type. */
 export function startTimed(good: Good & { type: TimedType }): void {
+  if (runtimeProjectionMode) return
   update('selfGoodUseOption', { [good.type]: { id: good.id, left: good.useTimeing! } })
   changed(good.type)
 }
 
 /** Counts the timed goods down; returns the types that ran out. */
 export function tickTimed(minutes: number): TimedType[] {
+  if (runtimeProjectionMode) return []
   const over: TimedType[] = []
   for (const [type, t] of Object.entries(save.selfGoodUseOption) as [TimedType, { id: string; left: number } | null][]) {
     if (!t) continue

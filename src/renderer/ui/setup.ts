@@ -6,7 +6,9 @@ import { allGoods, type GoodType } from '../pet/data/goods'
 import { give } from '../pet/items'
 import { applyPetSound, speak } from '../pet/pet'
 import { rand } from '../pet/rand'
-import { addInfo, info, save, setInfo, update } from '../pet/store'
+import { addInfo, info, runtimeProjectionMode, save, setInfo, update } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { clearPinkDiamond, openPinkDiamond } from '../pet/vip'
 import { weatherNow } from '../pet/weather'
 import { openFrame } from './box'
@@ -170,15 +172,65 @@ function rebornAsOther(): void {
   windowView({
     title: '重生为另一个性别~',
     msg: '点击将会清空当前宠物数据，并重生为另一个性别的宠物，请慎重选择',
-    ok: () => window.qqpet.resetPet(info.sex === 'GG' ? 'MM' : 'GG'),
+    ok: () => {
+      if (runtimeProjectionMode) {
+        void dispatchRuntimeCommand(uiCommands.reset()).then((result) => {
+          if (commandSucceeded(result)) window.location.reload()
+        })
+        return
+      }
+      window.qqpet.resetPet(info.sex === 'GG' ? 'MM' : 'GG')
+    },
   })
 }
 
 /** Ten of a random good of `type`. */
 function grant(type: GoodType): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.grantRandomGoods(type, 10)).then((result) => {
+      if (commandSucceeded(result)) speak({ s: '[host]，我获得了10个物品！', now: true }, 'speak')
+    })
+    return
+  }
   const all = allGoods(type)
   const g = { ...all[rand(0, all.length - 1)], num: 10 }
   give([g], `[host]，我获得了${g.num}个${g.name}！`)
+}
+
+function cheat(stat: 'yb' | 'growth' | 'health', amount: number, line: string): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.grantCheat(stat, amount)).then((result) => {
+      if (commandSucceeded(result)) speak({ s: line, now: true }, 'appear')
+    })
+    return
+  }
+  if (stat === 'health') setInfo('health', Math.max(info.health, 5))
+  else addInfo(stat, amount)
+  speak({ s: line, now: true }, 'appear')
+}
+
+/** VIP cheat buttons: semantic commands under the runtime flag, direct legacy writes otherwise. */
+function vipCheat(kind: 'pink30' | 'pink365' | 'clear'): void {
+  const line = kind === 'clear' ? '[host]，粉钻已清除~' : `[host]，粉钻开了${kind === 'pink30' ? 30 : 365}天！`
+  if (runtimeProjectionMode) {
+    const done = (result: Parameters<typeof commandSucceeded>[0]): void => {
+      if (commandSucceeded(result)) speak({ s: line, now: true }, 'appear')
+    }
+    if (kind === 'clear') void dispatchRuntimeCommand(uiCommands.clearPinkDiamond()).then(done)
+    else void dispatchRuntimeCommand(uiCommands.buyPinkDiamond(kind === 'pink30' ? 30 : 365)).then(done)
+    return
+  }
+  if (kind === 'clear') clearPinkDiamond()
+  else openPinkDiamond(kind === 'pink30' ? 30 : 365)
+  speak({ s: line, now: true }, 'appear')
+}
+
+function setSharedSetting(key: 'difficulty' | 'undying', value: boolean | 'easy' | 'standard'): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.setShared(key, value))
+    return
+  }
+  update('settings', { [key]: value } as Record<string, unknown>)
 }
 
 /** The pet reports the new city's weather right away, so a wrong name shows at once. */
@@ -301,7 +353,7 @@ const TABS: { label: string; options: Option[] }[] = [
           label: '标准难度（元宝收入降为 40%，默认关=轻松）',
           title: '轻松：保持现有的元宝收入；标准：打工、小游戏、钓鱼、农场、邮件礼物等收入只有 40%（至少 1），物价不变。作弊获得的不受影响。',
           on: () => s.difficulty === 'standard',
-          run: () => update('settings', { difficulty: s.difficulty === 'standard' ? 'easy' : 'standard' }),
+          run: () => setSharedSetting('difficulty', s.difficulty === 'standard' ? 'easy' : 'standard'),
         },
         { type: 'radio', label: '开启免打扰模式', on: () => s.quiet, run: () => update('settings', { quiet: !s.quiet }) },
         {
@@ -404,50 +456,41 @@ const TABS: { label: string; options: Option[] }[] = [
       {
         type: 'button',
         label: '元宝 +1000',
-        run: () => {
-          addInfo('yb', 1000)
-          speak({ s: '[host]，我获得了1000元宝！', now: true }, 'appear')
-        },
+        run: () => cheat('yb', 1000, '[host]，我获得了1000元宝！'),
       },
-      { type: 'button', label: '成长值 +5000', run: () => addInfo('growth', 5000) },
+      { type: 'button', label: '成长值 +5000', run: () => cheat('growth', 5000, '[host]，我获得了5000成长值！') },
       { type: 'button', label: '随机获得 10 个食物', run: () => grant('food') },
       { type: 'button', label: '随机获得 10 个清洁用品', run: () => grant('clean') },
       { type: 'button', label: '随机获得 10 个药品', run: () => grant('medicine') },
       {
         type: 'button',
         label: '复活吧，我的宠物！',
-        run: () => (info.health === 0 ? setInfo('health', 5) : speak({ s: '[host]，我还活得好好的呢~', now: true }, 'speak')),
+        run: () => (info.health === 0 ? cheat('health', 5, '[host]，我复活啦！') : speak({ s: '[host]，我还活得好好的呢~', now: true }, 'speak')),
       },
       {
         type: 'radio',
         label: '聊天框金手指',
         title: '在聊天里输入「元宝+100000」「不要死」等口令生效；关闭时「不要死」一并失效',
         on: () => s.chatCheat,
-        run: () => update('settings', { chatCheat: !s.chatCheat, undying: false }),
+        run: () => {
+          update('settings', { chatCheat: s.chatCheat === false })
+          setSharedSetting('undying', false)
+        },
       },
       {
         type: 'button',
         label: '粉钻 30天',
-        run: () => {
-          openPinkDiamond(30)
-          speak({ s: '[host]，粉钻开了30天！', now: true }, 'appear')
-        },
+        run: () => vipCheat('pink30'),
       },
       {
         type: 'button',
         label: '粉钻 年费',
-        run: () => {
-          openPinkDiamond(365)
-          speak({ s: '[host]，粉钻开了365天！', now: true }, 'appear')
-        },
+        run: () => vipCheat('pink365'),
       },
       {
         type: 'button',
         label: '粉钻 清除',
-        run: () => {
-          clearPinkDiamond()
-          speak({ s: '[host]，粉钻已清除~', now: true }, 'appear')
-        },
+        run: () => vipCheat('clear'),
       },
     ],
   },

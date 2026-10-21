@@ -3,7 +3,9 @@ import CHINA from '../pet/data/china.json'
 import { pay } from '../pet/items'
 import { PROVINCES, travel } from '../pet/jobs'
 import { speak } from '../pet/pet'
-import { activity, save, update } from '../pet/store'
+import { activity, runtimeProjectionMode, save, update } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { resetTour } from '../pet/tasks'
 import { albumView } from './album'
 import { openBox } from './box'
@@ -30,11 +32,17 @@ function finishTour(): void {
     title: '旅游~~',
     msg: '该操作将清除旅游数据，并且可重新做相关旅游任务，确认花费8888元宝进行完成旅游成就么？',
     ok: (close) => {
+      close()
+      if (runtimeProjectionMode) {
+        void dispatchRuntimeCommand(uiCommands.completeTravelCollection()).then((result) => {
+          if (commandSucceeded(result)) speak({ s: '[host],旅游成就完成啦！~', now: true }, 'speak')
+        })
+        return
+      }
       if (pay(8888)) {
         update('gameSaveDatas', { travel_china: [], travel_china_num: save.gameSaveDatas.travel_china_num + 1 })
         resetTour()
       }
-      close()
     },
   })
 }

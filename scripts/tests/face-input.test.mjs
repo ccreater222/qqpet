@@ -76,6 +76,7 @@ function faceFixture({ stage = 'Egg', sex = 'GG', touch = true, faceClick = 2, p
   const scope = {
     FACE, document, machine, touch, info: app.info, save: app.save,
     stage: () => stage,
+    runtimeProjectionMode: false,
     mood: () => app.info.mood >= 800 ? 'happy' : app.info.mood >= 500 ? 'peaceful' : app.info.mood >= 200 ? 'upset' : 'sad',
     rand: (min, max) => min === 5 && max === 15 ? 10 : min,
     addCount: name => counts.push(name),

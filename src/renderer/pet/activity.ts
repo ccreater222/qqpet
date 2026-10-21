@@ -1,4 +1,6 @@
-import { refreshTray, setActivity, update } from './store'
+import { activity, refreshTray, runtimeProjectionMode, setActivity, update } from './store'
+import { uiCommands } from './command-map'
+import { dispatchRuntimeCommand } from './runtime-command'
 
 type Key = 'work' | 'study' | 'trip'
 
@@ -18,6 +20,7 @@ export const elapsed = (): number => task?.done ?? 0
 
 /** Starts a task; `value` is what activeOption shows (job id, city). */
 export function startTask(t: Task, value: string, done = 0): void {
+  if (runtimeProjectionMode) return
   task = { ...t, done }
   update('saveJsonData', { activity: String(done) })
   setActivity(t.key, value)
@@ -26,6 +29,11 @@ export function startTask(t: Task, value: string, done = 0): void {
 
 /** Drops the running task without its end; returns its key. */
 export function stopTask(): Key | null {
+  if (runtimeProjectionMode) {
+    const key = (['work', 'study', 'trip'] as const).find(k => activity(k) !== null) ?? null
+    if (key !== null) void dispatchRuntimeCommand(uiCommands.stopActivity())
+    return key
+  }
   if (!task) return null
   const { key } = task
   task = null
@@ -36,6 +44,7 @@ export function stopTask(): Key | null {
 
 /** Counts growing minutes; ends the task when it is due or ends early. */
 export function advanceTask(minutes: number): void {
+  if (runtimeProjectionMode) return
   if (!task) return
   const t = task
   t.done = Math.min(t.done + minutes, t.minutes)

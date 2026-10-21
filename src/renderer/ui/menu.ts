@@ -14,6 +14,8 @@ import { sendLetter } from './lan-visit'
 import { visitFriend } from './visit'
 import { windowView } from './window-view'
 import { runtimeMenuItems } from './runtime-menu'
+import { uiCommands } from '../pet/command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 
 const ditu = (n: number): string => `pet/Menu/ditu0${n}.png`
 
@@ -50,7 +52,19 @@ function quit(): void {
 
 export function readopt(): void {
   closeMenu()
-  windowView({ title: '重新领养宠物~', msg: '点击将会清空当前宠物数据，并且重置为未领养状态，请慎重选择', ok: () => window.qqpet.resetPet() })
+  windowView({
+    title: '重新领养宠物~',
+    msg: '点击将会清空当前宠物数据，并且重置为未领养状态，请慎重选择',
+    ok: () => {
+      if (runtimeProjectionMode) {
+        void dispatchRuntimeCommand(uiCommands.reset()).then((result) => {
+          if (commandSucceeded(result)) window.location.reload()
+        })
+        return
+      }
+      window.qqpet.resetPet()
+    },
+  })
 }
 
 export function setHidden(on: boolean): void {
@@ -66,8 +80,11 @@ function toggleHidden(): void {
 }
 
 function togglePaused(): void {
-  setPaused(!save.settings.paused)
-  speak({ c: 'state', s: save.settings.paused ? 'stopGrowth' : 'startGrowth', now: true }, 'speak')
+  const next = save.settings.paused === false
+  setPaused(next)
+  // Projection mode applies the command asynchronously; announce the requested
+  // state instead of the stale pre-command save value.
+  speak({ c: 'state', s: next ? 'stopGrowth' : 'startGrowth', now: true }, 'speak')
 }
 
 function items(adopt: () => void): Item[] {

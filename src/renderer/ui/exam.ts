@@ -1,4 +1,8 @@
 import EXAM from '../pet/data/exam.json'
+import type { ExamQuestionProjection } from '../../shared/sync/protocol'
+import { runtimeProjectionMode } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandResultData, commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { openFrame } from './box'
 import './css/exam.css'
 import { button, div } from './dom'
@@ -13,10 +17,85 @@ const shuffle = <T>(a: T[]): T[] => {
   return b
 }
 
+async function startRuntimeExam(topic: string, pass: () => void): Promise<void> {
+  if (open) return
+  open = true
+  const result = await dispatchRuntimeCommand(uiCommands.examStart(topic))
+  const data = commandResultData<{ sessionToken: string; questions: ExamQuestionProjection[] }>(result)
+  if (data === null || commandSucceeded(result) === false) {
+    open = false
+    return
+  }
+  renderRuntimeExam(data.questions, data.sessionToken, pass)
+}
+
+function renderRuntimeExam(questions: ExamQuestionProjection[], sessionToken: string, pass: () => void): void {
+  const picked = questions.map(() => -1)
+  let at = 0
+  const box = div('answerQuestions fC por')
+  const remove = openFrame(div('ui-exam', box))
+  let submitting = false
+  const close = (): void => {
+    remove()
+    open = false
+  }
+  const submit = (): void => {
+    if (submitting || picked.some(index => index < 0)) return
+    submitting = true
+    void dispatchRuntimeCommand(uiCommands.examSubmit(sessionToken, picked)).then((result) => {
+      const data = commandResultData<{ passed: boolean }>(result)
+      close()
+      submitting = false
+      if (data === null) return
+      if (data.passed) pass()
+      else windowView({ title: '升学结果', msg: '抱歉未通过！' })
+    })
+  }
+  const go = (d: number) => (): void => {
+    if (d < 0 || picked[at] >= 0) at += d
+    render()
+  }
+  function render(): void {
+    const q = questions[at]
+    if (q === undefined) return
+    const last = at === questions.length - 1
+    const options = q.options.map((o, i) =>
+      button(
+        'aq_option fc',
+        () => {
+          picked[at] = i
+          render()
+        },
+        div(i === picked[at] ? 'choose chooseAQ' : 'choose'),
+        div('w0 f1', o),
+      ),
+    )
+    box.replaceChildren(
+      button('close', close),
+      div('a_title', '升学考试：'),
+      div(
+        'a_Question fC f1',
+        div('aq_title', q.prompt),
+        div('aq_options fccw f1', ...options),
+        div(
+          'aq_buts fca',
+          ...(at ? [button('fcc wsnw aqb', go(-1), ' 上一题 ')] : []),
+          last ? button('fcc wsnw aqb', submit, ' 提交 ') : button('fcc wsnw aqb', go(1), ' 下一题 '),
+        ),
+      ),
+    )
+  }
+  render()
+}
+
 let open = false
 
 /** The promotion exam of study topic `topic`: three random questions of its bank, all must be right. */
 export function openExam(topic: string, pass: () => void): void {
+  if (runtimeProjectionMode) {
+    void startRuntimeExam(topic, pass)
+    return
+  }
   const bank = EXAM[topic as keyof typeof EXAM] as (typeof EXAM)[keyof typeof EXAM] | undefined
   if (open || !bank?.length) return
   open = true

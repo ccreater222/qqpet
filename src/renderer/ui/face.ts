@@ -1,7 +1,9 @@
 import { FACE } from '../pet/data/face'
 import { machine } from '../pet/pet'
 import { rand } from '../pet/rand'
-import { info, mood, save, setInfo, stage, update } from '../pet/store'
+import { info, mood, runtimeProjectionMode, save, setInfo, stage, update } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandResultData, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { addCount } from '../pet/tasks'
 import { touch } from './dom'
 import { floatMood } from './float'
@@ -16,6 +18,18 @@ petEl.appendChild(layer)
 
 function poke(key: string, s = 1, e = s): void {
   layer.replaceChildren()
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.pokeFace(key)).then((result) => {
+      const data = commandResultData<{ mood: number; ddw?: number }>(result)
+      if (data === null) return
+      // The command owns the achievement counter; the unlock dialog stays local.
+      if (data.ddw === 1) windowView({ title: '逗逗我~~', msg: '恭喜成功开启逗宠成就~~', goods: [{ url: 'pet/achievement/ddw.svg', name: '逗宠成就' }] })
+      void floatMood(data.mood)
+      const dir = stage() === 'Adult' ? `Adult/${mood()}` : stage()
+      machine.play({ a: 'faceActive', opt: { url: `pet/Action/${info.sex}/${dir}/interact/${key}${rand(s, e)}.swf`, opt: {} } })
+    })
+    return
+  }
   addCount('Amusing')
   if (!save.gameSaveDatas.ddw) windowView({ title: '逗逗我~~', msg: '恭喜成功开启逗宠成就~~', goods: [{ url: 'pet/achievement/ddw.svg', name: '逗宠成就' }] })
   update('gameSaveDatas', { ddw: save.gameSaveDatas.ddw + 1 })

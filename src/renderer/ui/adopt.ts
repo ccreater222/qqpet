@@ -1,4 +1,4 @@
-import { onProjectionApplied, save, setInfo, update } from '../pet/store'
+import { onProjectionApplied, runtimeProjectionMode, save, setInfo, update } from '../pet/store'
 import type { Sex } from '../../shared/save'
 import { SwfPlayer } from '../swf/player'
 import { openBox } from './box'
@@ -71,6 +71,9 @@ function openAdoption(done: () => void, commit: CommitAdoption): void {
 
 /** Legacy local adoption writes SaveData directly; only valid while the runtime flag is off. */
 export function adopt(done: () => void): void {
+  // Defensive: the boot path only calls this with the flag off, but never let
+  // a stray call fall back to legacy canonical writes under the runtime flag.
+  if (runtimeProjectionMode) return adoptProjection(done)
   openAdoption(done, (sex, finish) => {
     setInfo('sex', sex)
     update('havePet', true)
