@@ -1112,6 +1112,7 @@ test('expired pairing codes are rejected with auth_failed', async t => {
   const store = openDatabase(harness.dbPath)
   const code = store.issuePairingCode('default', 'player', 1).code
   store.close()
+  await new Promise(resolve => setTimeout(resolve, 10))
   await assert.rejects(
     connect(harness, { kind: 'pairing', code, deviceLabel: 'Late' }),
     /socket closed: 4000/,
