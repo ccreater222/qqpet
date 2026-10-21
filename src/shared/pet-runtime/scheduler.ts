@@ -26,6 +26,8 @@ export interface SchedulerAdvanceOptions {
   liveActiveClientCountAtWallMs?: (wallMs: number) => number | SchedulerLiveActivity
   /** Per-minute coverage override for hosts that update coverage as catch-up proceeds. */
   coverageAtWallMs?: (fromWallMs: number, toWallMs: number) => SchedulerCoverageWindow
+  /** Host hook fired after each committed minute with that minute's canonical game time. */
+  onTick?: (gameTimeMs: number, events: DomainEvent[]) => void
 }
 
 export interface SchedulerAdvanceOutcome {
@@ -130,7 +132,9 @@ export function advanceSchedulerChunk(
       sessionActive: activeAtMinute > 0,
       actorDeviceId: null,
     }
-    events.push(...advanceMinuteInPlace(candidate, tickCtx))
+    const tickEvents = advanceMinuteInPlace(candidate, tickCtx)
+    events.push(...tickEvents)
+    options.onTick?.(candidate.gameTimeMs, tickEvents)
     completed++
   }
   candidate.lastSchedulerWallMs = completed < due ? anchor + completed * GAME_MINUTE_MS : targetWallMs
