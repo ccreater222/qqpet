@@ -68,3 +68,12 @@ test('converted fishing UI routes every SWF mutation through the runtime bridge'
   assert.match(source, /commandResultData<\{ yb: number \}>/)
   assert.doesNotMatch(source, /pondCommand\(head\.cmd, data\)\n    void send\(head\.cmd, reply\)[\s\S]*runtimeProjectionMode/)
 })
+
+test('fishing replies wait for the next projection and map typed errors to legacy codes', () => {
+  const source = readFileSync(new URL('../../src/renderer/ui/fishing.ts', import.meta.url), 'utf8')
+  assert.match(source, /refreshFromProjection/)
+  assert.match(source, /onProjectionApplied/)
+  assert.match(source, /cmd === 4 && error !== null && error\.code === 'insufficient_funds' \? 1 : 5/)
+  assert.doesNotMatch(source, /setTimeout\(\(\) => void send\(1, pondState\(\), 100\)/)
+  assert.match(source, /result: 6, msg: '收获成功'/)
+})

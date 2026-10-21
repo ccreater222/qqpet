@@ -56,6 +56,9 @@ export const uiCommands = {
   fishingHarvestAll: (): CommandFor<'fishing.harvestAll'> => command('fishing.harvestAll', {}),
   fishingSpeedUp: (): CommandFor<'fishing.speedUp'> => command('fishing.speedUp', {}),
 
+  socialVisit: (peerId: string, direction: 'incoming' | 'outgoing'): CommandFor<'social.completeLanVisit'> =>
+    command('social.completeLanVisit', { peerId, direction }),
+
   signIn: (): CommandFor<'signin.sign'> => command('signin.sign', {}),
   drawGrowth: (): CommandFor<'signin.drawGrowth'> => command('signin.drawGrowth', {}),
   claimOnlineGift: (): CommandFor<'signin.claimOnlineGift'> => command('signin.claimOnlineGift', {}),

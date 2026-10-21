@@ -233,3 +233,135 @@ test('runtime navigation exposes converted panels and keeps unconverted E-F entr
   assert.match(menu, /openGames/)
   assert.doesNotMatch(menu, /openFarm|openIsland|openCommunity|openMstx|visitFriend|sendLetter/)
 })
+
+function deferred() {
+  let resolve
+  const promise = new Promise((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+test('flash game starts are single-flight and only a started session settles', async () => {
+  const opened = []
+  const dispatches = []
+  const first = deferred()
+  let gamePlayed = null
+  const games = loadConverted('../../src/renderer/ui/games.ts', {
+    runtimeProjectionMode: true,
+    window: { qqpet: { onGamePlayed: (listener) => { gamePlayed = listener }, openGame: (id) => opened.push(id) } },
+    GAMES: [],
+    SMALL_GAMES: [],
+    playDiudiule: () => {},
+    playSmallGame: () => {},
+    openBox: () => () => {},
+    div: () => ({}),
+    button: () => ({}),
+    img: () => ({}),
+    addCount: () => {},
+    count: () => 0,
+    earnYb: () => 0,
+    growthPerMinute: () => 0,
+    info: { mood: 100 },
+    save: { petComputedlInfo: { moodMax: 1000 } },
+    setInfo: () => {},
+    speak: () => {},
+    floatMood: () => {},
+    uiCommands: {
+      gameStart: (gameId, kind) => ({ type: 'game.startSession', payload: { gameId, kind } }),
+      gameReward: (sessionToken) => ({ type: 'game.reward', payload: { sessionToken } }),
+    },
+    dispatchRuntimeCommand: (command) => { dispatches.push(command); return first.promise },
+    commandResultData: (result) => (result && result.result ? result.result : null),
+  }, 'startFlashGame')
+  const starting = games.startFlashGame('guess/main.swf')
+  games.startFlashGame('guess/main.swf')
+  assert.equal(dispatches.length, 1, 'the second click must not start a second session')
+  assert.deepEqual(opened, [])
+  // A gamePlayed before the session token exists must not settle anything.
+  gamePlayed(5)
+  await flush()
+  assert.equal(dispatches.length, 1)
+  first.resolve({ status: 'applied', result: { sessionToken: 'flash-1' } })
+  await starting
+  assert.deepEqual(opened, ['guess/main.swf'])
+  gamePlayed(5)
+  await flush()
+  assert.deepEqual(dispatches[1], { type: 'game.reward', payload: { sessionToken: 'flash-1' } })
+})
+
+test('diudiule quit during session start abandons the returned token instead of opening', async () => {
+  const dispatches = []
+  const first = deferred()
+  const appends = []
+  let desk = ''
+  const diudiule = loadConverted('../../src/renderer/ui/diudiule.ts', {
+    runtimeProjectionMode: true,
+    stage: () => 'Kid',
+    busy: () => false,
+    info: { health: 5, mood: 100, lastX: 0, lastY: 0 },
+    save: { petComputedlInfo: { moodMax: 1000 } },
+    petSize: () => 100,
+    playingDesk: () => desk,
+    setDeskGame: (value) => { desk = value },
+    setTray: () => {},
+    refreshTray: () => {},
+    setInfo: () => {},
+    earnYb: () => 0,
+    addCount: () => {},
+    machine: { play: () => {} },
+    speak: () => {},
+    floatMood: () => {},
+    document: { getElementById: () => ({ append: (node) => appends.push(node) }) },
+    button: () => ({ dataset: {}, addEventListener: () => {}, remove: () => {} }),
+    innerWidth: 1000,
+    innerHeight: 800,
+    uiCommands: {
+      diudiuleStart: () => ({ type: 'diudiule.startSession', payload: {} }),
+      diudiuleReward: (sessionToken) => ({ type: 'diudiule.reward', payload: { sessionToken } }),
+      gameAbandon: (sessionToken) => ({ type: 'game.abandonSession', payload: { sessionToken } }),
+    },
+    dispatchRuntimeCommand: (command) => { dispatches.push(command); return first.promise },
+    commandResultData: (result) => (result && result.result ? result.result : null),
+  }, 'playDiudiule, stopDiudiule')
+  diudiule.playDiudiule()
+  diudiule.stopDiudiule()
+  first.resolve({ status: 'applied', result: { sessionToken: 'dd-late' } })
+  await flush()
+  assert.deepEqual(dispatches, [
+    { type: 'diudiule.startSession', payload: {} },
+    { type: 'game.abandonSession', payload: { sessionToken: 'dd-late' } },
+  ])
+  assert.equal(desk, '')
+  assert.deepEqual(appends, [])
+})
+
+test('small game starts are single-flight while the session command is pending', async () => {
+  const dispatches = []
+  const first = deferred()
+  const smallgame = loadConverted('../../src/renderer/ui/smallgame.ts', {
+    runtimeProjectionMode: true,
+    stage: () => 'Kid',
+    busy: () => false,
+    info: { mood: 100, sex: 'GG', lastX: 0, lastY: 0 },
+    save: { petComputedlInfo: { moodMax: 1000 } },
+    playingDesk: () => '',
+    setDeskGame: () => {},
+    setTray: () => {},
+    refreshTray: () => {},
+    setInfo: () => {},
+    earnYb: () => 0,
+    addCount: () => {},
+    speak: () => {},
+    floatMood: () => {},
+    document: { getElementById: () => ({ hidden: false, append: () => {}, getBoundingClientRect: () => ({ left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100 }) }) },
+    window: { qqpet: { setFocusable: () => {} } },
+    uiCommands: { gameStart: (gameId, kind) => ({ type: 'game.startSession', payload: { gameId, kind } }) },
+    dispatchRuntimeCommand: (command) => { dispatches.push(command); return first.promise },
+    commandResultData: (result) => (result && result.result ? result.result : null),
+  }, 'playSmallGame')
+  smallgame.playSmallGame({ dir: 'guess', name: '猜动作' })
+  smallgame.playSmallGame({ dir: 'guess', name: '猜动作' })
+  assert.equal(dispatches.length, 1)
+  first.resolve({ status: 'rejected', error: { code: 'busy', message: 'busy', refreshProjection: false } })
+  await flush()
+  assert.equal(dispatches.length, 1, 'a rejected start does not open a window')
+})

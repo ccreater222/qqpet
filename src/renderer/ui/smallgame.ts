@@ -56,6 +56,7 @@ let root: Win | null = null
 let dir = ''
 /** Active runtime game session; settled when the game window closes. */
 let runtimeSessionToken: string | null = null
+let runtimeStarting = false
 /** Above .smallGameWin's own z-index, or "topmost" would sink below every other window. */
 let top = 50
 
@@ -248,9 +249,12 @@ export function playSmallGame(g: (typeof SMALL_GAMES)[number]): void {
 }
 
 async function startRuntimeSmallGame(g: (typeof SMALL_GAMES)[number]): Promise<void> {
+  if (runtimeStarting || root || playingDesk()) return
+  runtimeStarting = true
   const result = await dispatchRuntimeCommand(uiCommands.gameStart(g.dir, 'small'))
   const data = commandResultData<{ sessionToken: string }>(result)
-  if (data === null) return
+  runtimeStarting = false
+  if (data === null || root) return
   runtimeSessionToken = data.sessionToken
   openSmallGame(g)
 }

@@ -1,6 +1,6 @@
 import FRIES from '../pet/data/fries.json'
 import { pondCommand, pondRoom, pondState } from '../pet/fishing'
-import { info, runtimeProjectionMode, save } from '../pet/store'
+import { info, onProjectionApplied, runtimeProjectionMode, save } from '../pet/store'
 import { uiCommands } from '../pet/command-map'
 import { commandErrorText, commandResultData, commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { patchSwfFetch } from '../swf/patch'
@@ -44,7 +44,27 @@ export function openFishing(): void {
 
   const replyError = (cmd: number, result: Parameters<typeof commandSucceeded>[0]): void => {
     const error = result && result.status === 'rejected' ? result.error : null
-    void send(cmd, { result: 5, msg: error === null ? '操作失败' : commandErrorText(error) })
+    // Keep the legacy protocol: a failed purchase is code 1, every other
+    // rejected pond mutation is code 5 (the SWF shows msg as-is).
+    const code = cmd === 4 && error !== null && error.code === 'insufficient_funds' ? 1 : 5
+    void send(cmd, { result: code, msg: error === null ? '操作失败' : commandErrorText(error) })
+  }
+  const refreshFromProjection = (): void => {
+    // Never answer a refresh from the pre-command cache: wait for the next
+    // authoritative projection (with a bounded fallback) before sending state.
+    let done = false
+    const off = onProjectionApplied(() => {
+      if (done) return
+      done = true
+      off()
+      void send(1, pondState())
+    })
+    setTimeout(() => {
+      if (done) return
+      done = true
+      off()
+      void send(1, pondState())
+    }, 500)
   }
   const applyRuntime = (cmd: number, result: Parameters<typeof commandSucceeded>[0], success: Record<string, unknown>, refresh = false): void => {
     if (commandSucceeded(result) === false) {
@@ -52,7 +72,7 @@ export function openFishing(): void {
       return
     }
     void send(cmd, success)
-    if (refresh) setTimeout(() => void send(1, pondState()), 100)
+    if (refresh) refreshFromProjection()
   }
   const handleRuntimeCommand = (cmd: number, data: Record<string, unknown>): void => {
     if (cmd === 1) return void send(1, pondState())
@@ -79,7 +99,7 @@ export function openFishing(): void {
               if (commandSucceeded(result)) {
                 cooldown.classList.add('controlTFActive')
                 setTimeout(() => cooldown.classList.remove('controlTFActive'), 1000)
-                setTimeout(() => void send(1, pondState()), 100)
+                refreshFromProjection()
               }
             })
           },

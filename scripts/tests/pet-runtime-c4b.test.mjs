@@ -508,7 +508,7 @@ const expectedMutationSiteCounts = {
     'src/renderer/ui/state.ts|setInfo|sweetHeart': 1,
     'src/renderer/ui/travel.ts|update|gameSaveDatas': 1,
     'src/renderer/ui/update.ts|update|settings': 1,
-    'src/renderer/ui/visit.ts|setInfo|mood': 2,
+    'src/renderer/ui/visit.ts|setInfo|mood': 1,
     'src/shared/pet-runtime/farm-runtime.ts|earnYb|': 1,
     'src/shared/pet-runtime/fishing-runtime.ts|earnYb|': 2,
     'src/shared/pet-runtime/handlers-b.ts|addGood|': 1,

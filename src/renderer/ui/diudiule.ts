@@ -22,6 +22,8 @@ let quit: HTMLDivElement | null = null
 let born = 0
 /** Active runtime diudiule session; settled on land or abandoned on quit. */
 let runtimeSessionToken: string | null = null
+let runtimeStarting = false
+let runtimeAbandonRequested = false
 
 const clip = (v: number, max: number): number => Math.min(Math.max(v, 0), max)
 
@@ -112,6 +114,13 @@ export function releaseDiudiule(lifted: boolean, sx: number, sy: number): boolea
 }
 
 export function stopDiudiule(): void {
+  // Quit pressed while the session command is still in flight: remember it and
+  // abandon the token as soon as the host returns it, never opening the game.
+  if (runtimeProjectionMode && runtimeStarting) {
+    runtimeAbandonRequested = true
+    stopFly()
+    return
+  }
   if (playingDesk() !== 'diudiule') return
   stopFly()
   quit?.remove()
@@ -141,9 +150,18 @@ export function playDiudiule(): void {
 }
 
 async function startRuntimeDiudiule(): Promise<void> {
+  if (runtimeStarting || playingDesk()) return
+  runtimeStarting = true
+  runtimeAbandonRequested = false
   const result = await dispatchRuntimeCommand(uiCommands.diudiuleStart())
   const data = commandResultData<{ sessionToken: string }>(result)
+  runtimeStarting = false
   if (data === null) return
+  if (runtimeAbandonRequested) {
+    runtimeAbandonRequested = false
+    void dispatchRuntimeCommand(uiCommands.gameAbandon(data.sessionToken))
+    return
+  }
   runtimeSessionToken = data.sessionToken
   openDiudiule()
 }

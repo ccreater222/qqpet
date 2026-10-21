@@ -18,9 +18,13 @@ const DAY_MINUTES = 60
 
 /** Flash-game session token; the host settles it when the game window closes. */
 let runtimeGameSession: string | null = null
+/** One start request at a time, so a double click cannot open two windows/sessions. */
+let runtimeGameOpening = false
 
 window.qqpet.onGamePlayed((minutes) => {
   if (runtimeProjectionMode) {
+    // Only a session started by this renderer may be settled; a gamePlayed from
+    // an unrelated window (or before the start resolved) is ignored.
     const token = runtimeGameSession
     runtimeGameSession = null
     if (token === null) return
@@ -48,12 +52,18 @@ window.qqpet.onGamePlayed((minutes) => {
 
 /** Starts a server-owned flash-game session, then opens the legacy SWF window. */
 async function startFlashGame(gameId: string): Promise<void> {
+  if (runtimeGameOpening) return
+  runtimeGameOpening = true
   if (runtimeProjectionMode) {
     const result = await dispatchRuntimeCommand(uiCommands.gameStart(gameId, 'flash'))
     const data = commandResultData<{ sessionToken: string }>(result)
-    if (data === null) return
+    if (data === null) {
+      runtimeGameOpening = false
+      return
+    }
     runtimeGameSession = data.sessionToken
   }
+  runtimeGameOpening = false
   window.qqpet.openGame(gameId)
 }
 

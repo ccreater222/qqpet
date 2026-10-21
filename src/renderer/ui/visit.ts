@@ -1,5 +1,7 @@
 import { speak } from '../pet/pet'
-import { info, playingDesk, busy, refreshTray, save, setDeskGame, setInfo, stage } from '../pet/store'
+import { info, playingDesk, busy, refreshTray, runtimeProjectionMode, save, setDeskGame, setInfo, stage } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandResultData, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { BUBBLES, VISIT_STAGE, petCode, visitBox, visitDir, visitScenes, visitSteps, type Sex, type Stage } from '../pet/visit-plan'
 import { SwfPlayer } from '../swf/player'
 import './css/visit.css'
@@ -11,6 +13,20 @@ import { floatMood } from './float'
 const MOOD = 10
 let box: HTMLDivElement | null = null
 let timer = 0
+
+/** The visit's mood is canonical in runtime mode; the scene itself stays local. */
+function rewardVisit(): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.socialVisit('local-friend', 'incoming')).then((result) => {
+      const data = commandResultData<{ mood: number }>(result)
+      if (data === null || data.mood <= 0) return
+      void floatMood(data.mood)
+    })
+    return
+  }
+  setInfo('mood', Math.min(info.mood + MOOD, save.petComputedlInfo.moodMax))
+  void floatMood(MOOD)
+}
 
 function finish(): void {
   clearTimeout(timer)
@@ -52,8 +68,7 @@ export function visitFriend(): void {
     if (!box) return
     const s = steps[i]
     if (!s) {
-      setInfo('mood', Math.min(info.mood + MOOD, save.petComputedlInfo.moodMax))
-      void floatMood(MOOD)
+      rewardVisit()
       return finish()
     }
     bubbles.forEach((b, k) => {
@@ -181,8 +196,7 @@ export function visitDelivery(from: { name: string; sex: Sex; stage: Stage }, te
       if (!box) return
       const s = steps[i]
       if (!s) {
-        setInfo('mood', Math.min(info.mood + MOOD, save.petComputedlInfo.moodMax))
-        void floatMood(MOOD)
+        rewardVisit()
         return
       }
       void player.load(visitDir(scene) + s.clip).catch(() => {
