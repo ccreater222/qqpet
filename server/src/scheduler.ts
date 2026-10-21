@@ -45,7 +45,7 @@ function immediate(): Promise<void> {
 export class SchedulerService {
   private timer: NodeJS.Timeout | undefined
   private stopped = false
-  private running = false
+  private pass: Promise<void> | undefined
   private readonly inflight = new Set<Promise<unknown>>()
   /** Pets whose last observed authenticated-client count was zero (restart counts as zero). */
   private readonly empty = new Set<string>()
@@ -76,6 +76,7 @@ export class SchedulerService {
     this.stopped = true
     if (this.timer !== undefined) clearInterval(this.timer)
     this.timer = undefined
+    if (this.pass !== undefined) await this.pass.catch(() => undefined)
     await Promise.allSettled([...this.inflight])
   }
 
@@ -92,20 +93,26 @@ export class SchedulerService {
 
   /** Runs one scheduler pass over every pet; used by the 1s timer and deterministic tests. */
   async runOnce(): Promise<void> {
-    if (this.stopped || this.running) return
-    this.running = true
+    if (this.stopped) return
+    if (this.pass !== undefined) return this.pass
+    const pass = this.runPass()
+    this.pass = pass
     try {
-      for (const pet of this.store.listPets()) {
-        if (this.stopped) return
-        try {
-          await this.tickPet(pet.id)
-        } catch (error) {
-          this.logger.error('scheduler.tick_failed', { petId: pet.id, error })
-          this.metrics.increment('scheduler.errors')
-        }
-      }
+      await pass
     } finally {
-      this.running = false
+      if (this.pass === pass) this.pass = undefined
+    }
+  }
+
+  private async runPass(): Promise<void> {
+    for (const pet of this.store.listPets()) {
+      if (this.stopped) return
+      try {
+        await this.tickPet(pet.id)
+      } catch (error) {
+        this.logger.error('scheduler.tick_failed', { petId: pet.id, error })
+        this.metrics.increment('scheduler.errors')
+      }
     }
   }
 
