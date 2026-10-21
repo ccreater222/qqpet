@@ -78,10 +78,11 @@ declare global {
 
 const native = window.QQPetNative
 
-// Explicit, opt-in development authority. The query form exists only in Vite's
-// dev server; packaged mobile builds require the build-time flag.
-const LOCAL_RUNTIME_V2_FLAG = import.meta.env.VITE_QQPET_LOCAL_RUNTIME_V2 === '1'
-  || (import.meta.env.DEV && new URLSearchParams(location.search).get('qqpet-local-runtime-v2') === '1')
+// Local v2 is the default authority. Packaged builds can set
+// VITE_QQPET_LOCAL_RUNTIME_V2_ROLLBACK=1; dev rollback is qqpet-local-runtime-v2=0.
+const LOCAL_RUNTIME_V2_ROLLBACK = import.meta.env.VITE_QQPET_LOCAL_RUNTIME_V2_ROLLBACK === '1'
+  || (import.meta.env.DEV && new URLSearchParams(location.search).get('qqpet-local-runtime-v2') === '0')
+const LOCAL_RUNTIME_V2_FLAG = LOCAL_RUNTIME_V2_ROLLBACK === false
 let localRuntimeFailure: string | undefined
 let localRuntime: MobileLocalRepositoryBridge | null = null
 const legacyAuthorityProbe = resolveMobileLegacyAuthority({

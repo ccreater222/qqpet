@@ -51,6 +51,7 @@ const {
   desktopRendererRuntimeCapability,
   desktopStartupAuthority,
   LOCAL_V2_DOCUMENT_NAME,
+  LOCAL_V2_ROLLBACK_ENV_FLAG,
 } = await import('../../src/main/renderer-runtime-flags.ts')
 const {
   createMobileLocalRepositoryBridge,
@@ -427,21 +428,26 @@ test('command result conversion is notification-only and keeps all wire statuses
   assert.doesNotMatch(storeSource, /onCommandResult\([\s\S]{0,200}?hydrateSaveProjection/)
 })
 
-test('flag-off legacy capability never activates the renderer runtime', () => {
-  assert.equal(desktopRendererRuntimeCapability({}).canActivate, false)
-  assert.equal(desktopRendererRuntimeCapability({}).reason, 'flag_disabled')
-  assert.equal(desktopRendererRuntimeCapability({ QQPET_LOCAL_REPOSITORY_V2: '1' }).reason, 'c6_activation_missing')
+test('runtime capability defaults on and rollback restores the legacy path', () => {
+  assert.equal(desktopRendererRuntimeCapability({}).canActivate, true)
+  const rollback = { [LOCAL_V2_ROLLBACK_ENV_FLAG]: '1' }
+  assert.equal(desktopRendererRuntimeCapability(rollback).canActivate, false)
+  assert.equal(desktopRendererRuntimeCapability(rollback).reason, 'rollback_flag')
   assert.equal(LOCAL_V2_DOCUMENT_NAME, 'save.v2.json')
-  assert.equal(desktopStartupAuthority(true, {}), 'blocked')
-  assert.equal(desktopStartupAuthority(false, {}), 'legacy')
+  assert.equal(desktopStartupAuthority(true, {}), 'runtime')
+  assert.equal(desktopStartupAuthority(false, {}), 'runtime')
   assert.equal(desktopStartupAuthority(true, { QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }), 'runtime')
+  assert.equal(desktopStartupAuthority(true, rollback), 'blocked')
+  assert.equal(desktopStartupAuthority(false, rollback), 'legacy')
   const writers = []
   const runStartup = authority => {
     if (authority === 'legacy') writers.push('legacy')
     if (authority === 'runtime') writers.push('runtime')
   }
   runStartup(desktopStartupAuthority(true, {}))
-  assert.deepEqual(writers, [], 'coexisting v2 bytes must block either writer')
+  assert.deepEqual(writers, ['runtime'], 'the default runtime reuses an existing v2 document')
+  runStartup(desktopStartupAuthority(true, rollback))
+  assert.deepEqual(writers, ['runtime'], 'rollback never writes beside an existing v2 document')
   const mainSource = readFileSync(new URL('../../src/main/index.ts', import.meta.url), 'utf8')
   assert.match(mainSource, /desktopStartupAuthority\(existsSync\(v2Document\)\)/)
   assert.ok(mainSource.indexOf('desktopStartupAuthority(existsSync(v2Document))') < mainSource.indexOf('loadSave()', mainSource.indexOf('desktopStartupAuthority(existsSync(v2Document))')))

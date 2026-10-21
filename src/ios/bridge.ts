@@ -59,10 +59,11 @@ declare global {
 
 const gamePage = location.pathname.endsWith('/game.html')
 const role = gamePage ? 'game' : 'pet'
-// Explicit, opt-in development authority. Packaged builds require the Vite
-// build-time flag; the query form is only available under the dev server.
-const LOCAL_RUNTIME_V2_FLAG = import.meta.env.VITE_QQPET_LOCAL_RUNTIME_V2 === '1'
-  || (import.meta.env.DEV && new URLSearchParams(location.search).get('qqpet-local-runtime-v2') === '1')
+// Local v2 is the default authority. Packaged builds can set
+// VITE_QQPET_LOCAL_RUNTIME_V2_ROLLBACK=1; dev rollback is qqpet-local-runtime-v2=0.
+const LOCAL_RUNTIME_V2_ROLLBACK = import.meta.env.VITE_QQPET_LOCAL_RUNTIME_V2_ROLLBACK === '1'
+  || (import.meta.env.DEV && new URLSearchParams(location.search).get('qqpet-local-runtime-v2') === '0')
+const LOCAL_RUNTIME_V2_FLAG = LOCAL_RUNTIME_V2_ROLLBACK === false
 let localRuntimeFailure: string | undefined
 let localRuntime: MobileLocalRepositoryBridge | null = null
 let legacyV2DocumentPresent = false

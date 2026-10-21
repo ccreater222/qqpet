@@ -52,9 +52,9 @@ app.whenReady().then(async () => {
   if (contentMissing()) return void openFirstRun()
   app.dock?.hide()
 
-  // The legacy bare save remains the default. Only an explicit C6 runtime
-  // assertion constructs the local v2 authority; ambiguous coexistence fails
-  // closed before either writer touches disk.
+  // C7: the shared local v2 runtime is the default authority. Explicit
+  // QQPET_LOCAL_V2_ROLLBACK=1 restores the legacy writer; ambiguous
+  // coexistence still fails closed before either writer touches disk.
   const v2Document = join(app.getPath('userData'), LOCAL_V2_DOCUMENT_NAME)
   const startupAuthority = desktopStartupAuthority(existsSync(v2Document))
   let rendererRuntime: DesktopRendererRuntime | null = null
@@ -72,7 +72,7 @@ app.whenReady().then(async () => {
     console.error('local runtime v2 document exists; refusing to start the legacy writer')
     dialog.showErrorBox(
       'QQPet 本地数据版本冲突',
-      '检测到本地运行时 v2 存档。为避免两个存档同时写入，请用显式本地运行时 flag 启动，或先备份并移走 save.v2.json。',
+      '检测到本地运行时 v2 存档。为避免两个存档同时写入，请移除 QQPET_LOCAL_V2_ROLLBACK 后重试，或先备份并移走 save.v2.json。',
     )
     app.quit()
     return

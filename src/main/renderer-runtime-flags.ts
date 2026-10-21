@@ -1,14 +1,9 @@
-import {
-  LOCAL_V2_ACTIVE_ENV_FLAG,
-  localRepositoryCapability,
-  type LocalRepositoryCapability,
-} from './local-repository'
+import { type LocalRepositoryCapability } from './local-repository'
 
 /**
- * C6 requires three explicit assertions before the renderer may replace the
- * legacy writer: the local repository dev flag, the C6 activation flag, and a
- * renderer-capable host. No default environment path reaches this function
- * with `canActivate: true`.
+ * C7 local cutover: the shared local v2 runtime is the default writer on a
+ * renderer-capable host. `QQPET_LOCAL_V2_ROLLBACK=1` restores the legacy
+ * writer for the migration window.
  */
 export const LOCAL_V2_ROLLBACK_ENV_FLAG = 'QQPET_LOCAL_V2_ROLLBACK'
 
@@ -21,8 +16,7 @@ export function desktopRendererRuntimeCapability(env: NodeJS.ProcessEnv = proces
   if (desktopRuntimeRollbackRequested(env)) {
     return { flagEnabled: true, canActivate: false, activation: 'c6-renderer-capability', reason: 'rollback_flag' }
   }
-  const c6RendererCapability = env[LOCAL_V2_ACTIVE_ENV_FLAG] === '1'
-  return localRepositoryCapability(env, false, c6RendererCapability)
+  return { flagEnabled: true, canActivate: true, activation: 'c6-renderer-capability' }
 }
 
 export function desktopRendererRuntimeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {

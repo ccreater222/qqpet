@@ -35,6 +35,7 @@ test('runtime readiness explains catch-up, handoff and read-only states', () => 
 })
 
 test('rollback flag forces the legacy writer even with runtime activation flags set', () => {
+  assert.equal(desktopRendererRuntimeCapability({}).canActivate, true, 'local runtime is the default authority')
   const active = { QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }
   assert.equal(desktopRuntimeRollbackRequested(active), false)
   assert.equal(desktopRendererRuntimeCapability(active).canActivate, true)
@@ -64,4 +65,19 @@ test('renderer installs the readiness banner from sync status', () => {
   assert.match(main, /runtimeReadiness/)
   const css = readFileSync(new URL('../../src/renderer/base.css', import.meta.url), 'utf8')
   assert.match(css, /#runtimeReadiness/)
+})
+
+test('mobile bridges default to local runtime and expose the rollback build flag', () => {
+  for (const relative of ['src/android/bridge.ts', 'src/harmony/bridge.ts', 'src/ios/bridge.ts']) {
+    const source = readFileSync(new URL('../../' + relative, import.meta.url), 'utf8')
+    assert.match(source, /VITE_QQPET_LOCAL_RUNTIME_V2_ROLLBACK/)
+    assert.match(source, /LOCAL_RUNTIME_V2_FLAG = LOCAL_RUNTIME_V2_ROLLBACK === false/)
+    assert.match(source, /serverMode:\s*false/)
+  }
+})
+
+test('legacy migration keeps the host backup/readiness path', () => {
+  const host = readFileSync(new URL('../../src/shared/local-repository/host.ts', import.meta.url), 'utf8')
+  assert.match(host, /migrateLegacy/)
+  assert.match(host, /backup/)
 })
