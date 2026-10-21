@@ -49,6 +49,13 @@ export const uiCommands = {
   diudiuleReward: (sessionToken: string): CommandFor<'diudiule.reward'> =>
     command('diudiule.reward', { sessionToken }),
 
+  fishingBuy: (fryId: number, quantity: number): CommandFor<'fishing.buy'> =>
+    command('fishing.buy', { fryId, quantity }),
+  fishingFeed: (fishId: number): CommandFor<'fishing.feed'> => command('fishing.feed', { fishId }),
+  fishingHarvest: (fishId: number): CommandFor<'fishing.harvest'> => command('fishing.harvest', { fishId }),
+  fishingHarvestAll: (): CommandFor<'fishing.harvestAll'> => command('fishing.harvestAll', {}),
+  fishingSpeedUp: (): CommandFor<'fishing.speedUp'> => command('fishing.speedUp', {}),
+
   signIn: (): CommandFor<'signin.sign'> => command('signin.sign', {}),
   drawGrowth: (): CommandFor<'signin.drawGrowth'> => command('signin.drawGrowth', {}),
   claimOnlineGift: (): CommandFor<'signin.claimOnlineGift'> => command('signin.claimOnlineGift', {}),

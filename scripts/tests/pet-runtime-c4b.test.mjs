@@ -536,6 +536,7 @@ const expectedCallbackSignatures = {
   'src/renderer/ui/farm.ts|player.callback|farmView': 1,
   'src/renderer/ui/float.ts|player.callback|setdata': 1,
   'src/renderer/ui/fishing.ts|player.callback|PETEventOnReceived': 1,
+  'src/renderer/ui/fishing.ts|pondCommand|3': 1,
   'src/renderer/ui/fishing.ts|pondCommand|4': 2,
   'src/renderer/ui/fishing.ts|pondCommand|head.cmd': 1,
   'src/renderer/pet/fishing.ts|pondCommand|cmd': 1,

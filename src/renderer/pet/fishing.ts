@@ -1,6 +1,6 @@
 import { windowView } from '../ui/window-view'
 import FRIES from './data/fries.json'
-import { earnYb, info, save, setInfo, update } from './store'
+import { earnYb, info, runtimeProjectionMode, save, setInfo, update } from './store'
 import { registerProjectionCacheInvalidator } from './projection-cache'
 
 const HOUR = 3600
@@ -75,6 +75,8 @@ registerProjectionCacheInvalidator('fishing', () => { pond = load(); last = 0 })
 
 /** Grows every fish up to now; a clock set back empties the pond, as in the original. */
 function settle(): void {
+  // Runtime mode owns growth and the pond clock; the cache is projection-fed.
+  if (runtimeProjectionMode) return
   const t = now()
   if (last > t) {
     pond.fishs = []
@@ -100,6 +102,7 @@ function harvested(n: number): void {
 }
 
 export function pondState(): Reply {
+  if (runtimeProjectionMode) return { ...pond.PD, fishes: pond.fishs, harvestfish: save.gameSaveDatas.fishing_harvestfish, yb: info.yb }
   settle()
   return { ...pond.PD, fishes: pond.fishs, harvestfish: save.gameSaveDatas.fishing_harvestfish, yb: info.yb }
 }
@@ -122,6 +125,7 @@ const shop = (): Reply => ({ fries: FRIES.map((f) => ({ ...f, price_yb: info.pin
 export const pondCap = (): number => (info.pinkDiamond ? 5 : 3)
 
 export function pondRoom(): number {
+  if (runtimeProjectionMode) return pondCap() - pond.fishs.length
   settle()
   return pondCap() - pond.fishs.length
 }
@@ -218,11 +222,15 @@ const COMMANDS: Record<number, (d: Data) => Reply> = {
 }
 
 export function pondCommand(cmd: number, data: Data): Reply {
+  // 1 (state) and 3 (shop) are pure reads. Every mutation must go through the
+  // runtime command bridge in runtime mode instead of this local engine.
+  if (runtimeProjectionMode && cmd !== 1 && cmd !== 3) return { result: 5, msg: '该操作需要走运行时命令' }
   return COMMANDS[cmd]?.(data) ?? { result: 5, msg: `未知指令~ cmd:${cmd}  data:${JSON.stringify(data)}` }
 }
 
 /** 06:00, and pink diamond opened: the day's speed-ups, two per pink diamond level. */
 export function resetFish(): void {
+  if (runtimeProjectionMode) return
   pond.PD.allvipcnt = (info.PDiamondLevel || 1) * 2
   pond.PD.canusecnt = info.pinkDiamond ? pond.PD.allvipcnt : 0
   store()
