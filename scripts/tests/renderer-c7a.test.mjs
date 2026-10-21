@@ -45,7 +45,7 @@ test('runtime flash games start a session before opening and settle it when the 
     window: {
       qqpet: {
         onGamePlayed: (listener) => { gamePlayed = listener },
-        openGame: (gameId) => opened.push(gameId),
+        openGame: (gameId, windowId) => opened.push([gameId, windowId]),
       },
     },
     GAMES: [],
@@ -79,8 +79,8 @@ test('runtime flash games start a session before opening and settle it when the 
   }, 'startFlashGame')
   await games.startFlashGame('guess/main.swf')
   assert.deepEqual(dispatches, [{ type: 'game.startSession', payload: { gameId: 'guess/main.swf', kind: 'flash' } }])
-  assert.deepEqual(opened, ['guess/main.swf'])
-  gamePlayed(5)
+  assert.deepEqual(opened, [['guess/main.swf', 1]])
+  gamePlayed(5, 1)
   await flush()
   assert.deepEqual(dispatches[1], { type: 'game.reward', payload: { sessionToken: 'flash-1' } })
 })
@@ -225,13 +225,70 @@ test('runtime navigation exposes converted panels and keeps unconverted E-F entr
   const control = readFileSync(new URL('../../src/renderer/ui/control.ts', import.meta.url), 'utf8')
   assert.match(control, /visibleMenu/)
   assert.match(control, /child\.name === '池塘' \|\| child\.name === '游戏'/)
+  assert.match(control, /name: '找朋友玩'/)
   assert.match(control, /runtimeProjectionMode/)
   const main = readFileSync(new URL('../../src/renderer/main.ts', import.meta.url), 'utf8')
   assert.match(main, /if \(save\.settings\.petBar\) showControl\(\)/)
   const menu = readFileSync(new URL('../../src/renderer/ui/runtime-menu.ts', import.meta.url), 'utf8')
   assert.match(menu, /openFishing/)
   assert.match(menu, /openGames/)
-  assert.doesNotMatch(menu, /openFarm|openIsland|openCommunity|openMstx|visitFriend|sendLetter/)
+  assert.doesNotMatch(menu, /openFarm|openIsland|openCommunity|openMstx|sendLetter/)
+})
+
+test('runtime social visit dispatches its command without LAN transport', async () => {
+  const dispatches = []
+  const lanSend = []
+  const visit = loadConverted('../../src/renderer/ui/visit.ts', {
+    runtimeProjectionMode: true,
+    window: {
+      qqpet: {
+        lanSend: (...args) => lanSend.push(args),
+      },
+      setTimeout: () => 1,
+      clearTimeout: () => {},
+    },
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    document: {
+      getElementById: () => ({
+        hidden: false,
+        getBoundingClientRect: () => ({ left: 0, top: 0, bottom: 140, width: 140 }),
+        append: () => {},
+      }),
+      body: { append: () => {} },
+    },
+    innerWidth: 1000,
+    info: { sex: 'GG', health: 5, host: '主人', mood: 100 },
+    save: { petComputedlInfo: { moodMax: 1000 } },
+    playingDesk: () => '',
+    busy: () => false,
+    setDeskGame: () => {},
+    setInfo: () => {},
+    refreshTray: () => {},
+    stage: () => 'Kid',
+    speak: () => {},
+    floatMood: () => {},
+    visitScenes: () => ['102_102'],
+    visitSteps: () => [],
+    visitBox: () => ({ x: 0, y: 0, w: 300, h: 200 }),
+    VISIT_STAGE: { w: 300 },
+    BUBBLES: [],
+    SwfPlayer: class {},
+    uiCommands: { socialVisit: (peerId, direction) => ({ type: 'social.completeLanVisit', payload: { peerId, direction } }) },
+    dispatchRuntimeCommand: (command) => {
+      dispatches.push(command)
+      return Promise.resolve({ status: 'applied', result: { mood: 10 } })
+    },
+    commandResultData: (result) => (result && result.result ? result.result : null),
+    div: (...nodes) => ({ dataset: {}, style: {}, addEventListener: () => {}, append: () => {}, textContent: '', hidden: false, remove: () => {}, ...nodes }),
+  }, 'visitFriend')
+  visit.visitFriend()
+  await flush()
+  assert.deepEqual(dispatches, [{
+    type: 'social.completeLanVisit',
+    payload: { peerId: 'local-friend', direction: 'incoming' },
+  }])
+  assert.deepEqual(lanSend, [])
 })
 
 function deferred() {
@@ -240,14 +297,15 @@ function deferred() {
   return { promise, resolve }
 }
 
-test('flash game starts are single-flight and only a started session settles', async () => {
+test('overlapping flash game windows settle only their own started sessions', async () => {
   const opened = []
   const dispatches = []
-  const first = deferred()
+  const starts = [deferred(), deferred()]
+  let startIndex = 0
   let gamePlayed = null
   const games = loadConverted('../../src/renderer/ui/games.ts', {
     runtimeProjectionMode: true,
-    window: { qqpet: { onGamePlayed: (listener) => { gamePlayed = listener }, openGame: (id) => opened.push(id) } },
+    window: { qqpet: { onGamePlayed: (listener) => { gamePlayed = listener }, openGame: (id, windowId) => opened.push([id, windowId]) } },
     GAMES: [],
     SMALL_GAMES: [],
     playDiudiule: () => {},
@@ -269,23 +327,37 @@ test('flash game starts are single-flight and only a started session settles', a
       gameStart: (gameId, kind) => ({ type: 'game.startSession', payload: { gameId, kind } }),
       gameReward: (sessionToken) => ({ type: 'game.reward', payload: { sessionToken } }),
     },
-    dispatchRuntimeCommand: (command) => { dispatches.push(command); return first.promise },
+    dispatchRuntimeCommand: (command) => {
+      dispatches.push(command)
+      if (command.type === 'game.reward') {
+        return Promise.resolve({ status: 'applied', result: { minutes: 5, yb: 25, mood: 10 } })
+      }
+      return starts[startIndex++].promise
+    },
     commandResultData: (result) => (result && result.result ? result.result : null),
   }, 'startFlashGame')
-  const starting = games.startFlashGame('guess/main.swf')
-  games.startFlashGame('guess/main.swf')
-  assert.equal(dispatches.length, 1, 'the second click must not start a second session')
+  const first = games.startFlashGame('guess/main.swf')
+  const second = games.startFlashGame('puzzle/main.swf')
+  assert.equal(dispatches.length, 2, 'overlapping windows start their own sessions')
   assert.deepEqual(opened, [])
-  // A gamePlayed before the session token exists must not settle anything.
-  gamePlayed(5)
+  starts[1].resolve({ status: 'applied', result: { sessionToken: 'flash-2' } })
+  await second
+  assert.deepEqual(opened, [['puzzle/main.swf', 2]])
+  gamePlayed(5, 2)
   await flush()
-  assert.equal(dispatches.length, 1)
-  first.resolve({ status: 'applied', result: { sessionToken: 'flash-1' } })
-  await starting
-  assert.deepEqual(opened, ['guess/main.swf'])
-  gamePlayed(5)
+  assert.deepEqual(dispatches[2], { type: 'game.reward', payload: { sessionToken: 'flash-2' } })
+  starts[0].resolve({ status: 'applied', result: { sessionToken: 'flash-1' } })
+  await first
+  assert.deepEqual(opened, [['puzzle/main.swf', 2], ['guess/main.swf', 1]])
+  gamePlayed(5, 1)
   await flush()
-  assert.deepEqual(dispatches[1], { type: 'game.reward', payload: { sessionToken: 'flash-1' } })
+  assert.deepEqual(dispatches.slice(2), [
+    { type: 'game.reward', payload: { sessionToken: 'flash-2' } },
+    { type: 'game.reward', payload: { sessionToken: 'flash-1' } },
+  ])
+  gamePlayed(5, 1)
+  await flush()
+  assert.equal(dispatches.length, 4, 'a closed window cannot settle another session twice')
 })
 
 test('diudiule quit during session start abandons the returned token instead of opening', async () => {

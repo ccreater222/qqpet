@@ -386,7 +386,7 @@ const api: QQPetApi = {
   },
   onCursor: (l) => void cursorListeners.push(l),
   onTrayClick: (l) => void listeners.trayClick.push((c) => l({ ...c, x: innerWidth / 2, y: innerHeight / 2 })),
-  onGamePlayed: (l) => void listeners.gamePlayed.push(l),
+  onGamePlayed: (l) => void listeners.gamePlayed.push((minutes) => l(minutes, -1)),
   onClipboard: (l) => void listeners.clipboard.push(l),
   onPresence: (l) => void listeners.presence.push((away) => {
     if (localRuntime !== null) void (away ? localRuntime.suspend() : localRuntime.resume())

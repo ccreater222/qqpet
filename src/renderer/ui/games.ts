@@ -16,18 +16,17 @@ let open = false
 /** Played minutes a day that earn rewards: 5 元宝, 2 mood and a minute's growth each. */
 const DAY_MINUTES = 60
 
-/** Flash-game session token; the host settles it when the game window closes. */
-let runtimeGameSession: string | null = null
-/** One start request at a time, so a double click cannot open two windows/sessions. */
-let runtimeGameOpening = false
+/** Each flash-game window owns one active session; closes settle exactly that mapping. */
+const runtimeGameSessions = new Map<number, string>()
+let nextRuntimeGameWindow = 1
 
-window.qqpet.onGamePlayed((minutes) => {
+window.qqpet.onGamePlayed((minutes, windowId) => {
   if (runtimeProjectionMode) {
     // Only a session started by this renderer may be settled; a gamePlayed from
     // an unrelated window (or before the start resolved) is ignored.
-    const token = runtimeGameSession
-    runtimeGameSession = null
-    if (token === null) return
+    const token = runtimeGameSessions.get(windowId)
+    runtimeGameSessions.delete(windowId)
+    if (token === undefined) return
     // The host computes the capped minutes from its own game clock; the local
     // report only tells us the window closed.
     void dispatchRuntimeCommand(uiCommands.gameReward(token)).then((result) => {
@@ -52,19 +51,14 @@ window.qqpet.onGamePlayed((minutes) => {
 
 /** Starts a server-owned flash-game session, then opens the legacy SWF window. */
 async function startFlashGame(gameId: string): Promise<void> {
-  if (runtimeGameOpening) return
-  runtimeGameOpening = true
+  const windowId = nextRuntimeGameWindow++
   if (runtimeProjectionMode) {
     const result = await dispatchRuntimeCommand(uiCommands.gameStart(gameId, 'flash'))
     const data = commandResultData<{ sessionToken: string }>(result)
-    if (data === null) {
-      runtimeGameOpening = false
-      return
-    }
-    runtimeGameSession = data.sessionToken
+    if (data === null) return
+    runtimeGameSessions.set(windowId, data.sessionToken)
   }
-  runtimeGameOpening = false
-  window.qqpet.openGame(gameId)
+  window.qqpet.openGame(gameId, windowId)
 }
 
 /** Game picker: the desktop games play with the pet, the rest open in their own window. */

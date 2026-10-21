@@ -269,7 +269,7 @@ export interface QQPetApi {
   /** Asks for a save file (ours or the original's config.json), then relaunches with it. Rejects when the file is not a save. */
   importSave(): Promise<void>
   /** Plays pet/game/<swf> in its own resizable window. */
-  openGame(swf: string): void
+  openGame(swf: string, windowId?: number): void
   /** Native game-page exit; ordinary browser/Electron pages can keep window.close(). */
   closeGame?(): void
   /** Today and the next 30 days from the calendar API; empty while offline. */
@@ -310,7 +310,7 @@ export interface QQPetApi {
   /** 托盘悬浮结束（鼠标离开托盘图标）；档案据此开始收起倒计时。 */
   onTrayHoverLeave?(listener: () => void): void
   /** A game window closed after `minutes` of play. */
-  onGamePlayed(listener: (minutes: number) => void): void
+  onGamePlayed(listener: (minutes: number, windowId: number) => void): void
   /** New clipboard text, while the clip setting is on. */
   onClipboard(listener: (text: string) => void): void
   /** The user left the machine (screen off / idle) or came back. */

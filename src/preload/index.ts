@@ -56,7 +56,7 @@ const api: QQPetApi = {
     ipcRenderer.removeAllListeners(IPC.trayHoverLeave)
     ipcRenderer.on(IPC.trayHoverLeave, () => listener())
   },
-  onGamePlayed: (listener) => ipcRenderer.on(IPC.gamePlayed, (_e, m) => listener(m)),
+  onGamePlayed: (listener) => ipcRenderer.on(IPC.gamePlayed, (_e, m, windowId) => listener(m, windowId)),
   onClipboard: (listener) => ipcRenderer.on(IPC.clipboard, (_e, text) => listener(text)),
   onPresence: (listener) => ipcRenderer.on(IPC.presence, (_e, away) => listener(away)),
   onFront: (listener) => ipcRenderer.on(IPC.front, (_e, name) => listener(name)),
