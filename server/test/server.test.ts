@@ -387,6 +387,12 @@ test('health exposes non-secret settings and database durability', async t => {
   assert.equal(body.synchronous, 'full')
   const text = JSON.stringify(body)
   assert.doesNotMatch(text, /pairingCode|token|save_json|payload/i)
+  for (const path of ['/healthz', '/readyz']) {
+    const ready = await fetch('http://127.0.0.1:' + harness.server.address().port + path)
+    assert.equal(ready.status, 200)
+    const readyBody = await ready.json() as Record<string, unknown>
+    assert.equal(readyBody.ok, true)
+  }
   const backupPath = join(harness.directory, 'backup.sqlite')
   await harness.server.backup(backupPath)
   assert.ok((await readFile(backupPath)).byteLength > 0)
@@ -1174,4 +1180,34 @@ test('ctl revoke-device uses the owner-authenticated socket control path', async
     /socket closed: 4002/,
   )
   await owner.close()
+})
+
+test('database opens with WAL/FULL pragmas, migrates idempotently, and fails closed on corrupt engine state', async t => {
+  const harness = await createHarness(t)
+  const first = openDatabase(harness.dbPath)
+  const journal = first.db.prepare('PRAGMA journal_mode').get() as Record<string, unknown>
+  const synchronous = first.db.prepare('PRAGMA synchronous').get() as Record<string, unknown>
+  const foreignKeys = first.db.prepare('PRAGMA foreign_keys').get() as Record<string, unknown>
+  const busyTimeout = first.db.prepare('PRAGMA busy_timeout').get() as Record<string, unknown>
+  assert.equal(String(Object.values(journal)[0]).toLowerCase(), 'wal')
+  assert.equal(Number(Object.values(synchronous)[0]), 2)
+  assert.equal(Number(Object.values(foreignKeys)[0]), 1)
+  assert.equal(Number(Object.values(busyTimeout)[0]), 5000)
+  const migrations = first.db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>
+  assert.deepEqual(migrations.map(row => row.version), [1])
+  const requiredTables = [
+    'pets', 'pet_settings', 'pet_authority', 'scheduled_jobs', 'game_sessions',
+    'session_coverage', 'coverage_operations', 'commands', 'events', 'devices', 'pairing_codes',
+  ]
+  const tables = new Set(
+    (first.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(row => row.name),
+  )
+  for (const table of requiredTables) assert.ok(tables.has(table), 'missing table ' + table)
+  first.close()
+
+  const second = openDatabase(harness.dbPath)
+  assert.equal(second.getPet('default')?.schemaVersion, 1)
+  second.db.prepare("UPDATE pets SET engine_json = ? WHERE id = 'default'").run('{"bad":true}')
+  assert.throws(() => second.loadCanonical('default'), /canonical engine state is corrupt/)
+  second.close()
 })
