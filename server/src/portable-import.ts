@@ -1,0 +1,211 @@
+import {
+  dayKeyAt,
+  nextDailyBoundaryMs,
+  rebindOrCancelImportedSessions,
+  type EngineState,
+  type SessionCoverageInterval,
+} from '../../src/shared/pet-runtime/index'
+import type { AuthorityRecord } from './db'
+import type { PortablePetBundleV1 } from '../../src/shared/sync/index'
+import { finalizeSurvivor, stableCoverageId, survivorDeviceId } from './coverage'
+import { COVERAGE_CRASH_GRACE_MS } from './db'
+
+/** Default anchor policy from the design (§6.5): reject stale/future anchors unless the owner explicitly clamps. */
+export const MAX_IMPORT_ANCHOR_PAST_MS = 48 * 60 * 60 * 1000
+export const MAX_IMPORT_FUTURE_SKEW_MS = 5 * 60 * 1000
+
+export type ImportPlanErrorCode = 'anchor_out_of_bounds' | 'authority_fork_risk' | 'invalid_payload' | 'authority_not_active'
+
+export interface ImportPlan {
+  engine: EngineState
+  importedCoverage: SessionCoverageInterval[]
+  nextEpoch: number
+  effectiveAnchorWallMs: number
+  clockSkippedMs: number
+  importClamped: boolean
+}
+
+export type ImportPlanResult =
+  | { ok: true; plan: ImportPlan }
+  | { ok: false; code: ImportPlanErrorCode; message: string }
+
+export interface ImportPlanOptions {
+  bundle: PortablePetBundleV1
+  current: AuthorityRecord
+  wallNowMs: number
+  allowClamp: boolean
+  resumeMode: boolean
+  uploaderDeviceId: string
+  rebindLocalSessions: boolean
+  expectedEpoch?: number
+}
+
+function fail(code: ImportPlanErrorCode, message: string): ImportPlanResult {
+  return { ok: false, code, message }
+}
+
+function isSafeNonNegative(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0
+}
+
+/**
+ * Deterministically plans a portable import: authority fencing, anchor
+ * realignment, deadline shifting, actor rebind and source coverage closure.
+ * The caller commits the returned plan atomically.
+ */
+export function planPortableImport(options: ImportPlanOptions): ImportPlanResult {
+  const { bundle, current, wallNowMs } = options
+  if (Number.isSafeInteger(wallNowMs) === false || wallNowMs < 0) {
+    return fail('invalid_payload', 'wallNowMs must be a non-negative safe integer')
+  }
+  const stamp = bundle.authority
+  if (stamp.owner !== 'local') return fail('invalid_payload', 'portable import requires a local-authority bundle')
+  if (options.resumeMode === false && current.state !== 'active') {
+    return fail('authority_not_active', 'importPortableBundle requires an active server authority')
+  }
+  if (options.resumeMode && current.state !== 'archived') {
+    return fail('authority_not_active', 'resumeServer requires an archived server authority')
+  }
+  if (stamp.authorityId !== current.authorityId || stamp.restoreGeneration !== current.restoreGeneration) {
+    return fail('authority_fork_risk', 'bundle authority lineage does not match the server authority')
+  }
+  if (options.expectedEpoch !== undefined && options.expectedEpoch !== stamp.epoch) {
+    return fail('authority_fork_risk', 'expected epoch does not match the uploaded bundle epoch')
+  }
+  if (stamp.epoch < current.epoch) {
+    return fail('authority_fork_risk', 'uploaded bundle epoch is stale')
+  }
+  if (stamp.epoch === current.epoch) {
+    const exactArchivedHandoff = options.resumeMode && current.state === 'archived' && stamp.handoffId === current.handoffId
+    if (exactArchivedHandoff === false) {
+      return fail('authority_fork_risk', 'equal epoch is only accepted for the exact archived handoff being resumed')
+    }
+  }
+  if (isSafeNonNegative(stamp.revision) === false || isSafeNonNegative(stamp.eventSeq) === false) {
+    return fail('invalid_payload', 'bundle authority revision/eventSeq is invalid')
+  }
+
+  const engine = JSON.parse(JSON.stringify(bundle.engine)) as EngineState
+  const importedAnchor = engine.lastSchedulerWallMs
+  if (isSafeNonNegative(importedAnchor) === false) return fail('invalid_payload', 'imported scheduler anchor is invalid')
+
+  const pastBound = wallNowMs - MAX_IMPORT_ANCHOR_PAST_MS
+  const futureBound = wallNowMs + MAX_IMPORT_FUTURE_SKEW_MS
+  let effectiveAnchorWallMs = importedAnchor
+  let clockSkippedMs = 0
+  let importClamped = false
+
+  if (importedAnchor < pastBound || importedAnchor > futureBound) {
+    if (options.allowClamp === false) {
+      return fail(
+        'anchor_out_of_bounds',
+        'imported scheduler anchor is outside the accepted window; explicit allowClamp is required',
+      )
+    }
+    if (importedAnchor < pastBound) {
+      effectiveAnchorWallMs = pastBound
+      clockSkippedMs = pastBound - importedAnchor
+    } else {
+      effectiveAnchorWallMs = wallNowMs
+      clockSkippedMs = wallNowMs - importedAnchor
+    }
+    engine.gameTimeMs += clockSkippedMs
+    if (isSafeNonNegative(engine.gameTimeMs) === false) {
+      return fail('invalid_payload', 'clock realignment would move game time before the epoch')
+    }
+    for (const job of engine.scheduledJobs) {
+      job.dueAtGameMs += clockSkippedMs
+      if (typeof job.payload.startedAtGameMs === 'number') job.payload.startedAtGameMs += clockSkippedMs
+    }
+    for (const session of engine.gameSessions) {
+      session.startedAtGameMs += clockSkippedMs
+      session.expiresAtGameMs += clockSkippedMs
+    }
+    engine.lastProcessedDayBoundaryKey = dayKeyAt(engine.gameTimeMs, engine.timeZone)
+    engine.nextDailyBoundaryMs = nextDailyBoundaryMs(engine.gameTimeMs, engine.timeZone)
+    engine.importClamped = true
+    engine.clockSkippedMs = clockSkippedMs
+  } else if (importedAnchor > wallNowMs) {
+    // Future skew inside the accepted window: start at wall now and run no catch-up.
+    effectiveAnchorWallMs = wallNowMs
+  }
+  engine.lastSchedulerWallMs = effectiveAnchorWallMs
+
+  if (engine.advanceWhileEmpty === false) {
+    // Disabled mode never backfills the import gap; pending deadlines keep their remaining duration.
+    effectiveAnchorWallMs = wallNowMs
+    engine.lastSchedulerWallMs = wallNowMs
+  }
+
+  const localActorDeviceId = bundle.originLocalDeviceId ?? ''
+  const rebound = rebindOrCancelImportedSessions(engine, {
+    localActorDeviceId,
+    newActorDeviceId: options.uploaderDeviceId,
+    rebindLocalSessions: options.rebindLocalSessions,
+    nowMs: engine.gameTimeMs,
+  })
+  const importedCoverage = materializeImportedCoverage(rebound, wallNowMs)
+  rebound.sessionCoverage = importedCoverage
+  delete rebound.coverageReopen
+
+  const nextEpoch = Math.max(current.epoch, stamp.epoch) + 1
+  return {
+    ok: true,
+    plan: {
+      engine: rebound,
+      importedCoverage,
+      nextEpoch,
+      effectiveAnchorWallMs,
+      clockSkippedMs,
+      importClamped,
+    },
+  }
+}
+
+/** Close imported open intervals and source pending-operation survivors into closed history. */
+export function materializeImportedCoverage(engine: EngineState, wallNowMs: number): SessionCoverageInterval[] {
+  const rows = new Map<string, SessionCoverageInterval>()
+  for (const interval of engine.sessionCoverage) {
+    if (interval.disconnectedAtWallMs !== undefined) {
+      rows.set(interval.coverageId, interval)
+      continue
+    }
+    const heartbeatBound = Math.max(
+      interval.connectedAtWallMs,
+      Math.min(wallNowMs, interval.lastHeartbeatWallMs + COVERAGE_CRASH_GRACE_MS),
+    )
+    rows.set(interval.coverageId, {
+      ...interval,
+      disconnectedAtWallMs: heartbeatBound,
+      closeReason: 'import_replaced',
+    })
+  }
+  const operation = engine.coverageReopen
+  if (operation !== undefined) {
+    const suspendedAt = operation.state === 'suspended' ? operation.suspendedAtWallMs : undefined
+    for (const survivor of operation.survivors) {
+      if (survivor.eligible === false || survivor.activeEndWallMs !== undefined) continue
+      const heartbeatBound = Math.max(
+        operation.commitWallMs,
+        Math.min(wallNowMs, survivor.lastHeartbeatWallMs + COVERAGE_CRASH_GRACE_MS),
+      )
+      const boundary = suspendedAt === undefined ? heartbeatBound : Math.min(suspendedAt, heartbeatBound)
+      const result = finalizeSurvivor(survivor, {
+        commitWallMs: operation.commitWallMs,
+        eventBoundaryMs: boundary,
+        eventReason: suspendedAt === undefined ? 'import_replaced' : 'suspend',
+        terminal: true,
+        ...(suspendedAt === undefined ? {} : { suspendedAtMs: suspendedAt }),
+      })
+      rows.set(stableCoverageId(operation.operationId, survivor), {
+        coverageId: stableCoverageId(operation.operationId, survivor),
+        deviceId: survivorDeviceId(survivor),
+        connectedAtWallMs: operation.commitWallMs,
+        disconnectedAtWallMs: result.endWallMs,
+        lastHeartbeatWallMs: Math.max(operation.commitWallMs, survivor.lastHeartbeatWallMs),
+        closeReason: result.provenance,
+      })
+    }
+  }
+  return [...rows.values()].sort((a, b) => a.connectedAtWallMs - b.connectedAtWallMs || a.coverageId.localeCompare(b.coverageId))
+}

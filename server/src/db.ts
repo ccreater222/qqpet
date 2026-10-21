@@ -4,7 +4,8 @@ import { backup as sqliteBackup, DatabaseSync } from 'node:sqlite'
 import { createRngState, dayKeyAt, nextDailyBoundaryMs, type EngineState } from '../../src/shared/pet-runtime/index'
 import { emptyEggSave } from '../../src/shared/pet-runtime/handlers-a'
 import { assertEngineState } from '../../src/shared/sync/portable'
-import type { CoverageEndProvenance, CoverageSurvivor } from '../../src/shared/pet-runtime/index'
+import type { CoverageEndProvenance, CoverageSurvivor, DomainEvent } from '../../src/shared/pet-runtime/index'
+import type { OrderedEvent } from '../../src/shared/pet-runtime/events'
 import type { DeviceRole, WireAuthority } from '../../src/shared/sync/index'
 import { finalizeSurvivor, stableCoverageId, survivorDeviceId, survivorKey } from './coverage'
 
@@ -255,6 +256,33 @@ export interface CanonicalPetSnapshot {
   settings: PetSettingsRecord
   authority: AuthorityRecord
   engine: EngineState
+}
+
+export interface CanonicalImportOptions {
+  petId: string
+  engine: EngineState
+  authorityId: string
+  restoreGeneration: number
+  nextEpoch: number
+  handoffId: string
+  sourceRevision: number
+  sourceEventSeq: number
+  importedCoverage: EngineState['sessionCoverage']
+  operationId: string
+  commitWallMs: number
+  survivors: CoverageSurvivor[]
+  baseRevision: number
+  baseEventSeq: number
+  at: number
+}
+
+export interface AuthorityArchiveOptions {
+  petId: string
+  nextEpoch: number
+  handoffId: string
+  operationId: string
+  at: number
+  survivors: CoverageSurvivor[]
 }
 
 interface MigrationResult {
@@ -724,6 +752,211 @@ export class DatabaseStore {
         session.cancelReason ?? null,
       )
     }
+  }
+
+  setSchedulerAnchor(petId: string, anchorMs: number, at = Date.now()): void {
+    if (Number.isSafeInteger(anchorMs) === false || anchorMs < 0) throw new Error('scheduler anchor must be a non-negative safe integer')
+    const pet = this.getPet(petId)
+    if (pet === undefined) throw new Error('pet not found: ' + petId)
+    let engineJson = pet.engineJson
+    try {
+      const parsed = JSON.parse(engineJson) as Record<string, unknown>
+      parsed.lastSchedulerWallMs = anchorMs
+      engineJson = JSON.stringify(parsed)
+    } catch {
+      // The canonical loader validates engine_json on the next read; keep the column authoritative.
+    }
+    this.db.prepare(
+      'UPDATE pets SET last_scheduler_wall_ms = ?, engine_json = ?, updated_at_ms = ? WHERE id = ?',
+    ).run(anchorMs, engineJson, at, petId)
+  }
+
+  /** Atomically commits one bounded scheduler chunk with its ordered events. */
+  commitSchedulerBatch(
+    petId: string,
+    expectedRevision: number,
+    engine: EngineState,
+    ticks: Array<{ gameTimeMs: number; events: DomainEvent[] }>,
+    at: number,
+  ): { pet: PetRecord; events: OrderedEvent[] } {
+    assertEngineState(engine)
+    return this.transaction(() => {
+      const current = this.getPet(petId)
+      if (current === undefined) throw new Error('pet not found: ' + petId)
+      const nextPet = this.replaceEngineAndRevision(petId, engine, expectedRevision, true, at)
+      let eventSeq = current.eventSeq
+      const ordered: OrderedEvent[] = []
+      for (const tick of ticks) {
+        for (const event of tick.events) {
+          eventSeq += 1
+          const orderedEvent: OrderedEvent = {
+            eventSeq,
+            revision: nextPet.revision,
+            gameTimeMs: tick.gameTimeMs,
+            type: event.type,
+            payload: event.payload,
+          }
+          ordered.push(orderedEvent)
+          this.insertEvent(petId, {
+            eventSeq,
+            revision: nextPet.revision,
+            commandSeq: null,
+            gameTimeMs: tick.gameTimeMs,
+            type: event.type,
+            payload: event.payload,
+            createdAtMs: at,
+          })
+        }
+      }
+      this.db.prepare('UPDATE pets SET event_seq = ? WHERE id = ?').run(eventSeq, petId)
+      return { pet: { ...nextPet, eventSeq }, events: ordered }
+    })
+  }
+
+  replaceSessionCoverage(petId: string, intervals: EngineState['sessionCoverage']): void {
+    this.db.prepare('DELETE FROM session_coverage WHERE pet_id = ?').run(petId)
+    const insert = this.db.prepare(
+      `INSERT INTO session_coverage
+       (pet_id, coverage_id, device_id, connection_id, authenticated_session_id,
+        connected_at_ms, disconnected_at_ms, last_heartbeat_at_ms, close_reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    for (const interval of intervals) {
+      insert.run(
+        petId,
+        interval.coverageId,
+        interval.deviceId,
+        interval.coverageId,
+        interval.coverageId,
+        interval.connectedAtWallMs,
+        interval.disconnectedAtWallMs ?? null,
+        interval.lastHeartbeatWallMs,
+        interval.closeReason ?? null,
+      )
+    }
+  }
+
+  /**
+   * Portable import commit: replace canonical engine/authority/coverage atomically
+   * while recording a pending reopen operation for currently authenticated survivors.
+   */
+  importCanonicalBundle(options: CanonicalImportOptions): PetRecord {
+    return this.transaction(() => this.applyCanonicalImport(options))
+  }
+
+  /** Import body; the caller must already be inside a transaction. */
+  applyCanonicalImport(options: CanonicalImportOptions): PetRecord {
+    assertEngineState(options.engine)
+    {
+      const current = this.getPet(options.petId)
+      if (current === undefined) throw new Error('pet not found: ' + options.petId)
+      this.closeAndCreateCoverageOperation(
+        options.petId,
+        options.operationId,
+        options.commitWallMs,
+        options.survivors,
+        'import_replaced',
+      )
+      this.replaceSessionCoverage(options.petId, options.importedCoverage)
+      const nextRevision = Math.max(current.revision, options.baseRevision) + 1
+      const nextEventSeq = Math.max(current.eventSeq, options.baseEventSeq)
+      this.db.prepare(
+        `UPDATE pets
+         SET revision = ?, event_seq = ?, game_time_ms = ?, last_scheduler_wall_ms = ?,
+             save_json = ?, engine_json = ?, updated_at_ms = ?
+         WHERE id = ?`,
+      ).run(
+        nextRevision,
+        nextEventSeq,
+        options.engine.gameTimeMs,
+        options.engine.lastSchedulerWallMs,
+        JSON.stringify(options.engine.save),
+        JSON.stringify(options.engine),
+        options.at,
+        options.petId,
+      )
+      this.db.prepare(
+        `UPDATE pet_settings
+         SET advance_while_empty = ?, time_zone = ?, weather_location = ?, updated_at_ms = ?
+         WHERE pet_id = ?`,
+      ).run(
+        options.engine.advanceWhileEmpty ? 1 : 0,
+        options.engine.timeZone,
+        options.engine.weatherLocation || null,
+        options.at,
+        options.petId,
+      )
+      this.replaceScheduledJobs(options.petId, options.engine.scheduledJobs)
+      this.replaceGameSessions(options.petId, options.engine.gameSessions)
+      this.db.prepare(
+        `UPDATE pet_authority
+         SET authority_id = ?, restore_generation = ?, epoch = ?, handoff_epoch = NULL,
+             owner = 'server', state = 'active', handoff_id = ?, detached_at_ms = NULL,
+             source_revision = ?, source_event_seq = ?
+         WHERE pet_id = ?`,
+      ).run(
+        options.authorityId,
+        options.restoreGeneration,
+        options.nextEpoch,
+        options.handoffId,
+        options.sourceRevision,
+        options.sourceEventSeq,
+        options.petId,
+      )
+      const pet = this.getPet(options.petId)
+      if (pet === undefined) throw new Error('pet disappeared during import')
+      return pet
+    }
+  }
+
+  /** Archive body; the caller must already be inside a transaction. */
+  applyAuthorityArchive(options: AuthorityArchiveOptions): AuthorityRecord {
+    const current = this.getPet(options.petId)
+    const authority = this.getAuthority(options.petId)
+    if (current === undefined || authority === undefined) throw new Error('pet authority is missing: ' + options.petId)
+    this.closeAndCreateCoverageOperation(
+      options.petId,
+      options.operationId,
+      options.at,
+      options.survivors,
+      'authority_handoff',
+    )
+    // The source authority leaves; terminal-finalize every survivor at the archive wall.
+    for (const survivor of options.survivors) {
+      if (survivor.eligible === false || survivor.activeEndWallMs !== undefined) continue
+      const result = finalizeSurvivor(survivor, {
+        commitWallMs: options.at,
+        eventBoundaryMs: options.at,
+        eventReason: 'authority_handoff',
+        terminal: true,
+      })
+      if (result.materialize) {
+        this.upsertStableCoverageRow(options.petId, options.operationId, survivor, options.at, result.endWallMs, result.provenance)
+      }
+    }
+    this.db.prepare(
+      'UPDATE coverage_operations SET state = ?, completed_at_ms = ? WHERE pet_id = ? AND operation_id = ?',
+    ).run('completed', options.at, options.petId, options.operationId)
+    this.db.prepare(
+      `UPDATE pet_authority
+       SET owner = 'local', state = 'archived', handoff_epoch = ?, handoff_id = ?,
+           detached_at_ms = ?, source_revision = ?, source_event_seq = ?
+       WHERE pet_id = ?`,
+    ).run(
+      options.nextEpoch,
+      options.handoffId,
+      options.at,
+      current.revision,
+      current.eventSeq,
+      options.petId,
+    )
+    const updated = this.getAuthority(options.petId)
+    if (updated === undefined) throw new Error('pet authority disappeared during archive')
+    return updated
+  }
+
+  archiveAuthority(options: AuthorityArchiveOptions): AuthorityRecord {
+    return this.transaction(() => this.applyAuthorityArchive(options))
   }
 
   replaceEngineAndRevision(

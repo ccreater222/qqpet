@@ -1,4 +1,6 @@
+import { mkdir } from 'node:fs/promises'
 import type { IncomingMessage } from 'node:http'
+import { dirname, join } from 'node:path'
 import type { RawData, WebSocket } from 'ws'
 import {
   PROTOCOL_VERSION,
@@ -64,6 +66,7 @@ export class SessionService {
   private nextConnection = 1
   private heartbeatTimer: NodeJS.Timeout | undefined
   private pingTimer: NodeJS.Timeout | undefined
+  private catchingUpSource: ((petId: string) => boolean) | undefined
 
   constructor(
     private readonly config: ServerConfig,
@@ -75,6 +78,14 @@ export class SessionService {
   ) {
     this.hub = new SocketHub(store, logger, now, config.maxFrameBytes)
     this.commands.setCoverageSource({ currentSurvivors: petId => this.currentSurvivors(petId) })
+  }
+
+  setCatchingUpSource(source: (petId: string) => boolean): void {
+    this.catchingUpSource = source
+  }
+
+  private isCatchingUp(petId: string): boolean {
+    return this.catchingUpSource?.(petId) === true
   }
 
   private currentSurvivors(petId: string): CoverageSurvivor[] {
@@ -335,7 +346,7 @@ export class SessionService {
       authority: this.hub.authority(authenticated.petId),
       headRevision: snapshot.pet.revision,
       headEventSeq: snapshot.pet.eventSeq,
-      catchingUp: false,
+      catchingUp: this.isCatchingUp(authenticated.petId),
       delivery,
       ...(authenticated.issuedToken === undefined ? {} : { issuedToken: authenticated.issuedToken }),
     }
@@ -361,7 +372,7 @@ export class SessionService {
       timeZone: snapshot.settings.timeZone,
       advanceWhileEmpty: snapshot.settings.advanceWhileEmpty,
       authority: this.hub.authority(authenticated.petId),
-      catchingUp: false,
+      catchingUp: this.isCatchingUp(authenticated.petId),
     })
   }
 
@@ -421,12 +432,15 @@ export class SessionService {
       timeZone: snapshot.settings.timeZone,
       advanceWhileEmpty: snapshot.settings.advanceWhileEmpty,
       authority: this.hub.authority(connection.petId),
-      catchingUp: false,
+      catchingUp: this.isCatchingUp(connection.petId),
     })
   }
 
   private async command(socket: WebSocket, connection: LiveConnection, request: CommandRequest): Promise<void> {
     try {
+      if (request.command.type === 'admin.importPortableBundle' || request.command.type === 'admin.resumeServer') {
+        await this.backupBeforeImport(connection.petId, request.opId)
+      }
       const committed = await this.commands.execute({
         petId: connection.petId,
         deviceId: connection.deviceId,
@@ -487,6 +501,20 @@ export class SessionService {
         this.logger.error('command.failed', { error })
         this.send(socket, this.error('internal', 'command failed', false, request.requestId))
       }
+    }
+  }
+
+  private async backupBeforeImport(petId: string, opId: string): Promise<void> {
+    try {
+      const path = join(
+        this.config.backupDir,
+        petId + '-pre-import-' + this.now() + '-' + opId.replaceAll(/[^a-zA-Z0-9_-]/g, '_') + '.sqlite',
+      )
+      await mkdir(dirname(path), { recursive: true })
+      await this.store.backup(path)
+    } catch (error) {
+      this.logger.error('import.backup_failed', { petId, error })
+      throw error instanceof Error ? error : new Error('pre-import backup failed')
     }
   }
 

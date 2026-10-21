@@ -8,7 +8,9 @@ import { AuthService } from './auth'
 import { CommandService } from './command-service'
 import { DatabaseStore, openDatabase } from './db'
 import { createLogger, type Logger } from './logging'
+import { MetricsRegistry } from './metrics'
 import { RuntimeHost } from './runtime-host'
+import { SchedulerService, type SchedulerPetHealth } from './scheduler'
 import { SessionService } from './session'
 
 export interface ServerAddress {
@@ -19,6 +21,7 @@ export interface ServerAddress {
 export interface ServerHealth {
   ok: boolean
   service: 'qqpet-server'
+  ready: boolean
   journalMode: string
   synchronous: string
   foreignKeys: number
@@ -29,6 +32,20 @@ export interface ServerHealth {
   eventSeq: number
   gameTimeMs: number
   catchingUp: boolean
+  wallLagMs: number
+  nextTickAtMs: number
+  scheduledJobs: number
+  activeClientCount: number
+  authorityState: 'active' | 'archived' | 'reset'
+  authorityEpoch: number
+  advanceWhileEmpty: boolean
+  timeZone: string
+  metrics: Record<string, number>
+  scheduler: SchedulerPetHealth[]
+}
+
+export interface SyncServerOptions {
+  now?: () => number
 }
 
 export class SyncServer {
@@ -36,16 +53,26 @@ export class SyncServer {
   private readonly http: HttpServer
   private readonly wss: WebSocketServer
   private readonly sessions: SessionService
+  readonly metrics: MetricsRegistry
+  readonly scheduler: SchedulerService
+  private readonly now: () => number
   private started = false
 
   constructor(
     readonly config: ServerConfig,
     readonly store: DatabaseStore,
+    options: SyncServerOptions = {},
   ) {
+    const now = options.now ?? Date.now
+    this.now = now
     this.logger = createLogger(config)
-    const auth = new AuthService(store)
-    const commands = new CommandService(store, auth, new RuntimeHost(), this.logger)
-    this.sessions = new SessionService(config, store, auth, commands, this.logger)
+    this.metrics = new MetricsRegistry()
+    const auth = new AuthService(store, now)
+    const commands = new CommandService(store, auth, new RuntimeHost(), this.logger, this.metrics, now)
+    this.sessions = new SessionService(config, store, auth, commands, this.logger, now)
+    this.scheduler = new SchedulerService(config, store, commands, this.sessions.hub, this.logger, this.metrics, now)
+    commands.setCatchingUpGate(petId => this.scheduler.isCatchingUp(petId))
+    this.sessions.setCatchingUpSource(petId => this.scheduler.isCatchingUp(petId))
     this.http = createServer((request, response) => {
       void this.handleHttp(request, response)
     })
@@ -74,7 +101,7 @@ export class SyncServer {
     await mkdir(dirname(this.config.dbPath), { recursive: true })
     await mkdir(this.config.backupDir, { recursive: true })
     this.store.verifyRestoreGeneration(this.config.restoreGenerationFile)
-    const startupAt = Date.now()
+    const startupAt = this.now()
     const repaired = this.store.repairCoverageOnStartup(startupAt)
     if (repaired > 0) this.logger.info('coverage.repaired', { intervals: repaired })
     this.sessions.start()
@@ -87,6 +114,7 @@ export class SyncServer {
       })
     })
     this.started = true
+    this.scheduler.start()
     this.logger.info('server.started', {
       bind: this.address().address,
       port: this.address().port,
@@ -96,11 +124,13 @@ export class SyncServer {
 
   async stop(): Promise<void> {
     if (!this.started) {
+      await this.scheduler.stop()
       this.store.close()
       return
     }
     this.started = false
-    this.store.finalizeCoverageOperationsOnShutdown(Date.now())
+    await this.scheduler.stop()
+    this.store.finalizeCoverageOperationsOnShutdown(this.now())
     this.sessions.stop()
     await new Promise<void>(resolve => {
       this.wss.close(() => resolve())
@@ -128,9 +158,15 @@ export class SyncServer {
     const busyTimeout = this.store.db.prepare('PRAGMA busy_timeout').get() as Record<string, unknown>
     const pets = this.store.listPets()
     const first = pets[0]
+    const schedulerHealth = this.scheduler.healthAll()
+    const firstHealth = schedulerHealth[0]
+    const catchingUp = schedulerHealth.some(value => value.catchingUp)
+    const authority = first === undefined ? undefined : this.store.getAuthority(first.id)
+    const settings = first === undefined ? undefined : this.store.getSettings(first.id)
     return {
       ok: true,
       service: 'qqpet-server',
+      ready: this.started && catchingUp === false && authority?.state === 'active',
       journalMode: String(Object.values(journal)[0] ?? '').toLowerCase(),
       synchronous: Number(Object.values(synchronous)[0]) === 2 ? 'full' : String(Object.values(synchronous)[0]),
       foreignKeys: Number(Object.values(foreignKeys)[0] ?? 0),
@@ -140,7 +176,17 @@ export class SyncServer {
       revision: first?.revision ?? 0,
       eventSeq: first?.eventSeq ?? 0,
       gameTimeMs: first?.gameTimeMs ?? 0,
-      catchingUp: false,
+      catchingUp,
+      wallLagMs: firstHealth?.wallLagMs ?? 0,
+      nextTickAtMs: firstHealth?.nextTickAtMs ?? 0,
+      scheduledJobs: firstHealth?.scheduledJobs ?? 0,
+      activeClientCount: firstHealth?.activeClientCount ?? 0,
+      authorityState: authority?.state ?? 'reset',
+      authorityEpoch: authority?.epoch ?? 0,
+      advanceWhileEmpty: settings?.advanceWhileEmpty ?? false,
+      timeZone: settings?.timeZone ?? '',
+      metrics: this.metrics.snapshot(),
+      scheduler: schedulerHealth,
     }
   }
 
@@ -162,6 +208,7 @@ export class SyncServer {
     if (request.url === '/status') {
       const pets = this.store.listPets().map(pet => {
         const settings = this.store.getSettings(pet.id)
+        const health = this.scheduler.health(pet.id)
         return {
           petId: pet.id,
           revision: pet.revision,
@@ -170,6 +217,15 @@ export class SyncServer {
           timeZone: settings?.timeZone ?? '',
           weatherLocation: settings?.weatherLocation ?? '',
           advanceWhileEmpty: settings?.advanceWhileEmpty ?? false,
+          ready: health?.ready ?? false,
+          catchingUp: health?.catchingUp ?? false,
+          wallLagMs: health?.wallLagMs ?? 0,
+          nextTickAtMs: health?.nextTickAtMs ?? 0,
+          scheduledJobs: health?.scheduledJobs ?? 0,
+          nextScheduledJobAtMs: health?.nextScheduledJobAtMs ?? null,
+          activeClientCount: health?.activeClientCount ?? 0,
+          authorityState: health?.authorityState ?? 'reset',
+          authorityEpoch: health?.authorityEpoch ?? 0,
         }
       })
       this.json(response, 200, { ok: true, pets })
