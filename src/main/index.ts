@@ -24,8 +24,9 @@ import { addFacts, clearMemory, loadDialogueState, loadHistory, loadMemory, rewr
 import { DEFAULT_HOTKEY, parseHotkey, watchHotkey, type KeyWatcher } from './hotkey'
 import { preloadAsr, transcribe } from './asr'
 import { DesktopRendererRuntime, installRendererRuntimeIpc } from './renderer-runtime'
-import { desktopStartupAuthority, LOCAL_V2_DOCUMENT_NAME } from './renderer-runtime-flags'
+import { desktopServerModeEnabled, desktopStartupAuthority, LOCAL_V2_DOCUMENT_NAME } from './renderer-runtime-flags'
 import { shouldStartVoice } from './voice-startup'
+import { DesktopServerModeController, installServerModeIpc } from './server-mode'
 
 // A test sidecar (QQPET_USER_DATA) runs beside the real pet: own save, own id, own lock.
 if (process.env.QQPET_USER_DATA) app.setPath('userData', process.env.QQPET_USER_DATA)
@@ -80,6 +81,10 @@ app.whenReady().then(async () => {
     loadSave()
   }
   installRendererRuntimeIpc(rendererRuntime)
+  // C10 desktop-only server mode stays behind an explicit dev flag until C11
+  // exposes storage/mode UI. A null controller keeps every remote IPC failing closed.
+  const serverMode = desktopServerModeEnabled() ? new DesktopServerModeController({ userDataPath: app.getPath('userData') }) : null
+  installServerModeIpc(serverMode)
   const assertTrustedRenderer = (sender: unknown): void => {
     if (rendererRuntime !== null && rendererRuntime.acceptsSender(sender) === false) {
       throw new Error('unauthorized: unknown renderer')
@@ -257,6 +262,7 @@ app.whenReady().then(async () => {
     tray.destroy()
     lan.stop()
     webhook.stop()
+    if (serverMode !== null) void serverMode.dispose()
     if (rendererRuntime === null) return
     event.preventDefault()
     void rendererRuntime.stop().finally(() => app.quit())

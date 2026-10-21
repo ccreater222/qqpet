@@ -41,7 +41,7 @@ export interface RendererRepositoryStatus {
   /** Host lifecycle detail retained for diagnostics/compatibility. */
   state?: string
   offline?: boolean
-  serverMode?: false
+  serverMode?: boolean
   role?: string
   readOnly?: boolean
   catchingUp?: boolean
@@ -55,7 +55,7 @@ export interface RendererRepositoryStatus {
 
 export interface RendererRuntimeInfo {
   localRepositoryV2: boolean
-  serverMode: false
+  serverMode: boolean
   reason?: string
 }
 
@@ -97,7 +97,7 @@ export interface LocalStatusSource {
   mode: 'local'
   state: string
   offline?: boolean
-  serverMode?: false
+  serverMode?: boolean
   role?: string
   readOnly?: boolean
   catchingUp?: boolean
@@ -175,7 +175,7 @@ export function createRendererStatus(
     ...(status.error === undefined ? {} : { lastError: status.error, error: status.error }),
     state: status.state,
     ...(status.offline === undefined ? {} : { offline: status.offline }),
-    serverMode: false,
+    serverMode: status.serverMode ?? false,
     ...(status.role === undefined ? {} : { role: status.role }),
     ...(status.readOnly === undefined ? {} : { readOnly: status.readOnly }),
     ...(status.catchingUp === undefined ? {} : { catchingUp: status.catchingUp }),

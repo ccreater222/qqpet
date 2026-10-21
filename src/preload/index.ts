@@ -13,6 +13,11 @@ const api: QQPetApi = {
   load: () => ipcRenderer.invoke(IPC.load),
   save: send(IPC.save),
   ...runtime,
+  remote: {
+    status: () => ipcRenderer.invoke(IPC.remoteStatus),
+    pair: (input) => ipcRenderer.invoke(IPC.remotePair, input),
+    revoke: () => ipcRenderer.invoke(IPC.remoteRevoke),
+  },
   resetPet: send(IPC.resetPet),
   exportSave: () => ipcRenderer.invoke(IPC.exportSave),
   importSave: () => ipcRenderer.invoke(IPC.importSave),

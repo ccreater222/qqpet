@@ -30,6 +30,9 @@ export const IPC = {
   syncStatus: 'pet:sync-status',
   resync: 'pet:resync',
   requestResync: 'pet:request-resync',
+  remoteStatus: 'pet:remote-status',
+  remotePair: 'pet:remote-pair',
+  remoteRevoke: 'pet:remote-revoke',
   openGame: 'game:open',
   calendar: 'app:calendar',
   gamePlayed: 'game:played',
@@ -215,6 +218,29 @@ export interface AiMessage {
   content: string
 }
 
+/** Desktop-only C10 server-mode pairing input; never persisted with the token. */
+export interface RemotePairingInput {
+  serverUrl: string
+  code: string
+  deviceLabel: string
+}
+
+/** Desktop-only server-mode status surface; mobile builds never expose it. */
+export interface DesktopRemoteStatus extends RendererRepositoryStatus {
+  enabled: boolean
+  reason?: string
+  serverUrl?: string
+  petId?: string
+  deviceId?: string
+}
+
+/** Desktop-only server mode control surface added by C10, expanded by C11. */
+export interface DesktopRemoteApi {
+  status(): Promise<DesktopRemoteStatus>
+  pair(input: RemotePairingInput): Promise<DesktopRemoteStatus>
+  revoke(): Promise<void>
+}
+
 /** Supplied by native device APIs, independently from viewport dimensions. */
 export type DeviceKind = 'phone' | 'tablet' | 'other'
 
@@ -230,7 +256,7 @@ export interface QQPetApi {
     clipboardWatch?: boolean; clipboardWatchReason?: string
     frontWatch?: boolean; frontWatchReason?: string
     /** Mobile hosts explicitly report false; no pairing/WSS/RemoteRepository bundle exists. */
-    serverMode?: false
+    serverMode?: boolean
     /** True only when this renderer is using the explicit dev local-runtime-v2 authority. */
     localRepositoryV2?: boolean
     localRepositoryV2Reason?: string
@@ -242,6 +268,8 @@ export interface QQPetApi {
   flush(): Promise<void>
   /** Whether this renderer is attached to an explicit local-runtime-v2 authority. */
   runtimeInfo(): Promise<RendererRuntimeInfo>
+  /** Desktop-only C10 server mode; omitted on mobile builds and disabled by default. */
+  remote?: DesktopRemoteApi
   /** Executes one semantic command through the local/remote repository. */
   command<K extends CommandKey>(
     command: Extract<PetCommand, { type: K }>,

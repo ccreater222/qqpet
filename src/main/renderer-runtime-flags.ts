@@ -40,3 +40,35 @@ export function desktopStartupAuthority(
   if (desktopRendererRuntimeEnabled(env)) return 'runtime'
   return v2DocumentExists ? 'blocked' : 'legacy'
 }
+
+export const DESKTOP_SERVER_MODE_ENV_FLAG = 'QQPET_SERVER_MODE'
+
+export type DesktopServerModeReason = 'flag_disabled' | 'mobile_server_mode_forbidden'
+
+export interface DesktopServerModeCapability {
+  flagEnabled: boolean
+  canActivate: boolean
+  serverMode: boolean
+  reason?: DesktopServerModeReason
+}
+
+export function desktopServerModeCapability(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: string = process.platform,
+): DesktopServerModeCapability {
+  const flagEnabled = env[DESKTOP_SERVER_MODE_ENV_FLAG] === '1'
+  if (flagEnabled === false) {
+    return { flagEnabled, canActivate: false, serverMode: false, reason: 'flag_disabled' }
+  }
+  if (platform === 'android' || platform === 'ios') {
+    return { flagEnabled, canActivate: false, serverMode: false, reason: 'mobile_server_mode_forbidden' }
+  }
+  return { flagEnabled, canActivate: true, serverMode: true }
+}
+
+export function desktopServerModeEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: string = process.platform,
+): boolean {
+  return desktopServerModeCapability(env, platform).canActivate
+}
