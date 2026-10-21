@@ -6,7 +6,9 @@ import { study, studyGoods, work, workGoods } from '../pet/jobs'
 import { noteUserSpoke } from '../pet/calendar'
 import { onEvent, onReply, onSaid } from '../pet/said'
 import { speak } from '../pet/pet'
-import { addInfo, info, save, setInfo, update } from '../pet/store'
+import { addInfo, info, runtimeProjectionMode, save, setInfo, update } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { dispatchRuntimeCommand } from '../pet/runtime-command'
 import { sendLetterTo, lanPeers } from './lan-visit'
 import { openBox } from './box'
 import './css/chat.css'
@@ -107,14 +109,18 @@ const STATS = { 元宝: 'yb', 成长: 'growth', 成长值: 'growth', 心情: 'mo
 
 function cheat(text: string): string | null {
   if (text === '不要死') {
-    update('settings', { undying: true })
+    if (runtimeProjectionMode) void dispatchRuntimeCommand(uiCommands.setShared('undying', true))
+    else update('settings', { undying: true })
     return `好的${info.host}，${info.name}以后再也不会死啦！`
   }
   const m = text.match(CHEAT)
   if (!m) return null
   const key = STATS[m[1] as keyof typeof STATS]
   const n = Number(m[2])
-  if (key === 'yb' || key === 'growth') addInfo(key, n)
+  // Runtime mode owns canonical stats: dispatch the semantic cheat instead of
+  // writing through the fail-closed legacy update path.
+  if (runtimeProjectionMode) void dispatchRuntimeCommand(uiCommands.grantCheat(key, n))
+  else if (key === 'yb' || key === 'growth') addInfo(key, n)
   else setInfo(key, Math.min(info[key] + n, save.petComputedlInfo[`${key}Max`]))
   return `${info.host}，${m[1]}+${n}，${info.name}收到啦！`
 }

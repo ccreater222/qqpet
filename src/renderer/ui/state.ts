@@ -1,4 +1,4 @@
-import { elapsed, stopTask } from '../pet/activity'
+import { elapsed, stopTask, stopTaskResult } from '../pet/activity'
 import { goodOf, type TimedType } from '../pet/data/goods'
 import { pay } from '../pet/items'
 import { speak } from '../pet/pet'
@@ -24,6 +24,8 @@ const BUSY = [
 ] as const
 
 let panel: HTMLElement | null = null
+/** True while a runtime activity.stop command is awaiting its result. */
+let stopping = false
 /** Bars show their numbers always instead of on hover; toggled by clicking the growth bar. */
 let showNums = false
 
@@ -42,9 +44,19 @@ export function age(minutes: number): string {
 }
 
 function stop(): void {
+  if (runtimeProjectionMode && stopping) return
   const k = stopTask()
   const b = BUSY.find((x) => x.key === k)
   if (b) speak({ c: 'state', s: b.stop, now: true }, 'speak')
+  if (runtimeProjectionMode) {
+    stopping = true
+    render()
+    void stopTaskResult().then(() => {
+      stopping = false
+      render()
+    })
+    return
+  }
   render()
 }
 
@@ -58,7 +70,9 @@ export function status(): (Node | string)[] {
   // Runtime mode has no renderer task clock; the projection only carries the
   // activity kind, so never show a fake 0-minute elapsed value.
   const progress = runtimeProjectionMode ? [] : [` (${elapsed() | 0}分钟) `]
-  return [`${b.name} `, div('fc', ...progress, button('stopDoActive butDo', stop, ' 停止 '))]
+  const stopButton = button('stopDoActive butDo', stop, ' 停止 ')
+  if (runtimeProjectionMode && stopping) stopButton.classList.add('disable')
+  return [`${b.name} `, div('fc', ...progress, stopButton)]
 }
 
 /** Buying sweetheart days, or switching a booked one on and off. */

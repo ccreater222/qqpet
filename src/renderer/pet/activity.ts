@@ -1,6 +1,6 @@
 import { activity, refreshTray, runtimeProjectionMode, setActivity, update } from './store'
 import { uiCommands } from './command-map'
-import { dispatchRuntimeCommand } from './runtime-command'
+import { commandSucceeded, dispatchRuntimeCommand } from './runtime-command'
 
 type Key = 'work' | 'study' | 'trip'
 
@@ -18,6 +18,14 @@ let task: (Task & { done: number }) | null = null
 
 export const elapsed = (): number => task?.done ?? 0
 
+let runtimeStopRequest: Promise<boolean> | null = null
+
+/** True while a runtime `activity.stop` command is awaiting its result. */
+export const stopTaskPending = (): boolean => runtimeStopRequest !== null
+
+/** Resolves when the pending runtime stop settles; true when no stop is pending. */
+export const stopTaskResult = (): Promise<boolean> => runtimeStopRequest ?? Promise.resolve(true)
+
 /** Starts a task; `value` is what activeOption shows (job id, city). */
 export function startTask(t: Task, value: string, done = 0): void {
   if (runtimeProjectionMode) return
@@ -31,7 +39,17 @@ export function startTask(t: Task, value: string, done = 0): void {
 export function stopTask(): Key | null {
   if (runtimeProjectionMode) {
     const key = (['work', 'study', 'trip'] as const).find(k => activity(k) !== null) ?? null
-    if (key !== null) void dispatchRuntimeCommand(uiCommands.stopActivity())
+    if (key === null) return null
+    // One in-flight stop per renderer; a second click must not emit a second
+    // command that the host would reject as busy after the first succeeded.
+    if (runtimeStopRequest === null) {
+      const request = dispatchRuntimeCommand(uiCommands.stopActivity())
+        .then((result) => commandSucceeded(result), () => false)
+      runtimeStopRequest = request
+      void request.then(() => {
+        if (runtimeStopRequest === request) runtimeStopRequest = null
+      })
+    }
     return key
   }
   if (!task) return null

@@ -264,6 +264,7 @@ test('Group C activity.stop dispatches in runtime mode and never writes legacy a
     runtimeProjectionMode: true,
     activity: (key) => (key === 'work' ? 'job-1' : null),
     dispatchRuntimeCommand: (command) => { runtimeCalls.push(command); return Promise.resolve(null) },
+    commandSucceeded: (result) => result !== null && result.status === 'applied',
     uiCommands: { stopActivity: () => ({ type: 'activity.stop', payload: {} }) },
     setActivity: (...args) => runtimeWrites.push(['setActivity', ...args]),
     update: (...args) => runtimeWrites.push(['update', ...args]),
@@ -581,11 +582,15 @@ test('converted panels render from projection events, not optimistic canonical w
     'src/renderer/ui/email.ts': /onStoreEvent\([\s\S]*mail\.claimed/,
     'src/renderer/ui/state.ts': /onStoreEvent\([\s\S]*activity\.started[\s\S]*activity\.completed/,
     'src/renderer/pet/goods.ts': /onStoreEvent\([\s\S]*inventory\.changed[\s\S]*item\.consumed[\s\S]*reward\.granted/,
+    'src/renderer/ui/travel.ts': /createActivityClock[\s\S]*elapsedMinutes\('trip'\)/,
   }
   for (const [file, pattern] of Object.entries(contracts)) {
     assert.match(read(file), pattern, file + ' must repaint from its ordered projection events')
   }
   // Canonical SavePatch writes stay in the one guarded legacy flusher.
+  // The busy-state stop guard must await the single in-flight command.
+  assert.match(read('src/renderer/ui/state.ts'), /stopTaskResult\(\)[\s\S]*stopping = false/)
+
   const store = read('src/renderer/pet/store.ts')
   assert.match(store, /if \(runtimeProjectionMode \|\| Object\.keys\(patch\)\.length === 0\) return[\s\S]*window\.qqpet\.save\(patch as SavePatch\)/)
   for (const file of [
@@ -640,4 +645,175 @@ test('command errors are user friendly and duplicate rejections still surface th
   assert.equal(events.length, 1)
   assert.equal(events[0].type, 'qqpet-command-error')
   assert.equal(events[0].detail.message, '元宝不足')
+})
+
+// ---------------------------------------------------------------------------
+// Follow-up audit fixes: authoritative travel elapsed, single-flight stop
+// commands, and runtime-safe chat cheats.
+// ---------------------------------------------------------------------------
+
+test('runtime travel clock derives elapsed minutes from live projections and ordered events', async () => {
+  const { createActivityClock, activityElapsedMinutes } = await import('../../src/renderer/pet/activity-clock.ts')
+  const projectionListeners = []
+  const eventListeners = []
+  const clock = createActivityClock({
+    onProjection: (listener) => { projectionListeners.push(listener); return () => {} },
+    onEvent: (listener) => { eventListeners.push(listener); return () => {} },
+  })
+  const startedAt = 1_700_000_000_000
+  const activeOption = { work: null, study: null, trip: '北京', ill: null, die: null }
+  const projection = (gameTimeMs, trip = '北京') => ({
+    gameTimeMs,
+    save: { activeOption: { ...activeOption, trip } },
+  })
+  eventListeners[0]({
+    eventSeq: 1,
+    revision: 1,
+    gameTimeMs: startedAt,
+    type: 'activity.started',
+    payload: { kind: 'travel', activityId: '北京', dueAtGameMs: startedAt + 3_600_000 },
+  })
+  assert.equal(clock.elapsedMinutes('trip'), null, 'no projection yet means no fake elapsed')
+  projectionListeners[0](projection(startedAt + 12 * 60_000), [])
+  assert.equal(clock.elapsedMinutes('trip'), 12)
+  projectionListeners[0](projection(startedAt + 20 * 60_000), [])
+  assert.equal(clock.elapsedMinutes('trip'), 20)
+  assert.equal(clock.elapsedMinutes('work'), null, 'only the running kind is reported')
+  assert.deepEqual(clock.sample('trip'), { kind: 'trip', startedAtGameMs: startedAt, dueAtGameMs: startedAt + 3_600_000 })
+  projectionListeners[0](projection(startedAt + 21 * 60_000, null), [])
+  assert.equal(clock.elapsedMinutes('trip'), null, 'a projection without the trip clears the sample')
+  assert.equal(activityElapsedMinutes({ kind: 'trip', startedAtGameMs: 0, dueAtGameMs: 3_600_000 }, 90 * 60_000), 60)
+  assert.equal(activityElapsedMinutes(null, 1000), null)
+})
+
+test('runtime activity.stop is single-flight and settles exactly once', async () => {
+  const dispatches = []
+  let resolveRequest
+  const runtime = loadConvertedModule('../../src/renderer/pet/activity.ts', {
+    runtimeProjectionMode: true,
+    activity: (key) => (key === 'work' ? 'job-1' : null),
+    dispatchRuntimeCommand: (command) => {
+      dispatches.push(command)
+      return new Promise((resolve) => { resolveRequest = resolve })
+    },
+    commandSucceeded: (result) => Boolean(result && result.status === 'applied'),
+    uiCommands: { stopActivity: () => ({ type: 'activity.stop', payload: {} }) },
+    setActivity: () => {},
+    update: () => {},
+    refreshTray: () => {},
+  }, 'stopTask, stopTaskPending, stopTaskResult')
+  assert.equal(runtime.stopTask(), 'work')
+  assert.equal(runtime.stopTask(), 'work')
+  assert.equal(dispatches.length, 1, 'the second click must not dispatch while the first is pending')
+  assert.equal(runtime.stopTaskPending(), true)
+  resolveRequest({ status: 'applied' })
+  assert.equal(await runtime.stopTaskResult(), true)
+  assert.equal(runtime.stopTaskPending(), false)
+  assert.equal(runtime.stopTask(), 'work')
+  assert.equal(dispatches.length, 2, 'a new stop is allowed after the first settles')
+  resolveRequest(null)
+  assert.equal(await runtime.stopTaskResult(), false)
+  assert.equal(runtime.stopTaskPending(), false)
+})
+
+test('runtime busy-state stop button guards a pending command and re-enables after it settles', async () => {
+  let resolveStop
+  const calls = { stopTask: 0, speak: 0 }
+  const pending = new Promise((resolve) => { resolveStop = resolve })
+  const state = loadConvertedModule('../../src/renderer/ui/state.ts', {
+    window: { qqpet: {}, addEventListener: () => {} },
+    onSettingsChange: () => {},
+    onStoreEvent: () => {},
+    onInfoChange: () => {},
+    runtimeProjectionMode: true,
+    stopTask: () => { calls.stopTask += 1; return 'work' },
+    stopTaskResult: () => pending,
+    speak: () => { calls.speak += 1 },
+    info: { health: 5 },
+    save: { settings: {}, petComputedlInfo: {} },
+  }, 'stop')
+  state.stop()
+  state.stop()
+  assert.equal(calls.stopTask, 1, 'the second click must not issue another stop')
+  assert.equal(calls.speak, 1, 'the stop line is spoken once')
+  resolveStop(true)
+  await Promise.resolve()
+  await Promise.resolve()
+  state.stop()
+  assert.equal(calls.stopTask, 2, 'the guard releases after the command settles')
+})
+
+async function extractTopLevelSnippets(relativePath, names) {
+  const { parse } = await import('@babel/parser')
+  const source = readFileSync(new URL(relativePath, import.meta.url), 'utf8')
+  const ast = parse(source, { sourceType: 'module', plugins: ['typescript'] })
+  const snippets = []
+  for (const entry of ast.program.body) {
+    const declaration = entry.type === 'ExportNamedDeclaration' || entry.type === 'ExportDefaultDeclaration' ? entry.declaration : entry
+    if (declaration === null || declaration === undefined) continue
+    if (declaration.type === 'FunctionDeclaration' && names.includes(declaration.id?.name)) {
+      snippets.push(source.slice(declaration.start, declaration.end))
+    }
+    if (declaration.type === 'VariableDeclaration') {
+      for (const declarator of declaration.declarations) {
+        if (declarator.id.type === 'Identifier' && names.includes(declarator.id.name)) {
+          snippets.push(source.slice(declaration.start, declaration.end))
+          break
+        }
+      }
+    }
+  }
+  return snippets.join('\n')
+}
+
+test('runtime chat cheats dispatch semantic commands and legacy chat cheats stay unchanged', async () => {
+  const snippets = await extractTopLevelSnippets('../../src/renderer/ui/chat.ts', ['cheat', 'CHEAT', 'STATS'])
+  const runtimeCalls = { dispatch: [], update: [], addInfo: [], setInfo: [] }
+  const runtimeContext = {
+    runtimeProjectionMode: true,
+    info: { host: '主人', name: '宠宝', mood: 100, yb: 100, growth: 100 },
+    save: { petComputedlInfo: { moodMax: 1000, ybMax: 9999, growthMax: 99999 } },
+    update: (...args) => runtimeCalls.update.push(args),
+    addInfo: (...args) => runtimeCalls.addInfo.push(args),
+    setInfo: (...args) => runtimeCalls.setInfo.push(args),
+    dispatchRuntimeCommand: (command) => { runtimeCalls.dispatch.push(command); return Promise.resolve(null) },
+    uiCommands: {
+      setShared: (key, value) => ({ type: 'settings.setShared', payload: { key, value } }),
+      grantCheat: (stat, amount) => ({ type: 'admin.grantCheat', payload: { stat, amount } }),
+    },
+  }
+  runInNewContext(stripTypeScriptTypes(snippets, { mode: 'transform' }) + '\nthis.__cheat = cheat', runtimeContext)
+  const cheat = runtimeContext.__cheat
+  assert.equal(cheat('不要死'), '好的主人，宠宝以后再也不会死啦！')
+  cheat('元宝+100000')
+  cheat('心情+50')
+  assert.deepEqual(runtimeCalls.dispatch, [
+    { type: 'settings.setShared', payload: { key: 'undying', value: true } },
+    { type: 'admin.grantCheat', payload: { stat: 'yb', amount: 100000 } },
+    { type: 'admin.grantCheat', payload: { stat: 'mood', amount: 50 } },
+  ])
+  assert.deepEqual(runtimeCalls.update, [])
+  assert.deepEqual(runtimeCalls.addInfo, [])
+  assert.deepEqual(runtimeCalls.setInfo, [])
+
+  const legacyCalls = { dispatch: [], update: [], addInfo: [], setInfo: [] }
+  const legacyContext = {
+    runtimeProjectionMode: false,
+    info: { host: '主人', name: '宠宝', mood: 100, yb: 100, growth: 100 },
+    save: { petComputedlInfo: { moodMax: 1000, ybMax: 9999, growthMax: 99999 } },
+    update: (...args) => legacyCalls.update.push(args),
+    addInfo: (...args) => legacyCalls.addInfo.push(args),
+    setInfo: (...args) => legacyCalls.setInfo.push(args),
+    dispatchRuntimeCommand: () => { legacyCalls.dispatch.push('called'); return Promise.resolve(null) },
+    uiCommands: {},
+  }
+  runInNewContext(stripTypeScriptTypes(snippets, { mode: 'transform' }) + '\nthis.__cheat = cheat', legacyContext)
+  const legacyCheat = legacyContext.__cheat
+  legacyCheat('不要死')
+  legacyCheat('元宝+5')
+  legacyCheat('心情+5')
+  assert.deepEqual(legacyCalls.dispatch, [])
+  assert.equal(legacyCalls.update.length, 1)
+  assert.equal(legacyCalls.addInfo.length, 1)
+  assert.equal(legacyCalls.setInfo.length, 1)
 })
