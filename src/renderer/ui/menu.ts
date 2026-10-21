@@ -104,6 +104,7 @@ function items(adopt: () => void): Item[] {
       openFarm,
       openFishing,
       openGames,
+      visitFriend,
       readopt,
       bury: () => bury(),
       togglePaused,

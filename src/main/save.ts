@@ -58,6 +58,12 @@ export function loadSave(): SaveData {
   return save
 }
 
+/** Installs a provisional empty view while the runtime loads; it never writes the legacy file. */
+export function loadEmptySaveView(): SaveData {
+  save = startSave(null)
+  return save
+}
+
 export function getSave(): SaveData {
   if (save === undefined) throw new Error('save is not loaded')
   return save

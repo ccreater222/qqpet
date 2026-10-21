@@ -54,11 +54,7 @@ function hasLocalPatch(patch: DeviceLocalOverlayPatch): boolean {
     || Object.keys(patch.presentation ?? {}).length > 0
 }
 
-/**
- * Desktop host adapter for the C6 renderer contract. Constructing it is already
- * the explicit C6 assertion: the capability check requires both runtime env
- * flags plus a renderer-capable host, so legacy startup never reaches here.
- */
+/** Desktop host adapter for the default local v2 authority and rollback gate. */
 export class DesktopRendererRuntime {
   readonly repository: LocalRepository
   private readonly documentPath: string
@@ -138,6 +134,11 @@ export class DesktopRendererRuntime {
   requestResync(): void {
     if (this.currentProjection === null) return
     this.send(IPC.resync, clone(this.currentProjection), [])
+  }
+
+  /** Replays the exact current status after a renderer subscribes or reloads. */
+  replayStatus(): void {
+    this.send(IPC.syncStatus, this.getStatus())
   }
 
   loadLocalSettings(): DeviceLocalOverlay {
@@ -340,6 +341,8 @@ export function installRendererRuntimeIpc(runtime: DesktopRendererRuntime | null
   })
   ipcMain.handle(IPC.requestResync, (event) => {
     requireTrustedSender(event)
-    runtime?.requestResync()
+    if (runtime === null) return
+    runtime.requestResync()
+    runtime.replayStatus()
   })
 }

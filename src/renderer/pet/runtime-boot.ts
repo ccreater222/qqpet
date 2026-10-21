@@ -33,7 +33,7 @@ export function bootRenderer(
   return 'legacy'
 }
 
-/** LAN visit actions are not command-converted in C6a, so runtime mode must not mount them. */
+/** LAN transport remains unavailable in runtime mode; the local social visit command is mounted separately. */
 export function mountLanVisits(runtimeProjectionMode: boolean): boolean {
   return runtimeProjectionMode === false
 }

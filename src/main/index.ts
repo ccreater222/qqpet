@@ -13,7 +13,7 @@ import { contentMissing } from './content'
 import { openFirstRun, registerPackIpc } from './first-run'
 import { relaunch, spawnSelf } from './relaunch'
 import { handleScheme, registerScheme } from './protocol'
-import { exportSave, getSave, importSave, loadSave, patchSave, resetSave, setSaveView } from './save'
+import { exportSave, getSave, importSave, loadEmptySaveView, loadSave, patchSave, resetSave, setSaveView } from './save'
 import { createPetTray } from './tray'
 import { frontName } from './front'
 import { createPetWindow, openGameWindow } from './window'
@@ -59,15 +59,10 @@ app.whenReady().then(async () => {
   const startupAuthority = desktopStartupAuthority(existsSync(v2Document))
   let rendererRuntime: DesktopRendererRuntime | null = null
   if (startupAuthority === 'runtime') {
-    try {
-      rendererRuntime = new DesktopRendererRuntime({ userDataPath: app.getPath('userData') })
-      setSaveView(await rendererRuntime.start())
-    } catch (error) {
-      console.error('QQPet local runtime v2 failed to start:', error)
-      dialog.showErrorBox('QQPet 本地运行时启动失败', error instanceof Error ? error.message : String(error))
-      app.quit()
-      return
-    }
+    // The window must exist before catch-up can take time. This provisional view
+    // provides placement only; the repository's first projection replaces it.
+    loadEmptySaveView()
+    rendererRuntime = new DesktopRendererRuntime({ userDataPath: app.getPath('userData') })
   } else if (startupAuthority === 'blocked') {
     console.error('local runtime v2 document exists; refusing to start the legacy writer')
     dialog.showErrorBox(
@@ -80,6 +75,9 @@ app.whenReady().then(async () => {
     loadSave()
   }
   installRendererRuntimeIpc(rendererRuntime)
+  const runtimeReady = rendererRuntime === null
+    ? Promise.resolve()
+    : rendererRuntime.start().then(setSaveView)
   const assertTrustedRenderer = (sender: unknown): void => {
     if (rendererRuntime !== null && rendererRuntime.acceptsSender(sender) === false) {
       throw new Error('unauthorized: unknown renderer')
@@ -100,6 +98,11 @@ app.whenReady().then(async () => {
 
   const win = createPetWindow()
   rendererRuntime?.attachWindow(win)
+  void runtimeReady.catch((error: unknown) => {
+    console.error('QQPet local runtime v2 failed to start:', error)
+    dialog.showErrorBox('QQPet 本地运行时启动失败', error instanceof Error ? error.message : String(error))
+    app.quit()
+  })
   const petInit = (): { name: string; host: string; sex: 'GG' | 'MM'; level: number } => {
     const s = getSave()
     return { name: s.petInfo.name, host: s.petInfo.host, sex: s.petInfo.sex, level: s.petComputedlInfo.level }
@@ -353,13 +356,15 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.latestRelease, () => latestRelease(net.fetch))
   // A focusable pet window holds a full panel (社区, 密室...) that would cover a normal game window.
   let panel = false
-  ipcMain.on(IPC.openGame, (event, swf: string) => {
+  ipcMain.on(IPC.openGame, (event, swf: string, windowId?: number) => {
     // Runtime v2 keeps the SWF window as presentation; the renderer settles the
     // game session from the gamePlayed event when this window closes.
     if (rendererRuntime !== null) assertTrustedRenderer(event.sender)
     const start = Date.now()
     // Quitting with a game open closes the pet window first.
-    openGameWindow(swf, panel ? win : undefined).on('closed', () => win.isDestroyed() || win.webContents.send(IPC.gamePlayed, (Date.now() - start) / 60000))
+    openGameWindow(swf, panel ? win : undefined).on('closed', () => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.gamePlayed, (Date.now() - start) / 60000, windowId)
+    })
   })
   ipcMain.on(IPC.quit, () => app.quit())
   ipcMain.on(IPC.copyText, (_e, text: string) => clipboard.writeText(text))

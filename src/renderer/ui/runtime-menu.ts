@@ -17,6 +17,7 @@ export interface RuntimeMenuActions {
   openFarm: () => void
   openFishing: () => void
   openGames: () => void
+  visitFriend: () => void
   readopt: () => void
   bury: () => void
   togglePaused: () => void
@@ -64,6 +65,7 @@ export function runtimeMenuItems(hasPet: boolean, actions: RuntimeMenuActions): 
         { label: '池塘', run: actions.openFishing },
         { label: '农场', run: actions.openFarm },
         { label: '游戏', run: actions.openGames },
+        { label: '找朋友玩', run: actions.visitFriend },
       ],
     },
     { label: actions.paused ? '开始成长' : '停止成长', on: actions.paused, run: actions.togglePaused },

@@ -76,7 +76,10 @@ export function createRendererRuntimePreload(ipc: ElectronIpcLike): RendererRunt
       ipc, IPC.projection, listener,
     ),
     onCommandResult: (listener) => replaceListener<[CommandResult]>(ipc, IPC.commandResult, listener),
-    onSyncStatus: (listener) => replaceListener<[RendererRepositoryStatus]>(ipc, IPC.syncStatus, listener),
+    onSyncStatus: (listener) => {
+      replaceListener<[RendererRepositoryStatus]>(ipc, IPC.syncStatus, listener)
+      void ipc.invoke(IPC.requestResync)
+    },
     onResync: (listener) => replaceListener<[RendererProjection, OrderedEvent[]]>(ipc, IPC.resync, listener),
     requestResync: () => ipc.invoke(IPC.requestResync) as Promise<void>,
   }

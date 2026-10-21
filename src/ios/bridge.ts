@@ -511,7 +511,7 @@ const api: QQPetApi = {
   setTrayState(state) { tray = state; showTray() },
   onCursor: (listener) => listen('cursor', listener),
   onTrayClick: (listener) => listen('trayClick', listener),
-  onGamePlayed: (listener) => listen('gamePlayed', listener),
+  onGamePlayed: (listener) => listen('gamePlayed', (minutes: number) => listener(minutes, -1)),
   onClipboard: (listener) => listen('clipboard', listener),
   onPresence: (listener) => listen('presence', (away) => {
     if (localRuntime !== null) void (away ? localRuntime.suspend() : localRuntime.resume())

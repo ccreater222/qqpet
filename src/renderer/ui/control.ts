@@ -17,6 +17,7 @@ import { progress } from './progress'
 import { openSetup } from './setup'
 import { openShop } from './shop'
 import { openSignIn } from './signin'
+import { visitFriend } from './visit'
 import { setBubbleLift } from './talk'
 import { openTask } from './task'
 import { openTravel } from './travel'
@@ -130,13 +131,18 @@ const MENU: { name: string; icon: string; children?: Entry[]; run?: () => void }
 ]
 
 /** Runtime mode exposes converted panels only; island/community stay legacy until C7 finishes. */
-const visibleMenu = runtimeProjectionMode
-  ? MENU.map((group) =>
-      group.name === '活动'
-        ? { ...group, children: group.children?.filter((child) => child.name === '池塘' || child.name === '农场' || child.name === '游戏') }
-        : group,
-    ).filter((group) => group.children === undefined || group.children.length > 0)
-  : MENU
+const runtimeMenu = MENU.map((group) =>
+  group.name === '活动'
+    ? {
+        ...group,
+        children: [
+          ...(group.children?.filter((child) => child.name === '池塘' || child.name === '农场' || child.name === '游戏') ?? []),
+          { name: '找朋友玩', icon: 'chongwu.png', run: visitFriend },
+        ],
+      }
+    : group,
+).filter((group) => group.children === undefined || group.children.length > 0)
+const visibleMenu = runtimeProjectionMode ? runtimeMenu : MENU
 
 const control = div('control')
 control.dataset.hit = ''
