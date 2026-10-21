@@ -31,6 +31,18 @@ const eventListeners = new Set<(event: OrderedEvent) => void>()
 const commandResultListeners = new Set<(result: CommandResult) => void>()
 const syncStatusListeners = new Set<(status: RendererRepositoryStatus) => void>()
 let projectionCursor: ProjectionCursor | null = window.__qqpetInitialProjectionCursor ?? null
+
+/** Latest accepted projection clock, for panels that need the host's game day. */
+export interface ProjectionViewState {
+  gameTimeMs: number
+  timeZone: string
+}
+
+let currentViewState: ProjectionViewState | null = null
+
+export function currentProjectionView(): ProjectionViewState | null {
+  return currentViewState
+}
 let localSettingsQueue: Promise<void> = Promise.resolve()
 let pendingLocalSettings: DeviceLocalOverlayPatch | null = null
 let localSettingsTimer = 0
@@ -149,6 +161,7 @@ function receiveProjection(projection: RendererProjection, events: OrderedEvent[
   }
   const full = requestedResync || classification.kind === 'resync'
   if (requestedResync) resyncRequested = false
+  currentViewState = { gameTimeMs: projection.gameTimeMs, timeZone: projection.timeZone }
   const result: SaveHydrationResult = hydrateSaveProjection(save, projection)
   projectionCursor = {
     revision: projection.revision,

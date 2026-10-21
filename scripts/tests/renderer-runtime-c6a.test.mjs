@@ -546,6 +546,7 @@ test('runtime boot with an existing pet starts presentation only, never the lega
     openSetup: () => menuCalls.push('setup'),
     openFishing: () => menuCalls.push('fishing'),
     openGames: () => menuCalls.push('games'),
+    openIsland: () => menuCalls.push('island'),
     readopt: () => menuCalls.push('readopt'),
     bury: () => menuCalls.push('bury'),
     togglePaused: () => menuCalls.push('pause'),
@@ -556,8 +557,11 @@ test('runtime boot with an existing pet starts presentation only, never the lega
   const petMenu = runtimeMenuItems(true, menuActions)
   assert.deepEqual(petMenu.map(item => item.label), ['打开商城', '喂养宠物', '设置帮助', '宠物状态', '活动', '停止成长', '重新领养宠物', '退出宠物'])
   const activity = petMenu.find(item => item.label === '活动')
-  assert.deepEqual(activity.children.map(item => item.label), ['池塘', '游戏'])
+  assert.deepEqual(activity.children.map(item => item.label), ['池塘', '游戏', '企鹅岛'])
   assert.equal(petMenu.some(item => ['农场', '密室', '社区'].includes(item.label)), false)
+  activity.children.at(-1).run()
+  assert.deepEqual(menuCalls, ['island'])
+  menuCalls.length = 0
   petMenu.at(-1).run()
   assert.deepEqual(menuCalls, ['leave'])
   const emptyMenu = runtimeMenuItems(false, menuActions)

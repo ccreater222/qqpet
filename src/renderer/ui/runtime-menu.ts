@@ -16,6 +16,7 @@ export interface RuntimeMenuActions {
   openSetup: () => void
   openFishing: () => void
   openGames: () => void
+  openIsland: () => void
   readopt: () => void
   bury: () => void
   togglePaused: () => void
@@ -27,8 +28,8 @@ export interface RuntimeMenuActions {
 /**
  * C7 runtime navigation. Only panels converted to commands/projections are
  * exposed: lifecycle, inventory, jobs/study/travel, tasks/sign-in/mail, games,
- * diudiule and fishing. Farm, island, LAN social and community stay hidden
- * until their conversion lands.
+ * diudiule, fishing and the command-driven island. Farm and the full LAN
+ * community world stay hidden until their conversion lands.
  */
 export function runtimeMenuItems(hasPet: boolean, actions: RuntimeMenuActions): RuntimeMenuItem[] {
   const leave = { label: '退出宠物', run: actions.leave }
@@ -62,6 +63,7 @@ export function runtimeMenuItems(hasPet: boolean, actions: RuntimeMenuActions): 
       children: [
         { label: '池塘', run: actions.openFishing },
         { label: '游戏', run: actions.openGames },
+        { label: '企鹅岛', run: actions.openIsland },
       ],
     },
     { label: actions.paused ? '开始成长' : '停止成长', on: actions.paused, run: actions.togglePaused },

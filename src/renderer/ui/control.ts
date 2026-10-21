@@ -11,6 +11,7 @@ import { openEmail } from './email'
 import { openFarm } from './farm'
 import { openFishing } from './fishing'
 import { openGames } from './games'
+import { openIslandRuntime } from './island-runtime'
 import { openMstx } from './mstx'
 import { openPetInfo } from './petinfo'
 import { progress } from './progress'
@@ -129,11 +130,16 @@ const MENU: { name: string; icon: string; children?: Entry[]; run?: () => void }
   { name: '档案', icon: 'dangan.png', run: openPetInfo },
 ]
 
-/** Runtime mode exposes converted panels only; farm/island/community stay legacy until C7 finishes. */
+/** Runtime mode exposes converted panels; farm and the full community world remain separate slices. */
 const visibleMenu = runtimeProjectionMode
   ? MENU.map((group) =>
       group.name === '活动'
-        ? { ...group, children: group.children?.filter((child) => child.name === '池塘' || child.name === '游戏') }
+        ? {
+            ...group,
+            children: group.children?.map((child) =>
+              child.name === '社区' ? { ...child, name: '企鹅岛', run: openIslandRuntime } : child,
+            ).filter((child) => child.name === '池塘' || child.name === '游戏' || child.name === '企鹅岛'),
+          }
         : group,
     ).filter((group) => group.children === undefined || group.children.length > 0)
   : MENU

@@ -5,6 +5,7 @@ import { openChat } from './chat'
 import { openGoods } from './control'
 import { openFishing } from './fishing'
 import { openGames } from './games'
+import { openIslandRuntime } from './island-runtime'
 import './css/menu.css'
 import { button, div } from './dom'
 import { frame } from './frame'
@@ -102,6 +103,7 @@ function items(adopt: () => void): Item[] {
       openSetup,
       openFishing,
       openGames,
+      openIsland: openIslandRuntime,
       readopt,
       bury: () => bury(),
       togglePaused,
