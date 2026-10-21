@@ -129,11 +129,11 @@ const MENU: { name: string; icon: string; children?: Entry[]; run?: () => void }
   { name: '档案', icon: 'dangan.png', run: openPetInfo },
 ]
 
-/** Runtime mode exposes converted panels only; farm/island/community stay legacy until C7 finishes. */
+/** Runtime mode exposes converted panels only; island/community stay legacy until C7 finishes. */
 const visibleMenu = runtimeProjectionMode
   ? MENU.map((group) =>
       group.name === '活动'
-        ? { ...group, children: group.children?.filter((child) => child.name === '池塘' || child.name === '游戏') }
+        ? { ...group, children: group.children?.filter((child) => child.name === '池塘' || child.name === '农场' || child.name === '游戏') }
         : group,
     ).filter((group) => group.children === undefined || group.children.length > 0)
   : MENU

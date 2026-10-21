@@ -8,3 +8,12 @@
 /* pet/info/*.svg draw the penguin around (61, 74) of 121.5px; centre that in the slot. */
 .ui-farm .avatar img {position:absolute;width:88px;height:88px;left:-1px;top:-29px}
 .ui-farm .actions > * + * {margin-left:12px}
+.ui-farm-runtime {width:700px;max-height:550px;overflow:auto;padding:8px;font-size:12px}
+.ui-farm-runtime .farmHeader {font-weight:700;margin-bottom:6px}
+.ui-farm-runtime .farmSeeds,.ui-farm-runtime .farmActions {display:flex;flex-wrap:wrap;gap:4px;margin:4px 0}
+.ui-farm-runtime .farmSeed,.ui-farm-runtime .farmAct {padding:3px 6px;border:1px solid #a56a2a;border-radius:6px;background:#fff6df;cursor:pointer}
+.ui-farm-runtime .farmSeed.selected,.ui-farm-runtime .farmPlot.selected {outline:2px solid #e08b2d;background:#ffe7b8}
+.ui-farm-runtime .farmPlots {display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin:4px 0}
+.ui-farm-runtime .farmPlot {min-height:52px;padding:4px;border:1px solid #a56a2a;border-radius:6px;background:#fff6df;cursor:pointer}
+.ui-farm-runtime .farmWarehouse {margin-top:6px}
+.ui-farm-runtime .farmStatus {margin-top:6px;color:#7a4b12}

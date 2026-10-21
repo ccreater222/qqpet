@@ -3,6 +3,7 @@ import type { TrayMenuItem } from '../../shared/ipc'
 import { info, runtimeProjectionMode, save, setPaused, setTray, update } from '../pet/store'
 import { openChat } from './chat'
 import { openGoods } from './control'
+import { openFarm } from './farm'
 import { openFishing } from './fishing'
 import { openGames } from './games'
 import './css/menu.css'
@@ -100,6 +101,7 @@ function items(adopt: () => void): Item[] {
       openGoods,
       openPetInfo,
       openSetup,
+      openFarm,
       openFishing,
       openGames,
       readopt,

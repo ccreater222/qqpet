@@ -1,5 +1,8 @@
-import { avatar, info, onSaveFlush, runtimeProjectionMode, save, scaleYb, setInfo, update } from '../pet/store'
+import { avatar, info, onProjectionApplied, onSaveFlush, runtimeProjectionMode, save, scaleYb, setInfo, update } from '../pet/store'
 import { registerProjectionCacheInvalidator } from '../pet/projection-cache'
+import { uiCommands } from '../pet/command-map'
+import { commandErrorText, commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
+import FARM from '../../shared/pet-runtime/content/farm.json'
 import { SwfPlayer } from '../swf/player'
 import { readSol, writeSol, type Sol } from '../swf/sol'
 import { openBox } from './box'
@@ -33,6 +36,122 @@ let open = false
 let farmStale = false
 let closeFarm: (() => void) | null = null
 
+interface RuntimeSeed { seed: string; name: string; price: number; rank: number }
+interface RuntimeCrop { seed: string; crop: string; name: string; time: number; price: number }
+interface RuntimeLand { farmland: string; crop?: string; time?: number; harvest?: unknown; grass?: number; worm?: number; state?: number; progress?: number; yield?: number }
+interface RuntimeFarm {
+  experience?: string | number
+  rank?: string | number
+  weather?: string
+  wealth?: string | number
+  burden?: { name?: string; Items: string; number: number }[]
+  warehouse?: { fruit: string; number: number; name?: string; price?: number }[]
+  farmland?: RuntimeLand[]
+}
+
+const RUNTIME_SEEDS = FARM.seeds as RuntimeSeed[]
+const RUNTIME_CROPS = FARM.crops as RuntimeCrop[]
+
+function runtimeFarmState(): RuntimeFarm {
+  try {
+    const parsed = JSON.parse(save.saveJsonData.farm || '{}') as RuntimeFarm
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function runtimeLandLabel(land: RuntimeLand, index: number): string {
+  const crop = land.crop === undefined ? undefined : RUNTIME_CROPS.find((entry) => entry.seed === land.crop)
+  if (land.harvest !== undefined) return `${index + 1} 已收获`
+  if (land.crop === undefined) return `${index + 1} ${land.farmland === 'Wasteland' ? '荒地' : '空地'}`
+  if (Number(land.state ?? 0) >= 5) return `${index + 1} ${crop?.name ?? land.crop} 可收获`
+  const progress = Math.max(0, Math.min(100, Math.round(Number(land.progress ?? 0) * 100)))
+  return `${index + 1} ${crop?.name ?? land.crop} ${progress}%${land.grass === undefined ? '' : ' 草'}${land.worm === undefined ? '' : ' 虫'}${land.farmland === 'FarmlandG' ? ' 旱' : ''}`
+}
+
+/** Projection-only plot labels; exported for the focused farm tests. */
+export function runtimeFarmPlotLabels(stored: string | undefined): string[] {
+  let parsed: RuntimeFarm = {}
+  try {
+    parsed = stored ? JSON.parse(stored) as RuntimeFarm : {}
+  } catch {
+    parsed = {}
+  }
+  const plots = parsed.farmland ?? []
+  return Array.from({ length: 18 }, (_, index) => runtimeLandLabel(plots[index] ?? { farmland: index < 6 ? 'FarmlandS' : 'Wasteland' }, index))
+}
+
+function openRuntimeFarm(): void {
+  open = true
+  farmStale = false
+  let selectedSeed = RUNTIME_SEEDS[0]?.seed ?? ''
+  const selected = new Set<number>()
+  let message = '选择种子和地块后操作，结果以下一次投影为准'
+  const host = div('ui-farm-runtime')
+  const render = (): void => {
+    const state = runtimeFarmState()
+    host.textContent = ''
+    const rank = Number(state.rank ?? 1)
+    host.append(div('farmHeader', `农场 Lv${rank} 经验${state.experience ?? 0} 天气${state.weather ?? 'Sunny'} 元宝${state.wealth ?? info.yb}`))
+    const send = (command: unknown, ok: string): void => {
+      void dispatchRuntimeCommand(command as never).then((result) => {
+        message = commandSucceeded(result) ? ok : (result !== null && result.status === 'rejected' ? commandErrorText(result.error) : '操作失败')
+        render()
+      })
+    }
+    const seeds = div('farmSeeds')
+    for (const seed of RUNTIME_SEEDS) {
+      const owned = state.burden?.find((entry) => entry.Items === seed.seed)?.number ?? 0
+      seeds.append(button(`farmSeed${seed.seed === selectedSeed ? ' selected' : ''}`, () => { selectedSeed = seed.seed; render() }, `${seed.name} ${seed.price}元宝 有${owned}`))
+    }
+    host.append(seeds)
+    const labels = runtimeFarmPlotLabels(save.saveJsonData.farm)
+    const grid = div('farmPlots')
+    for (let index = 0; index < 18; index++) {
+      grid.append(button(`farmPlot${selected.has(index) ? ' selected' : ''}`, () => {
+        if (selected.has(index)) selected.delete(index)
+        else selected.add(index)
+        render()
+      }, labels[index]))
+    }
+    host.append(grid)
+    const chosen = (): number[] => [...selected]
+    const plotAction = (label: string, make: () => unknown, ok: string): HTMLDivElement =>
+      button('farmAct', () => {
+        if (selected.size === 0) { message = '请先选择地块'; render(); return }
+        send(make(), ok)
+      }, label)
+    host.append(div(
+      'farmActions',
+      button('farmAct', () => send(uiCommands.farmBuySeed(selectedSeed, 1), '购买成功'), '买1种子'),
+      plotAction('播种', () => uiCommands.farmPlant(selectedSeed, chosen()), '播种成功'),
+      plotAction('浇水', () => uiCommands.farmCare(chosen(), 'water'), '浇水完成'),
+      plotAction('除草', () => uiCommands.farmCare(chosen(), 'weed'), '除草完成'),
+      plotAction('除虫', () => uiCommands.farmCare(chosen(), 'pest'), '除虫完成'),
+      plotAction('收获', () => uiCommands.farmHarvest(chosen()), '收获成功'),
+      plotAction('铲除', () => uiCommands.farmClear(chosen()), '铲除成功'),
+    ))
+    const warehouse = div('farmWarehouse', '仓库：')
+    for (const item of state.warehouse ?? []) {
+      warehouse.append(button('farmAct', () => send(uiCommands.farmSellProduce(item.fruit, 1), `出售${item.name ?? item.fruit}成功`), `${item.name ?? item.fruit}×${item.number} 售1`))
+    }
+    host.append(warehouse)
+    host.append(div('farmStatus', message))
+  }
+  const off = onProjectionApplied(() => render())
+  window.qqpet.setFocusable(true)
+  closeFarm = openBox(host, {
+    onClose: () => {
+      off()
+      closeFarm = null
+      open = false
+      window.qqpet.setFocusable(false)
+    },
+  })
+  render()
+}
+
 /** The save Farm.swf writes on its first run (FarmMain.locationInit). */
 function fresh(): Sol {
   return {
@@ -58,6 +177,10 @@ function fresh(): Sol {
  */
 export function openFarm(): void {
   if (open) return
+  if (runtimeProjectionMode) {
+    openRuntimeFarm()
+    return
+  }
   open = true
   farmStale = false
   const stored = save.saveJsonData.farm
@@ -116,6 +239,8 @@ export function openFarm(): void {
 // the panel rather than letting stale local SWF bytes overwrite canonical farm
 // state on the next settle; the next open starts from the projection.
 registerProjectionCacheInvalidator('farm', () => {
+  // Runtime mode re-renders from the projection instead of closing the panel.
+  if (runtimeProjectionMode) return
   if (open === false) return
   farmStale = true
   closeFarm?.()
@@ -137,6 +262,27 @@ async function ripeTimes(): Promise<Record<string, number>> {
  * (InstallFace.tick). Null while the farm is open or was never started.
  */
 export async function farmNews(): Promise<{ ripe: number; pests: number } | null> {
+  if (runtimeProjectionMode) {
+    if (open) return null
+    const stored = save.saveJsonData.farm
+    if (stored === undefined || stored === '') return null
+    let user: RuntimeFarm
+    try {
+      user = JSON.parse(stored) as RuntimeFarm
+    } catch {
+      return null
+    }
+    const now = Math.floor(Date.now() / 1000)
+    let ripe = 0
+    let pests = 0
+    for (const land of user.farmland ?? []) {
+      if (land.crop === undefined || land.harvest !== undefined) continue
+      const crop = RUNTIME_CROPS.find((entry) => entry.seed === land.crop)
+      if (Number(land.state ?? 0) >= 5 || (crop !== undefined && now - Number(land.time ?? now) >= crop.time)) { ripe++; continue }
+      if (land.grass !== undefined || land.worm !== undefined || land.farmland === 'FarmlandG') pests++
+    }
+    return { ripe, pests }
+  }
   ripening ??= ripeTimes()
   const times = await ripening
   const stored = save.saveJsonData.farm

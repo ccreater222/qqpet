@@ -14,6 +14,7 @@ export interface RuntimeMenuActions {
   openGoods: (type: 'food' | 'clean' | 'medicine') => void
   openPetInfo: () => void
   openSetup: () => void
+  openFarm: () => void
   openFishing: () => void
   openGames: () => void
   readopt: () => void
@@ -61,6 +62,7 @@ export function runtimeMenuItems(hasPet: boolean, actions: RuntimeMenuActions): 
       label: '活动',
       children: [
         { label: '池塘', run: actions.openFishing },
+        { label: '农场', run: actions.openFarm },
         { label: '游戏', run: actions.openGames },
       ],
     },

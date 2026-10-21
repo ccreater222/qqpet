@@ -59,6 +59,17 @@ export const uiCommands = {
   socialVisit: (peerId: string, direction: 'incoming' | 'outgoing'): CommandFor<'social.completeLanVisit'> =>
     command('social.completeLanVisit', { peerId, direction }),
 
+  farmBuySeed: (seedId: string, quantity: number): CommandFor<'farm.buySeed'> =>
+    command('farm.buySeed', { seedId, quantity }),
+  farmPlant: (seedId: string, plotIds: number[]): CommandFor<'farm.plant'> =>
+    command('farm.plant', { seedId, plotIds }),
+  farmCare: (plotIds: number[], action: 'water' | 'weed' | 'pest' | 'fertilize'): CommandFor<'farm.care'> =>
+    command('farm.care', { plotIds, action }),
+  farmHarvest: (plotIds: number[]): CommandFor<'farm.harvest'> => command('farm.harvest', { plotIds }),
+  farmClear: (plotIds: number[]): CommandFor<'farm.clear'> => command('farm.clear', { plotIds }),
+  farmSellProduce: (itemId: string, quantity: number): CommandFor<'farm.sellProduce'> =>
+    command('farm.sellProduce', { itemId, quantity }),
+
   signIn: (): CommandFor<'signin.sign'> => command('signin.sign', {}),
   drawGrowth: (): CommandFor<'signin.drawGrowth'> => command('signin.drawGrowth', {}),
   claimOnlineGift: (): CommandFor<'signin.claimOnlineGift'> => command('signin.claimOnlineGift', {}),
