@@ -554,6 +554,7 @@ test('runtime boot with an existing pet starts presentation only, never the lega
     openFishing: () => menuCalls.push('fishing'),
     openGames: () => menuCalls.push('games'),
     openFarm: () => menuCalls.push('farm'),
+    openIsland: () => menuCalls.push('island'),
     visitFriend: () => menuCalls.push('visit'),
     readopt: () => menuCalls.push('readopt'),
     bury: () => menuCalls.push('bury'),
@@ -565,8 +566,22 @@ test('runtime boot with an existing pet starts presentation only, never the lega
   const petMenu = runtimeMenuItems(true, menuActions)
   assert.deepEqual(petMenu.map(item => item.label), ['打开商城', '喂养宠物', '设置帮助', '宠物状态', '活动', '停止成长', '重新领养宠物', '退出宠物'])
   const activity = petMenu.find(item => item.label === '活动')
-  assert.deepEqual(activity.children.map(item => item.label), ['池塘', '农场', '游戏', '找朋友玩'])
+  assert.deepEqual(activity.children.map(item => item.label), ['池塘', '农场', '游戏', '企鹅岛', '找朋友玩'])
   assert.equal(petMenu.some(item => ['农场', '密室', '社区'].includes(item.label)), false)
+  const activityItem = (label) => {
+    const item = activity.children.find((child) => child.label === label)
+    assert.ok(item, `missing activity entry: ${label}`)
+    return item
+  }
+  activityItem('农场').run()
+  assert.deepEqual(menuCalls, ['farm'])
+  menuCalls.length = 0
+  activityItem('企鹅岛').run()
+  assert.deepEqual(menuCalls, ['island'])
+  menuCalls.length = 0
+  activityItem('找朋友玩').run()
+  assert.deepEqual(menuCalls, ['visit'])
+  menuCalls.length = 0
   petMenu.at(-1).run()
   assert.deepEqual(menuCalls, ['leave'])
   const emptyMenu = runtimeMenuItems(false, menuActions)

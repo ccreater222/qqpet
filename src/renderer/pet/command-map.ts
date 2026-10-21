@@ -59,6 +59,37 @@ export const uiCommands = {
   socialVisit: (peerId: string, direction: 'incoming' | 'outgoing'): CommandFor<'social.completeLanVisit'> =>
     command('social.completeLanVisit', { peerId, direction }),
 
+  islandArriveScene: (sceneId: string): CommandFor<'island.arriveScene'> =>
+    command('island.arriveScene', { sceneId }),
+  islandAcceptLetter: (fromNpcId: string, toNpcId: string): CommandFor<'island.acceptLetter'> =>
+    command('island.acceptLetter', { fromNpcId, toNpcId }),
+  islandDeliverLetter: (toNpcId: string): CommandFor<'island.deliverLetter'> =>
+    command('island.deliverLetter', { toNpcId }),
+  islandTurnInErrand: (npcId: string, errandId: string, itemId?: string): CommandFor<'island.turnInErrand'> =>
+    command('island.turnInErrand', { npcId, errandId, ...(itemId === undefined ? {} : { itemId }) }),
+  islandStartQuiz: (npcId: string, errandId: string): CommandFor<'island.startQuiz'> =>
+    command('island.startQuiz', { npcId, errandId }),
+  islandAnswerQuiz: (sessionToken: string, optionIndex: number): CommandFor<'island.answerQuiz'> =>
+    command('island.answerQuiz', { sessionToken, optionIndex }),
+  islandFightMonster: (monsterId: string, tactic: string): CommandFor<'island.fightMonster'> =>
+    command('island.fightMonster', { monsterId, tactic }),
+  islandClaimGrowthReward: (): CommandFor<'island.claimGrowthReward'> =>
+    command('island.claimGrowthReward', {}),
+  islandClaimTreasure: (): CommandFor<'island.claimTreasure'> =>
+    command('island.claimTreasure', {}),
+  islandGiftNpc: (npcId: string, itemId: string): CommandFor<'island.giftNpc'> =>
+    command('island.giftNpc', { npcId, itemId }),
+  islandTalkNpc: (npcId: string): CommandFor<'island.talkNpc'> =>
+    command('island.talkNpc', { npcId }),
+  islandVisitSpot: (spotId: string): CommandFor<'island.visitSpot'> =>
+    command('island.visitSpot', { spotId }),
+  islandChat: (npcId: string): CommandFor<'island.chat'> =>
+    command('island.chat', { npcId }),
+  islandPlayGame: (gameKey: string): CommandFor<'island.playGame'> =>
+    command('island.playGame', { gameKey }),
+  islandRefreshNews: (dayKey: string): CommandFor<'island.refreshNews'> =>
+    command('island.refreshNews', { dayKey }),
+
   farmBuySeed: (seedId: string, quantity: number): CommandFor<'farm.buySeed'> =>
     command('farm.buySeed', { seedId, quantity }),
   farmPlant: (seedId: string, plotIds: number[]): CommandFor<'farm.plant'> =>

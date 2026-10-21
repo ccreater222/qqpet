@@ -227,6 +227,9 @@ test('runtime navigation exposes converted panels and keeps unconverted E-F entr
   assert.match(control, /child\.name === '池塘'/)
   assert.match(control, /child\.name === '农场'/)
   assert.match(control, /child\.name === '游戏'/)
+  assert.match(control, /child\.name === '社区'/)
+  assert.match(control, /name: '企鹅岛'/)
+  assert.match(control, /run: openIslandRuntime/)
   assert.match(control, /name: '找朋友玩'/)
   assert.match(control, /runtimeProjectionMode/)
   const main = readFileSync(new URL('../../src/renderer/main.ts', import.meta.url), 'utf8')
@@ -236,7 +239,8 @@ test('runtime navigation exposes converted panels and keeps unconverted E-F entr
   assert.match(menu, /openGames/)
   assert.match(menu, /openFarm/)
   assert.match(menu, /visitFriend/)
-  assert.doesNotMatch(menu, /openIsland|openCommunity|openMstx|sendLetter/)
+  assert.match(menu, /openIsland/)
+  assert.doesNotMatch(menu, /openCommunity|openMstx|sendLetter/)
 })
 
 test('runtime social visit dispatches its command without LAN transport', async () => {
