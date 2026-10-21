@@ -564,6 +564,10 @@ test('portable import rejects out-of-bounds anchors by default and explicit clam
   if (beforeSession === undefined || afterSession === undefined) throw new Error('missing session')
   assert.equal(afterSession.expiresAtGameMs, beforeSession.expiresAtGameMs + skipped)
   assert.equal(afterSession.actorDeviceId, owner.deviceId)
+  assert.equal(afterJob.status, 'pending')
+  assert.equal(afterSession.status, 'active')
+  assert.equal(eventsOfType(h, 'reward.granted').filter(payload => payload.source === 'work').length, 0)
+  assert.equal(eventsOfType(h, 'game.sessionSettled').length, 0)
 
   const coverage = h.server.store.listSessionCoverage('default')
   assert.equal(coverage.filter(interval => interval.closeReason === 'import_replaced').length > 0, true)
@@ -617,6 +621,18 @@ test('future-skewed imports use wall now without backfill and beyond-window impo
   assert.equal(clampedState.pet.lastSchedulerWallMs, clock.now())
   assert.equal(clampedState.pet.gameTimeMs, unchanged.pet.gameTimeMs + clampedState.engine.clockSkippedMs)
   await owner.close()
+
+  const expectedGameTime = clampedState.pet.gameTimeMs
+  await h.server.stop()
+  const restartedStore = openDatabase(h.dbPath)
+  const restartedServer = new SyncServer(
+    { ...h.config, dbPath: h.dbPath, backupDir: join(h.directory, 'restart-backups') },
+    restartedStore,
+    { now: () => clock.now() },
+  )
+  await restartedServer.scheduler.runOnce()
+  assert.equal(restartedStore.loadCanonical('default').pet.gameTimeMs, expectedGameTime)
+  await restartedServer.stop()
 })
 
 test('exportForDetach archives authority and resumeServer enforces epoch fencing and reopens coverage', async t => {
