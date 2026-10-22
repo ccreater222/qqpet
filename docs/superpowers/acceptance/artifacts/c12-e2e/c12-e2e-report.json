@@ -1,223 +1,311 @@
 {
-  "startedAt": "2026-10-22T20:48:53.879Z",
+  "schemaVersion": 2,
+  "startedAt": "2026-10-22T23:19:07.369Z",
+  "codeRevision": "90f410f0758a0e5b5ce4b6e792e3696210548d2a",
   "platform": "darwin",
   "arch": "arm64",
   "node": "v22.19.0",
-  "electron": "/Users/ccreater/Desktop/work/qqpet/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
   "steps": [
     {
-      "name": "compile standalone server and Electron main harness",
+      "name": "compile compiled desktop app and standalone server",
       "status": "pass",
-      "durationMs": 258,
+      "durationMs": 1408,
       "detail": {
-        "serverEntry": "/Users/ccreater/Desktop/work/qqpet/server/dist/server/src/index.js",
-        "harnessEntry": "/Users/ccreater/Desktop/work/qqpet/out/e2e/electron-harness.mjs"
+        "desktopEntry": "out/main/index.js",
+        "serverEntry": "server/dist/server/src/index.js"
       }
     },
     {
-      "name": "initialize temporary SQLite WAL server and mint real pairing codes",
+      "name": "initialize temporary SQLite WAL database and mint owner/player pairing codes",
       "status": "pass",
-      "durationMs": 150,
+      "durationMs": 139,
       "detail": {
-        "dbPath": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/qqpet.sqlite",
-        "pairingExpiresAtMs": 1792702734216,
-        "authorityId": "712c6e7a-3ec7-45d9-849a-b5b234dc292e"
+        "temporarySqlite": true,
+        "journalMode": "wal",
+        "authorityIdHash": "ee0a1dc4f521fed3cf3ce708dec12683c28cde92ed8dd3ab2781703217eb430d",
+        "duplicatePairingCodes": false
       }
     },
     {
-      "name": "start real standalone server and verify WAL + synchronous=FULL health",
+      "name": "start real standalone server and verify WAL/synchronous=FULL health",
       "status": "pass",
-      "durationMs": 122,
+      "durationMs": 114,
       "detail": {
+        "pid": 57044,
+        "ready": true,
         "journalMode": "wal",
         "synchronous": "full",
-        "authorityId": "712c6e7a-3ec7-45d9-849a-b5b234dc292e",
-        "revision": 0,
-        "gameTimeMs": 1792702134213
+        "dbWritable": true,
+        "quickCheck": "ok"
       }
     },
     {
-      "name": "launch two real Electron processes with distinct userData and pair owner/player",
+      "name": "launch owner Electron app with real BrowserWindow and preload renderer",
       "status": "pass",
-      "durationMs": 504,
+      "durationMs": 655,
       "detail": {
-        "ownerPid": 93020,
-        "playerPid": 93022,
-        "ownerDeviceId": "0c24dba2-f1dd-406c-8668-83778c33b1a3",
-        "playerDeviceId": "f9fa6090-ecb0-4801-8c6c-0641e0429b28",
-        "ownerUserData": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/electron-owner",
-        "playerUserData": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/electron-player"
+        "mainPid": 57048,
+        "rendererUrl": "app://bundle/index.html",
+        "userDataIsolated": true,
+        "storageApi": "window.qqpet.storage"
       }
     },
     {
-      "name": "first-run adopt on empty server and two-client convergence",
+      "name": "launch player Electron app with distinct userData and real BrowserWindow",
       "status": "pass",
-      "durationMs": 59,
+      "durationMs": 365,
+      "detail": {
+        "mainPid": 57073,
+        "distinctMainProcesses": true,
+        "distinctUserData": true,
+        "rendererUrl": "app://bundle/index.html"
+      }
+    },
+    {
+      "name": "pair owner via real renderer window.qqpet.storage API",
+      "status": "pass",
+      "durationMs": 77,
+      "detail": {
+        "role": "owner",
+        "paired": true,
+        "deviceIdHash": "fa6916d2ae3d89a82f60cabeef9a5eeed309a84e8b4c6104e59b3ae0b09cbda6",
+        "pairingInputSource": "window.qqpet.storage.pair"
+      }
+    },
+    {
+      "name": "switch owner renderer to server mode with use-server source",
+      "status": "pass",
+      "durationMs": 7,
+      "detail": {
+        "initialSource": "use-server",
+        "requestedMode": "server",
+        "activeMode": "server",
+        "authorityOwner": "server",
+        "authorityState": "active",
+        "connection": "online"
+      }
+    },
+    {
+      "name": "pair player via real renderer storage API and switch to server mode",
+      "status": "pass",
+      "durationMs": 141,
+      "detail": {
+        "role": "player",
+        "initialSource": "use-server",
+        "requestedMode": "server",
+        "activeMode": "server",
+        "deviceIdHash": "d8460b7f026c7d0d607dd427afa4e44587cb7b24f05e6b892ebc5d5aeb0da368",
+        "pairingAndModeSource": "window.qqpet.storage"
+      }
+    },
+    {
+      "name": "initial two-renderer projection convergence over real WebSocket",
+      "status": "pass",
+      "durationMs": 19,
+      "detail": {
+        "revision": 0,
+        "eventSeq": 0,
+        "projectionHash": "cc82c3fb95be5a1e4e61cb6a0514d62dc70c0363c7e9e1fc046b401d8ea55d26",
+        "activeClientCount": 2,
+        "websocketUrl": "ws://127.0.0.1:50367/v1/sync"
+      }
+    },
+    {
+      "name": "adopt pet from owner renderer and converge player renderer",
+      "status": "pass",
+      "durationMs": 217,
       "detail": {
         "revision": 1,
         "eventSeq": 2,
-        "hash": "7918e4dc718a31d0f56148a5e284d8cbc373d999894cfca41520f8fc1facf800",
-        "name": "宠宝~"
+        "projectionHash": "dce8fcd679083e2f39838ccbea98e9c2409e575a41f017dfb213d0ae3e2c2af1",
+        "adoptedName": "宠宝~"
       }
     },
     {
-      "name": "feed on instance A updates inventory/task and reaches instance B within 3s",
+      "name": "buy food from owner renderer and converge player renderer",
       "status": "pass",
-      "durationMs": 85,
+      "durationMs": 66,
+      "detail": {
+        "revision": 2,
+        "foodCount": 5,
+        "projectionHash": "b5507ed1c18948a528cbedfed8a5325498d59fb6e92482aa7871d573946e4f3f"
+      }
+    },
+    {
+      "name": "canonical feed from owner renderer reaches player renderer within 3s",
+      "status": "pass",
+      "durationMs": 159,
       "detail": {
         "revision": 3,
         "eventSeq": 6,
-        "hash": "e4e1ff444c081f1040d8f49f49c4ef55b20b36b71641e69c123df69ea93a87cd",
+        "projectionHash": "ee009e779e9f2fa058af0be9da2f99f02b63255364f230e8299828330a981895",
+        "playLatencyMs": 72,
         "eatTaskBefore": 0,
         "eatTaskAfter": 1,
         "foodBefore": 5,
         "foodAfter": 4,
-        "playerLatencyMs": 29
+        "playerProjectionUpdated": true
       }
     },
     {
-      "name": "duplicate opId is idempotent on the real server",
+      "name": "duplicate opId through renderer is idempotent",
       "status": "pass",
-      "durationMs": 159,
+      "durationMs": 332,
       "detail": {
-        "opId": "c12-duplicate-op",
-        "originalStatus": "applied",
+        "firstStatus": "applied",
+        "secondStatus": "duplicate",
+        "duplicateOriginal": "applied",
         "revision": 4,
         "commandSeq": 4,
-        "foodCount": 5
+        "projectionHash": "cf66523112b4d6ea5a2129bd0c73adf38effa8ba81d25cf2a908f1574d30b05d",
+        "foodCountUnchanged": true
       }
     },
     {
-      "name": "lost command result reconciles via commandStatus after reconnect without resend",
+      "name": "dropped projection frame triggers renderer revision-gap resync",
       "status": "pass",
-      "durationMs": 55,
+      "durationMs": 167,
       "detail": {
-        "opId": "c12-lost-result",
-        "status": "applied",
-        "revision": 5,
-        "commandSeq": 5,
-        "growthBefore": 1,
-        "growthAfter": 12,
-        "commandFramesForOp": 1,
-        "commandStatusReconciled": true
+        "droppedProjections": 1,
+        "sentResyncs": 1,
+        "firstCommandRevision": 5,
+        "secondCommandRevision": 6,
+        "recoveredRevision": 6,
+        "recoveredEventSeq": 9,
+        "projectionHash": "b069cd6c5a64bd1cb4bb31fa9dbfd684ac8d3e7fc497f6ea257e847427a027fd",
+        "resyncRecovered": true
       }
     },
     {
-      "name": "revision gap triggers resync and full snapshot convergence",
+      "name": "owner detach then resume restores authority and both renderer projections converge",
       "status": "pass",
-      "durationMs": 57,
-      "detail": {
-        "droppedProjectionRevision": 6,
-        "nextCommandRevision": 7,
-        "resyncRequests": 1,
-        "snapshotsReceived": 2,
-        "convergedRevision": 7,
-        "hash": "d86b3c6f0196f5c49d4b4d44c76db6785a25443e17d1ab4bdfdce9c2ccd60ea2"
-      }
-    },
-    {
-      "name": "device revoke closes the player Electron connection and preserves owner projection",
-      "status": "pass",
-      "durationMs": 568,
-      "detail": {
-        "revokedDeviceId": "f9fa6090-ecb0-4801-8c6c-0641e0429b28",
-        "playerState": "error",
-        "playerNotice": "device_revoked",
-        "playerProjectionPresent": false,
-        "playerCachePresent": false,
-        "ownerStillOnline": "online",
-        "ownerProjectionHashUnchanged": true
-      }
-    },
-    {
-      "name": "authority detach and resume recover to a full authoritative snapshot",
-      "status": "pass",
-      "durationMs": 718,
+      "durationMs": 1088,
       "detail": {
         "archivedEpoch": 0,
         "resumedEpoch": 2,
+        "authorityOwner": "server",
         "authorityState": "active",
-        "snapshotHashPreserved": true,
-        "snapshotsReceived": 5,
-        "healthAuthorityEpoch": 2
+        "ownerProjectionHashPreserved": true,
+        "playerProjectionConverged": true,
+        "convergedRevision": 7,
+        "convergedEventSeq": 9,
+        "projectionHash": "b069cd6c5a64bd1cb4bb31fa9dbfd684ac8d3e7fc497f6ea257e847427a027fd"
       }
     },
     {
-      "name": "create consistent online backup for later restore/authority-reset proof",
+      "name": "device revoke disconnects player renderer and forces read-only",
       "status": "pass",
-      "durationMs": 71,
+      "durationMs": 132,
       "detail": {
-        "backupPath": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/c12-pre-restart.sqlite",
-        "backupBytes": 139264,
-        "revision": 8,
-        "eventSeq": 10,
-        "gameTimeMs": 1792702134213,
-        "authorityId": "712c6e7a-3ec7-45d9-849a-b5b234dc292e",
-        "authorityEpoch": 2,
-        "restoreGeneration": 0
+        "revokedDeviceIdHash": "d8460b7f026c7d0d607dd427afa4e44587cb7b24f05e6b892ebc5d5aeb0da368",
+        "playerNotice": "device_revoked",
+        "playerConnection": "error",
+        "playerReadOnly": true,
+        "playerProjectionPresent": false,
+        "playerRepositoryState": "error",
+        "ownerStillOnline": "online",
+        "ownerAuthorityState": "active",
+        "ownerProjectionHashUnchanged": true,
+        "activeClientCount": 1
       }
     },
     {
-      "name": "server restart catch-up preserves state and advances game time",
+      "name": "real BrowserWindow/preload/renderer proof and evidence hygiene",
       "status": "pass",
-      "durationMs": 62414,
+      "durationMs": 28,
       "detail": {
-        "downtimeMs": 62000,
-        "revisionBefore": 8,
-        "revisionAfter": 9,
-        "gameTimeBefore": 1792702134213,
-        "gameTimeAfter": 1792702194213,
-        "gameTimeAdvancedMs": 60000,
-        "authorityIdPreserved": true,
-        "name": "宠宝~"
+        "electronMainPidsDistinct": true,
+        "browserWindowCount": 2,
+        "rendererProcessCount": 2,
+        "preloadApiExposed": true,
+        "contextIsolation": true,
+        "sandboxedPreload": true,
+        "nodeIntegrationDisabled": true,
+        "rendererDocumentLoaded": true,
+        "guiElementPresent": true,
+        "urls": [
+          "app://bundle/index.html"
+        ],
+        "titles": [
+          "QQ宠物"
+        ],
+        "electronVersion": "44.6.0",
+        "evidenceHygiene": {
+          "pairingCodesAbsent": true,
+          "rawDeviceIdsAbsent": true,
+          "tokensAbsent": true
+        }
       }
     },
     {
-      "name": "authority_reset_required after operator restore recovers to a full snapshot",
+      "name": "clean teardown of both Electron apps and standalone server",
       "status": "pass",
-      "durationMs": 429,
+      "durationMs": 371,
       "detail": {
-        "previousAuthorityId": "712c6e7a-3ec7-45d9-849a-b5b234dc292e",
-        "previousRestoreGeneration": 0,
-        "restoredAuthorityId": "945349a1-cb04-4a2d-be89-4f1a77344fa8",
-        "restoreGeneration": 1,
-        "authorityResetFrames": 1,
-        "snapshotsReceived": 2,
-        "snapshotRevision": 9,
-        "snapshotEventSeq": 11,
-        "snapshotHash": "3775f7e97ef34e8a859fddafe97d8ed20e3d7a68a86db040c0634573727d557e",
-        "recoveredName": "宠宝~"
-      }
-    },
-    {
-      "name": "projection/log secret and device-local field hygiene",
-      "status": "pass",
-      "durationMs": 1,
-      "detail": {
-        "canonicalProjectionForbiddenFieldsAbsent": true,
-        "deviceIdAbsentFromCanonicalProjection": true,
-        "tokensAndPairingCodesAbsentFromServerLog": true
+        "ownerExited": true,
+        "playerExited": true,
+        "serverExited": true
       }
     }
   ],
   "evidence": {
     "database": {
-      "path": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/qqpet.sqlite",
+      "temporarySqlite": true,
       "journalMode": "wal",
-      "synchronous": "full",
-      "backupPath": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/c12-pre-restart.sqlite",
-      "restoreGenerationFile": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/restore-generation.txt"
+      "synchronous": "full"
     },
+    "teardown": true,
     "twoProcesses": true,
-    "realWebSocket": true,
     "realStandaloneServer": true,
-    "guiCoverage": false
+    "realWebSocket": true,
+    "realElectron": true,
+    "realRenderer": true,
+    "rendererCoverage": true,
+    "guiCoverage": true,
+    "ownerPid": 57048,
+    "playerPid": 57073,
+    "rendererProof": {
+      "electronMainPidsDistinct": true,
+      "browserWindowCount": 2,
+      "rendererProcessCount": 2,
+      "preloadApiExposed": true,
+      "contextIsolation": true,
+      "sandboxedPreload": true,
+      "nodeIntegrationDisabled": true,
+      "rendererDocumentLoaded": true,
+      "guiElementPresent": true,
+      "urls": [
+        "app://bundle/index.html"
+      ],
+      "titles": [
+        "QQ宠物"
+      ],
+      "electronVersion": "44.6.0"
+    },
+    "websocket": {
+      "serverUrl": "ws://127.0.0.1:50367/v1/sync",
+      "activeClientCountAtConvergence": 2
+    },
+    "scenarios": {
+      "ownerPairViaRendererStorage": true,
+      "playerPairAndServerModeViaRendererStorage": true,
+      "canonicalCommandCrossRenderer": true,
+      "duplicateOpId": true,
+      "revisionGapResyncRecovered": true,
+      "ownerDetachResumeRecovered": true,
+      "deviceRevokeDisconnectedPlayer": true
+    },
+    "hygiene": {
+      "pairingCodesAbsent": true,
+      "rawDeviceIdsAbsent": true,
+      "tokensAbsent": true
+    },
+    "stepCount": 18
   },
   "residualGap": [
-    "The Electron harness has no BrowserWindow or renderer. It exercises the real production RemoteRepository, real WebSocket transport, real Electron main-process boundary and real standalone server, but not renderer/GUI automation.",
-    "Two separate Electron OS processes with distinct QQPET_USER_DATA directories are used; full desktop shell startup, preload IPC and visual projection rendering are not covered by this automated test."
+    "Renderer automation drives the production contextBridge API inside real BrowserWindows; it does not perform pixel/OCR visual assertions or click through every UI pane.",
+    "Linux CI runs Electron under xvfb, so GPU compositing and platform-specific window-manager behavior are not asserted."
   ],
-  "finishedAt": "2026-10-22T20:49:59.534Z",
-  "result": "pass",
-  "serverLog": "{\"ts\":\"2026-10-22T20:49:59.306Z\",\"level\":\"info\",\"event\":\"server.started\",\"bind\":\"127.0.0.1\",\"port\":51697,\"wsPath\":\"/v1/sync\"}\n(node:96603) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
+  "finishedAt": "2026-10-22T23:19:12.859Z",
+  "result": "PASS"
 }
