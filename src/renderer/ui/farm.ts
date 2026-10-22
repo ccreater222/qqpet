@@ -70,16 +70,25 @@ function runtimeLandLabel(land: RuntimeLand, index: number): string {
   return `${index + 1} ${crop?.name ?? land.crop} ${progress}%${land.grass === undefined ? '' : ' 草'}${land.worm === undefined ? '' : ' 虫'}${land.farmland === 'FarmlandG' ? ' 旱' : ''}`
 }
 
-/** Projection-only plot labels; exported for the focused farm tests. */
-export function runtimeFarmPlotLabels(stored: string | undefined): string[] {
+function runtimeFarmPlots(stored: string | undefined): RuntimeLand[] {
   let parsed: RuntimeFarm = {}
   try {
     parsed = stored ? JSON.parse(stored) as RuntimeFarm : {}
   } catch {
     parsed = {}
   }
-  const plots = parsed.farmland ?? []
-  return Array.from({ length: 18 }, (_, index) => runtimeLandLabel(plots[index] ?? { farmland: index < 6 ? 'FarmlandS' : 'Wasteland' }, index))
+  const plots = Array.isArray(parsed.farmland) ? parsed.farmland : []
+  return Array.from({ length: 18 }, (_, index) => plots[index] ?? { farmland: index < 6 ? 'FarmlandS' : 'Wasteland' })
+}
+
+/** Projection-only plot labels; exported for the focused farm tests. */
+export function runtimeFarmPlotLabels(stored: string | undefined): string[] {
+  return runtimeFarmPlots(stored).map(runtimeLandLabel)
+}
+
+/** Selected plots that the current projection still marks as reclaimable. */
+export function runtimeFarmWastelandPlotIds(stored: string | undefined): number[] {
+  return runtimeFarmPlots(stored).flatMap((land, index) => land.farmland === 'Wasteland' ? [index] : [])
 }
 
 function openRuntimeFarm(): void {
@@ -122,9 +131,17 @@ function openRuntimeFarm(): void {
         if (selected.size === 0) { message = '请先选择地块'; render(); return }
         send(make(), ok)
       }, label)
+    const reclaimAction = (): HTMLDivElement =>
+      button('farmAct', () => {
+        const wasteland = new Set(runtimeFarmWastelandPlotIds(save.saveJsonData.farm))
+        const plotIds = chosen().filter((plotId) => wasteland.has(plotId))
+        if (plotIds.length === 0) { message = '请先选择荒地'; render(); return }
+        send(uiCommands.farmReclaim(plotIds), `开垦${plotIds.length}块荒地成功`)
+      }, '开垦荒地')
     host.append(div(
       'farmActions',
       button('farmAct', () => send(uiCommands.farmBuySeed(selectedSeed, 1), '购买成功'), '买1种子'),
+      reclaimAction(),
       plotAction('播种', () => uiCommands.farmPlant(selectedSeed, chosen()), '播种成功'),
       plotAction('浇水', () => uiCommands.farmCare(chosen(), 'water'), '浇水完成'),
       plotAction('除草', () => uiCommands.farmCare(chosen(), 'weed'), '除草完成'),

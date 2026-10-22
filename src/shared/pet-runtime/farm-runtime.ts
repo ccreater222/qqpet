@@ -224,6 +224,20 @@ export function farmPlant(context: HandlerContext, payload: CommandPayloadMap['f
   }
 }
 
+export function farmReclaim(context: HandlerContext, payload: CommandPayloadMap['farm.reclaim']): HandlerResult {
+  const farm = requireFarmReady(context)
+  const plots = uniquePlots(payload.plotIds)
+  for (const plotId of plots) {
+    const land = landAt(farm, plotId)
+    if (land.farmland !== 'Wasteland') reject('not_available', 'farm plot is not wasteland')
+  }
+  for (const plotId of plots) landAt(farm, plotId).farmland = 'FarmlandS'
+  return {
+    result: json({ reclaimed: plots.length }),
+    events: [farmChanged(context, farm, 'reclaim', { plots })],
+  }
+}
+
 export function farmHarvest(context: HandlerContext, payload: CommandPayloadMap['farm.harvest']): HandlerResult {
   const farm = requireFarmReady(context)
   const plots = uniquePlots(payload.plotIds)

@@ -82,6 +82,7 @@ import {
   farmClear,
   farmHarvest,
   farmPlant,
+  farmReclaim,
   farmSellProduce,
 } from './farm-runtime'
 import {
@@ -127,7 +128,7 @@ export const GROUP_E_COMMAND_TYPES = [
 /** Group F: deterministic fishing/farm command surface. */
 export const GROUP_F_COMMAND_TYPES = [
   'fishing.buy', 'fishing.feed', 'fishing.harvest', 'fishing.harvestAll', 'fishing.speedUp',
-  'farm.plant', 'farm.harvest', 'farm.care', 'farm.clear', 'farm.buySeed', 'farm.sellProduce',
+  'farm.plant', 'farm.reclaim', 'farm.harvest', 'farm.care', 'farm.clear', 'farm.buySeed', 'farm.sellProduce',
 ] as const satisfies readonly CommandKey[]
 
 export const C4A_COMMAND_TYPES = [...GROUP_E_COMMAND_TYPES, ...GROUP_F_COMMAND_TYPES] as const satisfies readonly CommandKey[]
@@ -242,6 +243,7 @@ export function executeCommand(
       case 'fishing.harvestAll': return executeHandler(state, ctx, context => fishingHarvestAll(context))
       case 'fishing.speedUp': return executeHandler(state, ctx, context => fishingSpeedUp(context))
       case 'farm.plant': return executeHandler(state, ctx, context => farmPlant(context, command.payload as never))
+      case 'farm.reclaim': return executeHandler(state, ctx, context => farmReclaim(context, command.payload as never))
       case 'farm.harvest': return executeHandler(state, ctx, context => farmHarvest(context, command.payload as never))
       case 'farm.care': return executeHandler(state, ctx, context => farmCare(context, command.payload as never))
       case 'farm.clear': return executeHandler(state, ctx, context => farmClear(context, command.payload as never))

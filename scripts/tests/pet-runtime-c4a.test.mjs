@@ -22,13 +22,15 @@ const {
   createRngState,
   levelAndCapsOf,
   stableStringify,
+  executeCommandIdempotent,
+  createPersistedRuntimeState,
   appendTravelPhoto,
   dayKeyAt,
 } = await import('../../src/shared/pet-runtime/index.ts')
 const {
   FRIES, FARM_CROPS, FARM_SEEDS, FARM_FERTILIZERS, ISLAND, PHOTOS, allGoods, EXAM_BANK, SOLD_IDS,
 } = await import('../../src/shared/pet-runtime/content/index.ts')
-const { COMMAND_TYPES } = await import('../../src/shared/sync/command-validation.ts')
+const { COMMAND_TYPES, parsePetCommand, validateCommandPayload } = await import('../../src/shared/sync/command-validation.ts')
 const { validateEngineState } = await import('../../src/shared/sync/portable.ts')
 const { validateSharedSaveJsonBlob, filterIslandCanonicalState } = await import('../../src/shared/sync/data-boundary.ts')
 const { createRuntimeRng, currentBoundarySeconds } = await import('../../src/shared/pet-runtime/runtime-helpers.ts')
@@ -174,7 +176,7 @@ test('Group E/F catalog is present and routed without unsupported fallback', () 
   ]
   const expectedF = [
     'fishing.buy', 'fishing.feed', 'fishing.harvest', 'fishing.harvestAll', 'fishing.speedUp',
-    'farm.plant', 'farm.harvest', 'farm.care', 'farm.clear', 'farm.buySeed', 'farm.sellProduce',
+    'farm.plant', 'farm.reclaim', 'farm.harvest', 'farm.care', 'farm.clear', 'farm.buySeed', 'farm.sellProduce',
   ]
   assert.deepEqual([...GROUP_E_COMMAND_TYPES], expectedE)
   assert.deepEqual([...GROUP_F_COMMAND_TYPES], expectedF)
@@ -209,6 +211,7 @@ test('Group E/F catalog is present and routed without unsupported fallback', () 
     'fishing.harvestAll': {},
     'fishing.speedUp': {},
     'farm.plant': { seedId: 'RadishSeed', plotIds: [0] },
+    'farm.reclaim': { plotIds: [6] },
     'farm.harvest': { plotIds: [0] },
     'farm.care': { plotIds: [0], action: 'water' },
     'farm.clear': { plotIds: [0] },
@@ -427,6 +430,83 @@ test('farm commands cover seeded shop, planting, care, harvest, warehouse and sa
   const sold = ok(harvested.state, 'farm.sellProduce', { itemId: 'Radish', quantity: 1 })
   assert.ok(sold.result.yb > 0)
   assert.equal(blob(sold.state, 'farm').warehouse.find(entry => entry.fruit === 'Radish').number, warehouse.number - 1)
+})
+
+test('farm reclaim validation is strict while duplicate ids are rejected by the handler', () => {
+  assert.equal(validateCommandPayload('farm.reclaim', { plotIds: [6, 7] }), true)
+  assert.deepEqual(parsePetCommand({ type: 'farm.reclaim', payload: { plotIds: [6, 7] } }), {
+    ok: true,
+    command: { type: 'farm.reclaim', payload: { plotIds: [6, 7] } },
+  })
+  for (const payload of [
+    {},
+    { plotIds: [] },
+    { plotIds: [6, -1] },
+    { plotIds: [6, 1.5] },
+    { plotIds: '6' },
+    { plotIds: [6], extra: true },
+  ]) {
+    assert.equal(validateCommandPayload('farm.reclaim', payload), false, JSON.stringify(payload))
+  }
+  // Duplicate ids are structurally valid and are rejected atomically by the handler.
+  assert.equal(validateCommandPayload('farm.reclaim', { plotIds: [6, 6] }), true)
+})
+
+test('farm reclaim converts only selected wasteland plots exactly once without rewards', () => {
+  const state = baseState()
+  const before = state.save
+  const outcome = ok(state, 'farm.reclaim', { plotIds: [6, 7] })
+  const farm = blob(outcome.state, 'farm')
+  assert.equal(farm.farmland.length, 18)
+  assert.deepEqual(farm.farmland.map((land) => land.farmland), [
+    'FarmlandS', 'FarmlandS', 'FarmlandS', 'FarmlandS', 'FarmlandS', 'FarmlandS',
+    'FarmlandS', 'FarmlandS',
+    'Wasteland', 'Wasteland', 'Wasteland', 'Wasteland', 'Wasteland', 'Wasteland', 'Wasteland', 'Wasteland', 'Wasteland', 'Wasteland',
+  ])
+  assert.equal(farm.farmland[6].crop, undefined)
+  assert.deepEqual(outcome.result, { reclaimed: 2 })
+  assert.equal(outcome.events.length, 1)
+  assert.equal(outcome.events[0].type, 'farm.changed')
+  assert.equal(outcome.events[0].payload.action, 'reclaim')
+  assert.deepEqual(outcome.events[0].payload.plots, [6, 7])
+  assert.equal(outcome.state.save.petInfo.yb, before.petInfo.yb)
+  assert.equal(outcome.state.save.petInfo.growth, before.petInfo.growth)
+  assert.equal(Number(farm.experience), 1)
+  assert.equal(Number(farm.rank), 1)
+  assert.deepEqual(farm.burden, [])
+  assert.deepEqual(farm.warehouse, [])
+
+  rejected(state, 'farm.reclaim', { plotIds: [0] }, {}, 'not_available')
+  rejected(state, 'farm.reclaim', { plotIds: [18] }, {}, 'not_available')
+  rejected(state, 'farm.reclaim', { plotIds: [6, 6] }, {}, 'invalid_payload')
+  rejected(state, 'farm.reclaim', { plotIds: [-1] }, {}, 'invalid_payload')
+})
+
+test('farm reclaim op-id replay is idempotent and a fresh op-id cannot reclaim twice', () => {
+  const petId = 'pet-farm-reclaim'
+  const deviceId = 'device-farm-reclaim'
+  const command = { type: 'farm.reclaim', payload: { plotIds: [6, 7] } }
+  const document = createPersistedRuntimeState(baseState())
+  const first = executeCommandIdempotent(petId, deviceId, document, command, context(document.engine), 'op-reclaim-1')
+  assert.equal(first.duplicate, false)
+  assert.equal(first.outcome.ok, true)
+  assert.deepEqual(first.outcome.result, { reclaimed: 2 })
+  const reclaimedFarm = blob(first.document.engine, 'farm')
+  assert.equal(reclaimedFarm.farmland[6].farmland, 'FarmlandS')
+  assert.equal(reclaimedFarm.farmland[7].farmland, 'FarmlandS')
+
+  const replay = executeCommandIdempotent(petId, deviceId, first.document, command, context(first.document.engine), 'op-reclaim-1')
+  assert.equal(replay.duplicate, true)
+  assert.equal(replay.outcome.ok, true)
+  assert.deepEqual(replay.outcome.result, { reclaimed: 2 })
+  assert.equal(replay.outcome.events.length, 0)
+  assert.equal(stableStringify(replay.document.engine), stableStringify(first.document.engine))
+
+  const secondAttempt = executeCommandIdempotent(petId, deviceId, first.document, command, context(first.document.engine), 'op-reclaim-2')
+  assert.equal(secondAttempt.duplicate, false)
+  assert.equal(secondAttempt.outcome.ok, false)
+  assert.equal(secondAttempt.outcome.error.code, 'not_available')
+  assert.equal(stableStringify(secondAttempt.document.engine), stableStringify(first.document.engine))
 })
 
 test('C4a fishing, farm and island content tables drift-check against renderer/SWF sources', () => {

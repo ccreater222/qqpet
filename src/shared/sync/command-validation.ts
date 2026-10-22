@@ -162,6 +162,7 @@ const commandPayloadValidators = {
   'fishing.harvestAll': emptyObject,
   'fishing.speedUp': emptyObject,
   'farm.plant': objectWith({ seedId: field(isNonEmptyString), plotIds: field(nonEmptyNonNegativeIntegerArray) }),
+  'farm.reclaim': objectWith({ plotIds: field(nonEmptyNonNegativeIntegerArray) }),
   'farm.harvest': objectWith({ plotIds: field(nonEmptyNonNegativeIntegerArray) }),
   'farm.care': objectWith({
     plotIds: field(nonEmptyNonNegativeIntegerArray),

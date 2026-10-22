@@ -974,6 +974,7 @@ Island/community AI-created prose remains client presentation. Server events con
 | `fishing.harvestAll` | `{}` | `src/renderer/pet/fishing.ts:192-203` | Harvest ripe fish atomically and update achievement counters. |
 | `fishing.speedUp` | `{}` | `src/renderer/pet/fishing.ts:178-190` | Validate daily PD uses, advance fish growth deterministically. |
 | `farm.plant` | `{ seedId: string; plotIds: number[] }` | `src/renderer/ui/farm.ts:86-95`; SWF callbacks | Validate seeds/plots/funds, consume, schedule crop maturity. |
+| `farm.reclaim` | `{ plotIds: number[] }` | `src/renderer/ui/farm.ts` runtime plot controls | Validate selected plots are unique, existing Wasteland plots; convert each to FarmlandS exactly once; no reward. |
 | `farm.harvest` | `{ plotIds: number[] }` | Same | Validate ripe plots, harvest, inventory/coins/task effects. |
 | `farm.care` | `{ plotIds: number[]; action: 'water' or 'weed' or 'pest' or 'fertilize' }` | Same | Validate/consume care items, update plot state. |
 | `farm.clear` | `{ plotIds: number[] }` | Same | Clear selected plots with canonical rules. |
@@ -1565,6 +1566,7 @@ export interface CommandPayloadMap {
   'fishing.harvestAll': Record<string, never>
   'fishing.speedUp': Record<string, never>
   'farm.plant': { seedId: string; plotIds: number[] }
+  'farm.reclaim': { plotIds: number[] }
   'farm.harvest': { plotIds: number[] }
   'farm.care': { plotIds: number[]; action: 'water' | 'weed' | 'pest' | 'fertilize' }
   'farm.clear': { plotIds: number[] }

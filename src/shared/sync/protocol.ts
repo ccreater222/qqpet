@@ -75,6 +75,7 @@ export interface CommandPayloadMap {
   'fishing.harvestAll': Record<string, never>
   'fishing.speedUp': Record<string, never>
   'farm.plant': { seedId: string; plotIds: number[] }
+  'farm.reclaim': { plotIds: number[] }
   'farm.harvest': { plotIds: number[] }
   'farm.care': { plotIds: number[]; action: 'water' | 'weed' | 'pest' | 'fertilize' }
   'farm.clear': { plotIds: number[] }
