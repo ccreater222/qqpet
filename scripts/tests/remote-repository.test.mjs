@@ -1734,3 +1734,48 @@ test('protocol validation rejects unsupported versions before the repository acc
     auth: { kind: 'token', token: TOKEN },
   }).ok, false)
 })
+
+test('deviceRevoked broadcast for another device leaves the live owner projection intact', async t => {
+  const server = new FakeServer()
+  const { repository, store } = await makeRepository(server)
+  t.after(() => repository.stop())
+  await repository.start()
+  const before = repository.getProjection()
+  assert.ok(before)
+  const connection = [...server.clients][0]
+  connection.emit({
+    t: 'deviceRevoked',
+    v: PROTOCOL_VERSION,
+    deviceId: PLAYER_DEVICE_ID,
+    revokedAtMs: GAME_TIME_MS,
+  })
+  await repository.flush()
+  assert.equal(repository.getStatus().notice, undefined)
+  assert.deepEqual(repository.getProjection()?.shared, before.shared)
+  assert.equal(repository.getProjection()?.revision, before.revision)
+  assert.equal(store.projectionCache === null, false)
+})
+
+test('archived owner can issue the detach/resume handoff commands through RemoteRepository', async t => {
+  const server = new FakeServer()
+  const { repository } = await makeRepository(server)
+  t.after(() => repository.stop())
+  await repository.start()
+  const connection = [...server.clients][0]
+  const current = repository.getProjection()
+  connection.emit(readyFrame(current.revision, current.eventSeq, ARCHIVED_AUTHORITY))
+  await until(() => repository.getStatus().authority.state === 'archived', 'archived ready')
+  assert.equal(repository.getStatus().readOnly, true)
+
+  const detached = await repository.command({ type: 'admin.exportForDetach', payload: {} }, { opId: 'op-archived-detach' })
+  assert.equal(detached.status, 'applied')
+  const resumed = await repository.command({
+    type: 'admin.resumeServer',
+    payload: { expectedEpoch: 7, bundle: fixtures.bundle },
+  }, { opId: 'op-archived-resume' })
+  assert.equal(resumed.status, 'applied')
+  assert.deepEqual(
+    connection.sent.filter(frame => frame.t === 'command').map(frame => frame.command.type),
+    ['admin.exportForDetach', 'admin.resumeServer'],
+  )
+})

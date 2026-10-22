@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["scripts/e2e/electron-harness.ts", "src/main/**/*", "src/shared/**/*"]
+}

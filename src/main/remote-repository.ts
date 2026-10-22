@@ -496,7 +496,19 @@ export class RemoteRepository {
       return this.rejected(command, opId, code, 'the server connection is not ready for commands') as CommandResult<K>
     }
     const authority = this.authority ?? this.projection?.authority
-    if (this.projection === null || authority === undefined || authority.state !== 'active' || this.projection.authority.state !== 'active') {
+    const activeAuthority = this.projection !== null
+      && authority !== undefined
+      && authority.state === 'active'
+      && this.projection.authority.state === 'active'
+    // Archived server authority still accepts the owner-only detach/resume
+    // handoff pair. All ordinary gameplay commands stay fenced.
+    const archivedHandoffCommand = this.projection !== null
+      && authority !== undefined
+      && authority.state === 'archived'
+      && this.projection.authority.state === 'archived'
+      && this.role === 'owner'
+      && (parsed.command.type === 'admin.exportForDetach' || parsed.command.type === 'admin.resumeServer')
+    if (activeAuthority === false && archivedHandoffCommand === false) {
       return this.rejected(command, opId, 'authority_not_active', 'the server authority is not active for commands') as CommandResult<K>
     }
     if (isOwnerCommand(parsed.command.type) && this.role !== 'owner') {
@@ -812,6 +824,14 @@ export class RemoteRepository {
         this.handlePortableBundle(frame)
         break
       case 'deviceRevoked':
+        // The server broadcasts revocations to the surviving sessions. Only a
+        // frame naming this authenticated device revokes this repository;
+        // treating every broadcast as self-revocation would blank every other
+        // client's live projection.
+        if (this.config?.deviceId !== frame.deviceId) {
+          this.emitStatus()
+          break
+        }
         this.notice = 'device_revoked'
         this.lastError = 'the server revoked device ' + frame.deviceId
         this.discardProjectionForRevocation()
