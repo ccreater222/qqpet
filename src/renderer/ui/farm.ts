@@ -38,6 +38,7 @@ let closeFarm: (() => void) | null = null
 
 interface RuntimeSeed { seed: string; name: string; price: number; rank: number }
 interface RuntimeCrop { seed: string; crop: string; name: string; time: number; price: number }
+interface RuntimeFertilizer { item: string; name: string; duration: number; price: number }
 interface RuntimeLand { farmland: string; crop?: string; time?: number; harvest?: unknown; grass?: number; worm?: number; state?: number; progress?: number; yield?: number }
 interface RuntimeFarm {
   experience?: string | number
@@ -51,6 +52,7 @@ interface RuntimeFarm {
 
 const RUNTIME_SEEDS = FARM.seeds as RuntimeSeed[]
 const RUNTIME_CROPS = FARM.crops as RuntimeCrop[]
+const RUNTIME_FERTILIZERS = FARM.fertilizers as RuntimeFertilizer[]
 
 function runtimeFarmState(): RuntimeFarm {
   try {
@@ -70,31 +72,34 @@ function runtimeLandLabel(land: RuntimeLand, index: number): string {
   return `${index + 1} ${crop?.name ?? land.crop} ${progress}%${land.grass === undefined ? '' : ' 草'}${land.worm === undefined ? '' : ' 虫'}${land.farmland === 'FarmlandG' ? ' 旱' : ''}`
 }
 
-function runtimeFarmPlots(stored: string | undefined): RuntimeLand[] {
+function runtimeFarmPlots(stored: string | undefined): (RuntimeLand | null)[] {
   let parsed: RuntimeFarm = {}
   try {
     parsed = stored ? JSON.parse(stored) as RuntimeFarm : {}
   } catch {
     parsed = {}
   }
-  const plots = Array.isArray(parsed.farmland) ? parsed.farmland : []
-  return Array.from({ length: 18 }, (_, index) => plots[index] ?? { farmland: index < 6 ? 'FarmlandS' : 'Wasteland' })
+  if (Array.isArray(parsed.farmland)) {
+    return Array.from({ length: Math.max(18, parsed.farmland.length) }, (_, index) => parsed.farmland?.[index] ?? null)
+  }
+  return Array.from({ length: 18 }, (_, index) => ({ farmland: index < 6 ? 'FarmlandS' : 'Wasteland' }))
 }
 
 /** Projection-only plot labels; exported for the focused farm tests. */
 export function runtimeFarmPlotLabels(stored: string | undefined): string[] {
-  return runtimeFarmPlots(stored).map(runtimeLandLabel)
+  return runtimeFarmPlots(stored).map((land, index) => land === null ? (index + 1) + ' 未导入' : runtimeLandLabel(land, index))
 }
 
 /** Selected plots that the current projection still marks as reclaimable. */
 export function runtimeFarmWastelandPlotIds(stored: string | undefined): number[] {
-  return runtimeFarmPlots(stored).flatMap((land, index) => land.farmland === 'Wasteland' ? [index] : [])
+  return runtimeFarmPlots(stored).flatMap((land, index) => land !== null && land.farmland === 'Wasteland' ? [index] : [])
 }
 
 function openRuntimeFarm(): void {
   open = true
   farmStale = false
   let selectedSeed = RUNTIME_SEEDS[0]?.seed ?? ''
+  let selectedFertilizer = RUNTIME_FERTILIZERS[0]?.item ?? ''
   const selected = new Set<number>()
   let message = '选择种子和地块后操作，结果以下一次投影为准'
   const host = div('ui-farm-runtime')
@@ -106,8 +111,8 @@ function openRuntimeFarm(): void {
     const send = (command: unknown, ok: string): void => {
       void dispatchRuntimeCommand(command as never).then((result) => {
         // Rejections are presented once by the shared qqpet-command-error modal;
-        // a second inline farm message would duplicate the same failure.
-        if (commandSucceeded(result)) message = ok
+        // clear the old inline success so only that global error surface remains.
+        message = commandSucceeded(result) ? ok : ''
         render()
       })
     }
@@ -117,9 +122,21 @@ function openRuntimeFarm(): void {
       seeds.append(button(`farmSeed${seed.seed === selectedSeed ? ' selected' : ''}`, () => { selectedSeed = seed.seed; render() }, `${seed.name} ${seed.price}元宝 有${owned}`))
     }
     host.append(seeds)
+    const fertilizers = div('farmSeeds')
+    for (const fertilizer of RUNTIME_FERTILIZERS) {
+      const owned = state.burden?.find((entry) => entry.Items === fertilizer.item)?.number ?? 0
+      fertilizers.append(button('farmSeed' + (fertilizer.item === selectedFertilizer ? ' selected' : ''), () => { selectedFertilizer = fertilizer.item; render() }, fertilizer.name + ' ' + fertilizer.price + '元宝 有' + owned))
+    }
+    host.append(div('farmSectionTitle', '化肥'), fertilizers)
+    const plots = runtimeFarmPlots(save.saveJsonData.farm)
+    for (const index of selected) if (plots[index] === null) selected.delete(index)
     const labels = runtimeFarmPlotLabels(save.saveJsonData.farm)
     const grid = div('farmPlots')
-    for (let index = 0; index < 18; index++) {
+    for (let index = 0; index < plots.length; index++) {
+      if (plots[index] === null) {
+        grid.append(div('farmPlot missing', labels[index]))
+        continue
+      }
       grid.append(button(`farmPlot${selected.has(index) ? ' selected' : ''}`, () => {
         if (selected.has(index)) selected.delete(index)
         else selected.add(index)
@@ -143,6 +160,7 @@ function openRuntimeFarm(): void {
     host.append(div(
       'farmActions',
       button('farmAct', () => send(uiCommands.farmBuySeed(selectedSeed, 1), '购买成功'), '买1种子'),
+      button('farmAct', () => send(uiCommands.farmBuyFertilizer(selectedFertilizer, 1), '购买肥料成功'), '买1肥料'),
       reclaimAction(),
       plotAction('播种', () => uiCommands.farmPlant(selectedSeed, chosen()), '播种成功'),
       plotAction('浇水', () => uiCommands.farmCare(chosen(), 'water'), '浇水完成'),

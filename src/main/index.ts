@@ -66,10 +66,12 @@ app.whenReady().then(async () => {
   let rendererRuntime: DesktopRendererRuntime | null = null
   let storage: DesktopStorageController | null = null
   if (startupAuthority === 'runtime') {
-    // C7: the window must exist before catch-up can take time. This provisional
-    // view provides placement only; the repository's first projection replaces it.
-    loadEmptySaveView()
+    // C7: the window must exist before catch-up can take time. Read the
+    // device-local overlay synchronously first so window placement, zoom and
+    // X-HD headers are right from the first request; the first full projection
+    // replaces the rest of this provisional view.
     rendererRuntime = new DesktopRendererRuntime({ userDataPath })
+    loadEmptySaveView(rendererRuntime.previewDeviceOverlay())
     // C11: the storage controller picks the authoritative repository (local or
     // paired server) before any renderer command; server mode fences the local
     // writer via loadFenced and never lets both tick. Initialization runs after
@@ -88,7 +90,7 @@ app.whenReady().then(async () => {
     console.error('local runtime v2 document exists; refusing to start the legacy writer')
     dialog.showErrorBox(
       'QQPet 本地数据版本冲突',
-      '检测到本地运行时 v2 存档。为避免两个存档同时写入，请移除 QQPET_LOCAL_V2_ROLLBACK 后重试，或先备份并移走 save.v2.json。',
+      '检测到本地运行时 v2 存档。为避免两个存档同时写入，请移除 QQPET_LOCAL_V2_ROLLBACK 或 QQPET_LOCAL_REPOSITORY_V2=0 后重试，或先备份并移走 save.v2.json。',
     )
     app.quit()
     return
@@ -121,9 +123,13 @@ app.whenReady().then(async () => {
     cb(wc === win.webContents && types.length > 0 && types.every((t) => t === 'audio'))
   })
   // CSS keeps decoded images per stylesheet, so @2x bitmaps follow the hd setting as of launch only.
-  if (getSave().settings.hd) {
-    session.defaultSession.webRequest.onBeforeSendHeaders((d, cb) => cb({ requestHeaders: { ...d.requestHeaders, 'X-HD': '1' } }))
-  }
+  // The header callback stays installed: if the first projection arrives after the provisional
+  // preview (for example a fresh document), later asset requests still see X-HD.
+  session.defaultSession.webRequest.onBeforeSendHeaders((d, cb) => {
+    const requestHeaders = { ...d.requestHeaders }
+    if (getSave().settings.hd) requestHeaders['X-HD'] = '1'
+    cb({ requestHeaders })
+  })
 
   const win = createPetWindow()
   storage?.attachWindow(win)
@@ -437,7 +443,7 @@ app.whenReady().then(async () => {
     const start = Date.now()
     // Quitting with a game open closes the pet window first.
     openGameWindow(swf, panel ? win : undefined).on('closed', () => {
-      if (win.isDestroyed() === false) win.webContents.send(IPC.gamePlayed, (Date.now() - start) / 60000, windowId)
+      if (win.isDestroyed() === false) win.webContents.send(IPC.gamePlayed, (Date.now() - start) / 60000, windowId ?? -1)
     })
   })
   ipcMain.on(IPC.quit, () => app.quit())

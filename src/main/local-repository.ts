@@ -143,6 +143,34 @@ function commandError(message: string, code: CommandError['code'] = 'invalid_pay
 function cloneDocument(value: LocalPetDocumentV2): LocalPetDocumentV2 { return JSON.parse(JSON.stringify(value)) as LocalPetDocumentV2 }
 function cloneProjection(value: LocalPetProjection): LocalPetProjection { return JSON.parse(JSON.stringify(value)) as LocalPetProjection }
 
+export interface LocalDeviceOverlayPreviewOptions {
+  documentPath: string
+  legacySavePath?: string
+}
+
+/**
+ * C7 startup: synchronously read only the device-local overlay so the first
+ * window and its request headers use the persisted display/HD settings before
+ * the asynchronous repository load finishes. Falls back to a legacy save the
+ * repository would migrate on its first start. Never mutates anything.
+ */
+export function readLocalDeviceOverlayPreview(options: LocalDeviceOverlayPreviewOptions): DeviceLocalOverlay | null {
+  try {
+    if (existsSync(options.documentPath)) {
+      const parsed = JSON.parse(readFileSync(options.documentPath, 'utf8')) as unknown
+      const loaded = normalizeLocalPetDocument(parsed)
+      return JSON.parse(JSON.stringify(loaded.document.device)) as DeviceLocalOverlay
+    }
+    if (options.legacySavePath !== undefined && existsSync(options.legacySavePath)) {
+      const parsed = JSON.parse(readFileSync(options.legacySavePath, 'utf8')) as Record<string, unknown>
+      return toDeviceLocalOverlay(startSave(parsed), 'startup-preview')
+    }
+  } catch {
+    // The real loader owns recovery/error reporting; a preview must never block startup.
+  }
+  return null
+}
+
 export function normalizeLocalPetDocument(raw: unknown): LoadedDocument {
   let value = raw
   const record = value as Record<string, unknown> | null

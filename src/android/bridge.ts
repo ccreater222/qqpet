@@ -21,6 +21,7 @@ import {
   webCryptoAvailable,
   type MobileLocalRepositoryBridge,
 } from '../mobile/local-repository-bridge'
+import { forwardGamePlayed, forwardOpenGame } from '../mobile/game-played'
 
 /** The `QQPetNative` JavaScript interface of PetService. Async calls answer through `__qqpet.resolve(id, value, error)`. */
 interface Native {
@@ -41,7 +42,7 @@ interface Native {
   exportSave(id: number, name: string, text: string): void
   /** Resolves to the picked file's text, null when cancelled. */
   importSave(id: number): void
-  openGame(swf: string): void
+  openGame(swf: string, windowId: number): void
   quit(): void
   copyText(text: string): void
   openUrl(url: string): void
@@ -57,7 +58,7 @@ interface Native {
 
 interface Events {
   trayClick: TrayClick
-  gamePlayed: number
+  gamePlayed: number | { minutes: number; windowId?: number }
   /** A touch landed outside the overlay window. */
   outside: void
   /** Text picked from another app's selection menu or share sheet. */
@@ -359,7 +360,7 @@ const api: QQPetApi = {
     native.write(FILE, JSON.stringify(pet))
     relaunch()
   },
-  openGame: (swf) => native.openGame(swf),
+  openGame: (swf, windowId) => forwardOpenGame(native, swf, windowId),
   calendar: () => calendar(nativeFetch),
   aiModels: (c) => aiModels(nativeFetch, c),
   aiChat: (c, messages) => aiChat(nativeFetch, c, messages),
@@ -386,7 +387,7 @@ const api: QQPetApi = {
   onCursor: (l) => void cursorListeners.push(l),
   // The notification has no position; its panels open mid-screen, not under the status bar.
   onTrayClick: (l) => void listeners.trayClick.push((c) => l({ ...c, x: innerWidth / 2, y: innerHeight / 2 })),
-  onGamePlayed: (l) => void listeners.gamePlayed.push((minutes) => l(minutes, -1)),
+  onGamePlayed: (l) => void listeners.gamePlayed.push((payload) => forwardGamePlayed(l, payload)),
   // Android only lets the focused app read the clipboard; text arrives through the selection menu and share sheet instead.
   onClipboard: (l) => void listeners.clipboard.push(l),
   onPresence: (l) => void listeners.presence.push((away) => {

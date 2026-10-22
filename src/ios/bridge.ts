@@ -11,6 +11,7 @@ import { TRAY_STATES, trayTip } from '../shared/tray'
 import { latestRelease } from '../shared/update'
 import { weather } from '../shared/weather'
 import { gameRewards } from './game-rewards'
+import { openGameRequest } from './game-open'
 import { isFatalRufflePanic, readRufflePanic, type RufflePanic } from './diagnostics'
 import { startGeometry, type PetPointer } from './geometry'
 import { IOSRPC } from './rpc'
@@ -40,7 +41,7 @@ interface Insets {
 interface Events {
   cursor: Point
   trayClick: TrayClick
-  gamePlayed: number
+  gamePlayed: { minutes: number; windowId: number }
   clipboard: string
   presence: boolean
   front: string
@@ -121,7 +122,7 @@ let geometry: ReturnType<typeof startGeometry> | null = null
 let tray: TrayState = 'leave'
 let postedTray = ''
 let safeAreaRequest = 0
-const gamePlayed = gameRewards(() => ready, () => writer?.generation, (minutes) => emit('gamePlayed', minutes))
+const gamePlayed = gameRewards(() => ready, () => writer?.generation, (minutes, windowId) => emit('gamePlayed', { minutes, windowId }))
 
 function reportError(operation: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error)
@@ -473,7 +474,7 @@ const api: QQPetApi = {
     await flushRenderer()
     await replaceSave(startSave(pet), true)
   }),
-  openGame(swf) { void exclusive(async () => { await flushRenderer(); const { persistence } = requireOwner(); await rpc.request('openGame', { swf, generation: persistence.generation }) }).catch((error) => reportError('openGame', error)) },
+  openGame(swf, windowId) { void exclusive(async () => { await flushRenderer(); const { persistence } = requireOwner(); await rpc.request('openGame', openGameRequest(swf, windowId, persistence.generation)) }).catch((error) => reportError('openGame', error)) },
   closeGame: () => command('closeGame'),
   calendar: () => calendar(nativeFetch),
   aiModels: (config) => aiModels(nativeFetch, config),
@@ -511,7 +512,7 @@ const api: QQPetApi = {
   setTrayState(state) { tray = state; showTray() },
   onCursor: (listener) => listen('cursor', listener),
   onTrayClick: (listener) => listen('trayClick', listener),
-  onGamePlayed: (listener) => listen('gamePlayed', (minutes: number) => listener(minutes, -1)),
+  onGamePlayed: (listener) => listen('gamePlayed', (played) => listener(played.minutes, played.windowId)),
   onClipboard: (listener) => listen('clipboard', listener),
   onPresence: (listener) => listen('presence', (away) => {
     if (localRuntime !== null) void (away ? localRuntime.suspend() : localRuntime.resume())

@@ -170,6 +170,7 @@ const commandPayloadValidators = {
   }),
   'farm.clear': objectWith({ plotIds: field(nonEmptyNonNegativeIntegerArray) }),
   'farm.buySeed': objectWith({ seedId: field(isNonEmptyString), quantity: field(positiveInteger) }),
+  'farm.buyFertilizer': objectWith({ fertilizerId: field(isNonEmptyString), quantity: field(positiveInteger) }),
   'farm.sellProduce': objectWith({ itemId: field(isNonEmptyString), quantity: field(positiveInteger) }),
   'settings.setShared': sharedSetting,
   'server.setAdvanceWhileEmpty': objectWith({ enabled: field(isBoolean) }),

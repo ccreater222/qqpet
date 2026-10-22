@@ -979,6 +979,7 @@ Island/community AI-created prose remains client presentation. Server events con
 | `farm.care` | `{ plotIds: number[]; action: 'water' or 'weed' or 'pest' or 'fertilize' }` | Same | Validate/consume care items, update plot state. |
 | `farm.clear` | `{ plotIds: number[] }` | Same | Clear selected plots with canonical rules. |
 | `farm.buySeed` | `{ seedId: string; quantity: number }` | SWF shop callbacks / `ui/farm.ts` | Validate shop stock/funds, add seeds. |
+| `farm.buyFertilizer` | `{ fertilizerId: string; quantity: number }` | Runtime farm panel | Validate fertilizer catalog/funds, add farm burden. |
 | `farm.sellProduce` | `{ itemId: string; quantity: number }` | SWF warehouse callbacks / `ui/farm.ts` | Validate inventory, add yb, update state. |
 
 **High-risk note:** Farm rules currently live substantially in `Farm.swf` and Ruffle SharedObject/localStorage (`src/renderer/ui/farm.ts:8-15`, `48-82`). The server runtime must reimplement the canonical crop/pest/coin/reward rules and characterization tests must prove parity for the currently supported farm actions. Server mode cannot launch the client SWF as an authority. Failure to extract any current farm action is a release blocker, not a reason to hide farm in server mode or leave a client-side mutation; the human must explicitly change scope if that is impossible.
@@ -1571,6 +1572,7 @@ export interface CommandPayloadMap {
   'farm.care': { plotIds: number[]; action: 'water' | 'weed' | 'pest' | 'fertilize' }
   'farm.clear': { plotIds: number[] }
   'farm.buySeed': { seedId: string; quantity: number }
+  'farm.buyFertilizer': { fertilizerId: string; quantity: number }
   'farm.sellProduce': { itemId: string; quantity: number }
   'settings.setShared': {
     key: 'difficulty' | 'undying'

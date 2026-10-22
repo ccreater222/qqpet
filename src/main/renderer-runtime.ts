@@ -34,6 +34,7 @@ import type { PortablePetBundleV1 } from '../shared/sync/portable'
 import type { StorageBackupStatus, StorageMigrationStatus } from '../shared/storage'
 import {
   createLocalRepository,
+  readLocalDeviceOverlayPreview,
   type LocalPetProjection,
   type LocalRepository,
 } from './local-repository'
@@ -58,8 +59,8 @@ function hasLocalPatch(patch: DeviceLocalOverlayPatch): boolean {
 
 /**
  * Desktop host adapter for the C6 renderer contract. Constructing it is already
- * the explicit C6 assertion: the capability check requires both runtime env
- * flags plus a renderer-capable host, so legacy startup never reaches here.
+ * the explicit assertion that local v2 is the selected authority; rollback and
+ * the QQPET_LOCAL_REPOSITORY_V2=0 disable switch keep legacy startup away.
  */
 export class DesktopRendererRuntime {
   readonly repository: LocalRepository
@@ -108,6 +109,14 @@ export class DesktopRendererRuntime {
     }
     if (this.currentProjection === null) this.acceptProjection(projection)
     return clone(this.requireProjection().save)
+  }
+
+  /** Synchronous device-local overlay for the pre-load window/header setup. */
+  previewDeviceOverlay(): DeviceLocalOverlay | null {
+    return readLocalDeviceOverlayPreview({
+      documentPath: this.documentPath,
+      legacySavePath: this.legacySavePath,
+    })
   }
 
   attachWindow(window: BrowserWindow): void {

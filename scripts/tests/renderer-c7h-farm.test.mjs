@@ -22,6 +22,7 @@ function loadFarm(scope, expose) {
 
 test('farm intents map to exact typed command payloads', () => {
   assert.deepEqual(uiCommands.farmBuySeed('RadishSeed', 2), { type: 'farm.buySeed', payload: { seedId: 'RadishSeed', quantity: 2 } })
+  assert.deepEqual(uiCommands.farmBuyFertilizer('Fertilizer', 2), { type: 'farm.buyFertilizer', payload: { fertilizerId: 'Fertilizer', quantity: 2 } })
   assert.deepEqual(uiCommands.farmPlant('RadishSeed', [0, 1]), { type: 'farm.plant', payload: { seedId: 'RadishSeed', plotIds: [0, 1] } })
   assert.deepEqual(uiCommands.farmReclaim([6, 7]), { type: 'farm.reclaim', payload: { plotIds: [6, 7] } })
   assert.deepEqual(uiCommands.farmCare([0, 1], 'water'), { type: 'farm.care', payload: { plotIds: [0, 1], action: 'water' } })
@@ -73,8 +74,8 @@ test('runtime farm renders projection labels and farmNews never writes canonical
   assert.match(labels[1], /旱/)
   assert.match(labels[1], /草/)
   assert.match(labels[1], /胡萝卜/)
-  assert.match(labels[2], /空地/)
-  assert.deepEqual(Array.from(farm.runtimeFarmWastelandPlotIds(stored)), Array.from({ length: 12 }, (_, index) => index + 6))
+  assert.match(labels[2], /未导入/)
+  assert.deepEqual(Array.from(farm.runtimeFarmWastelandPlotIds(stored)), [])
   const news = await farm.farmNews()
   assert.deepEqual(JSON.parse(JSON.stringify(news)), { ripe: 1, pests: 1 })
   assert.deepEqual(writes, [])
@@ -290,7 +291,7 @@ function mountRuntimeFarm(stored, dispatch = async () => ({ status: 'applied' })
     openBox: (value) => { content = value; return () => {} },
     SwfPlayer: class {},
     window: { qqpet: { setFocusable: () => {} } },
-  }, 'openFarm, save')
+  }, 'openFarm, save, runtimeFarmPlotLabels, runtimeFarmWastelandPlotIds')
   farm.openFarm()
   assert.ok(content !== null)
   return {
@@ -302,6 +303,30 @@ function mountRuntimeFarm(stored, dispatch = async () => ({ status: 'applied' })
     projectionApplied() { projectionListener?.() },
   }
 }
+
+test('short imported farmland keeps missing indices non-actionable and out of reclaim', async () => {
+  const stored = JSON.stringify({
+    experience: '1', rank: '01', weather: 'Sunny', burden: [], warehouse: [],
+    farmland: [
+      { farmland: 'FarmlandS' },
+      { farmland: 'Wasteland' },
+    ],
+  })
+  const mounted = mountRuntimeFarm(stored)
+  assert.deepEqual(Array.from(mounted.farm.runtimeFarmWastelandPlotIds(stored)), [1])
+  assert.equal(findButton(mounted.content, '7 荒地'), null)
+  assert.match(nodeText(mounted.content), /3 未导入/)
+  const reclaimable = findButton(mounted.content, '2 荒地')
+  assert.ok(reclaimable)
+  reclaimable.click()
+  findButton(mounted.content, '开垦荒地').click()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(JSON.parse(JSON.stringify(mounted.calls)), [
+    { type: 'farm.reclaim', payload: { plotIds: [1] } },
+  ])
+  assert.deepEqual(mounted.writes, [])
+})
 
 test('runtime fertilize dispatches selected growing plots and renders authoritative info.yb wealth', async () => {
   const stored = JSON.stringify({
@@ -337,6 +362,19 @@ test('runtime fertilize dispatches selected growing plots and renders authoritat
   assert.deepEqual(mounted.writes, [])
 })
 
+test('fresh runtime farm UI can acquire fertilizer before fertilizing', async () => {
+  const mounted = mountRuntimeFarm(undefined)
+  const buy = findButton(mounted.content, '买1肥料')
+  assert.ok(buy)
+  buy.click()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(JSON.parse(JSON.stringify(mounted.calls)), [
+    { type: 'farm.buyFertilizer', payload: { fertilizerId: 'Fertilizer', quantity: 1 } },
+  ])
+  assert.match(nodeText(mounted.content), /购买肥料成功/)
+})
+
 test('runtime farm failure keeps exactly one global error surface and no inline duplicate', async () => {
   const stored = JSON.stringify({
     experience: 10, rank: 2, wealth: 999, weather: 'Sunny', burden: [], warehouse: [],
@@ -363,13 +401,42 @@ test('runtime farm failure keeps exactly one global error surface and no inline 
   assert.doesNotMatch(nodeText(mounted.content), /施肥完成/)
 })
 
+test('runtime farm rejection replaces a previous inline success message', async () => {
+  const stored = JSON.stringify({
+    experience: 10, rank: 2, weather: 'Sunny', burden: [], warehouse: [],
+    farmland: [{ farmland: 'FarmlandS', crop: 'RadishSeed', time: 1_700_000_000, state: 2, progress: 0.6 }],
+  })
+  let attempt = 0
+  const globalSurfaces = []
+  const mounted = mountRuntimeFarm(stored, async () => {
+    attempt++
+    if (attempt === 1) return { status: 'applied' }
+    const error = { code: 'insufficient_item', message: '背包里的物品不足' }
+    globalSurfaces.push({ type: 'qqpet-command-error', ...error })
+    return { status: 'rejected', error }
+  })
+
+  findButton(mounted.content, '1 白萝卜 60%').click()
+  findButton(mounted.content, '施肥').click()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.match(nodeText(mounted.content), /施肥完成/)
+
+  findButton(mounted.content, '施肥').click()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.doesNotMatch(nodeText(mounted.content), /施肥完成/)
+  assert.equal(globalSurfaces.length, 1)
+  assert.doesNotMatch(nodeText(mounted.content), /背包里的物品不足/)
+})
+
 test('runtime farm branch dispatches only commands and leaves the SWF path intact', () => {
   const source = readFileSync(new URL('../../src/renderer/ui/farm.ts', import.meta.url), 'utf8')
   const runtimeStart = source.indexOf('function openRuntimeFarm')
   const runtimeEnd = source.indexOf('\nfunction fresh', runtimeStart)
   assert.ok(runtimeStart >= 0 && runtimeEnd > runtimeStart)
   const runtimeBody = source.slice(runtimeStart, runtimeEnd)
-  for (const call of ['farmBuySeed', 'farmReclaim', 'farmPlant', 'farmCare', 'farmHarvest', 'farmClear', 'farmSellProduce']) {
+  for (const call of ['farmBuySeed', 'farmBuyFertilizer', 'farmReclaim', 'farmPlant', 'farmCare', 'farmHarvest', 'farmClear', 'farmSellProduce']) {
     assert.match(runtimeBody, new RegExp('uiCommands\\.' + call))
   }
   assert.match(runtimeBody, /farmCare\(chosen\(\), 'fertilize'\)/)

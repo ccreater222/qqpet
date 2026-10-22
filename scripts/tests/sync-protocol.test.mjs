@@ -47,7 +47,7 @@ const EXPECTED_COMMANDS = [
   'island.claimTreasure', 'island.giftNpc', 'island.talkNpc', 'island.visitSpot', 'island.chat',
   'island.playGame', 'island.refreshNews', 'fishing.buy', 'fishing.feed', 'fishing.harvest',
   'fishing.harvestAll', 'fishing.speedUp', 'farm.plant', 'farm.reclaim', 'farm.harvest', 'farm.care', 'farm.clear',
-  'farm.buySeed', 'farm.sellProduce', 'settings.setShared', 'server.setAdvanceWhileEmpty',
+  'farm.buySeed', 'farm.buyFertilizer', 'farm.sellProduce', 'settings.setShared', 'server.setAdvanceWhileEmpty',
   'server.setTimeZone', 'server.setWeatherCity', 'device.list', 'device.revoke',
   'admin.exportForDetach', 'admin.resumeServer', 'admin.importPortableBundle', 'admin.grantCheat',
   'admin.grantRandomGoods',
@@ -116,6 +116,7 @@ const VALID_PAYLOADS = {
   'farm.care': { plotIds: [0], action: 'water' },
   'farm.clear': { plotIds: [0] },
   'farm.buySeed': { seedId: 'seed-1', quantity: 2 },
+  'farm.buyFertilizer': { fertilizerId: 'Fertilizer', quantity: 1 },
   'farm.sellProduce': { itemId: 'produce-1', quantity: 1 },
   'settings.setShared': { key: 'difficulty', value: 'standard' },
   'server.setAdvanceWhileEmpty': { enabled: true },
@@ -155,7 +156,7 @@ test('the complete normative command catalog is present and every payload valida
   const spec = readFileSync(new URL('../../docs/superpowers/specs/2026-10-20-local-or-server-pet-data-design.md', import.meta.url), 'utf8')
   const payloadMapBlock = spec.split('export interface CommandPayloadMap {', 2)[1].split('\n}', 1)[0]
   const specCommands = [...payloadMapBlock.matchAll(/^\s*'([^']+)':/gm)].map(match => match[1])
-  assert.equal(COMMAND_TYPES.length, 74)
+  assert.equal(COMMAND_TYPES.length, 75)
   assert.deepEqual([...COMMAND_TYPES].sort(), specCommands.sort())
   assert.deepEqual([...COMMAND_TYPES].sort(), [...EXPECTED_COMMANDS].sort())
   assert.deepEqual(Object.keys(VALID_PAYLOADS).sort(), [...EXPECTED_COMMANDS].sort())
@@ -185,6 +186,9 @@ test('command parser rejects unknown types, missing payloads and non-command fie
   assert.equal(validateCommandPayload('farm.reclaim', { plotIds: [] }), false)
   assert.equal(validateCommandPayload('farm.reclaim', { plotIds: [6, -1] }), false)
   assert.equal(validateCommandPayload('farm.reclaim', { plotIds: [6], extra: true }), false)
+  assert.equal(validateCommandPayload('farm.buyFertilizer', { fertilizerId: 'Fertilizer', quantity: 1 }), true)
+  assert.equal(validateCommandPayload('farm.buyFertilizer', { fertilizerId: '', quantity: 1 }), false)
+  assert.equal(validateCommandPayload('farm.buyFertilizer', { fertilizerId: 'Fertilizer', quantity: 0 }), false)
   assert.equal(validateCommandPayload('settings.setShared', { key: 'difficulty', value: true }), false)
   assert.equal(validateCommandPayload('settings.setShared', { key: 'undying', value: true }), true)
   assert.equal(validateCommandPayload('settings.setShared', { key: 'undying', value: 'yes' }), false)

@@ -413,7 +413,7 @@ class PetService : Service() {
         }
 
         @JavascriptInterface
-        fun openGame(swf: String) = startActivity(Intent(this@PetService, GameActivity::class.java).putExtra("swf", swf).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        fun openGame(swf: String, windowId: Int) = startActivity(Intent(this@PetService, GameActivity::class.java).putExtra("swf", swf).putExtra("windowId", windowId).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 
         @JavascriptInterface
         fun quit() = stopSelf()

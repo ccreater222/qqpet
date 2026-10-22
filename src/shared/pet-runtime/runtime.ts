@@ -77,6 +77,7 @@ import {
   fishingSpeedUp,
 } from './fishing-runtime'
 import {
+  farmBuyFertilizer,
   farmBuySeed,
   farmCare,
   farmClear,
@@ -128,7 +129,7 @@ export const GROUP_E_COMMAND_TYPES = [
 /** Group F: deterministic fishing/farm command surface. */
 export const GROUP_F_COMMAND_TYPES = [
   'fishing.buy', 'fishing.feed', 'fishing.harvest', 'fishing.harvestAll', 'fishing.speedUp',
-  'farm.plant', 'farm.reclaim', 'farm.harvest', 'farm.care', 'farm.clear', 'farm.buySeed', 'farm.sellProduce',
+  'farm.plant', 'farm.reclaim', 'farm.harvest', 'farm.care', 'farm.clear', 'farm.buySeed', 'farm.buyFertilizer', 'farm.sellProduce',
 ] as const satisfies readonly CommandKey[]
 
 export const C4A_COMMAND_TYPES = [...GROUP_E_COMMAND_TYPES, ...GROUP_F_COMMAND_TYPES] as const satisfies readonly CommandKey[]
@@ -248,6 +249,7 @@ export function executeCommand(
       case 'farm.care': return executeHandler(state, ctx, context => farmCare(context, command.payload as never))
       case 'farm.clear': return executeHandler(state, ctx, context => farmClear(context, command.payload as never))
       case 'farm.buySeed': return executeHandler(state, ctx, context => farmBuySeed(context, command.payload as never))
+      case 'farm.buyFertilizer': return executeHandler(state, ctx, context => farmBuyFertilizer(context, command.payload as never))
       case 'farm.sellProduce': return executeHandler(state, ctx, context => farmSellProduce(context, command.payload as never))
       case 'settings.setShared': return executeHandler(state, ctx, context => settingsSetShared(context, command.payload as never))
       case 'server.setAdvanceWhileEmpty': return executeHandler(state, ctx, context => serverSetAdvanceWhileEmpty(context, command.payload as never))

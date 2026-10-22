@@ -92,6 +92,8 @@ export const uiCommands = {
 
   farmBuySeed: (seedId: string, quantity: number): CommandFor<'farm.buySeed'> =>
     command('farm.buySeed', { seedId, quantity }),
+  farmBuyFertilizer: (fertilizerId: string, quantity: number): CommandFor<'farm.buyFertilizer'> =>
+    command('farm.buyFertilizer', { fertilizerId, quantity }),
   farmPlant: (seedId: string, plotIds: number[]): CommandFor<'farm.plant'> =>
     command('farm.plant', { seedId, plotIds }),
   farmReclaim: (plotIds: number[]): CommandFor<'farm.reclaim'> =>

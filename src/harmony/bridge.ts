@@ -20,6 +20,7 @@ import {
   webCryptoAvailable,
   type MobileLocalRepositoryBridge,
 } from '../mobile/local-repository-bridge'
+import { forwardGamePlayed, forwardOpenGame } from '../mobile/game-played'
 
 /** The `QQPetNative` JavaScript interface of PetHost. Async calls answer through `__qqpet.resolve(id, value, error)`. */
 interface Native {
@@ -35,7 +36,7 @@ interface Native {
   http(id: number, method: string, url: string, headers: string, body: string): void
   exportSave(id: number, name: string, text: string): void
   importSave(id: number): void
-  openGame(swf: string): void
+  openGame(swf: string, windowId: number): void
   quit(): void
   copyText(text: string): void
   openUrl(url: string): void
@@ -48,7 +49,7 @@ interface Native {
 
 interface Events {
   trayClick: TrayClick
-  gamePlayed: number
+  gamePlayed: number | { minutes: number; windowId?: number }
   outside: void
   clipboard: string
   presence: boolean
@@ -362,7 +363,7 @@ const api: QQPetApi = {
     native.write(FILE, JSON.stringify(pet))
     relaunch()
   },
-  openGame: (swf) => native.openGame(swf),
+  openGame: (swf, windowId) => forwardOpenGame(native, swf, windowId),
   calendar: () => calendar(nativeFetch),
   aiModels: (c) => aiModels(nativeFetch, c),
   aiChat: (c, messages) => aiChat(nativeFetch, c, messages),
@@ -386,7 +387,7 @@ const api: QQPetApi = {
   },
   onCursor: (l) => void cursorListeners.push(l),
   onTrayClick: (l) => void listeners.trayClick.push((c) => l({ ...c, x: innerWidth / 2, y: innerHeight / 2 })),
-  onGamePlayed: (l) => void listeners.gamePlayed.push((minutes) => l(minutes, -1)),
+  onGamePlayed: (l) => void listeners.gamePlayed.push((payload) => forwardGamePlayed(l, payload)),
   onClipboard: (l) => void listeners.clipboard.push(l),
   onPresence: (l) => void listeners.presence.push((away) => {
     if (localRuntime !== null) void (away ? localRuntime.suspend() : localRuntime.resume())

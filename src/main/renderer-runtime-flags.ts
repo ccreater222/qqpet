@@ -1,4 +1,4 @@
-import { type LocalRepositoryCapability } from './local-repository'
+import { LOCAL_REPOSITORY_ENV_FLAG, type LocalRepositoryCapability } from './local-repository'
 
 /**
  * C7 local cutover: the shared local v2 runtime is the default writer on a
@@ -13,6 +13,9 @@ export function desktopRuntimeRollbackRequested(env: NodeJS.ProcessEnv = process
 }
 
 export function desktopRendererRuntimeCapability(env: NodeJS.ProcessEnv = process.env): LocalRepositoryCapability {
+  if (env[LOCAL_REPOSITORY_ENV_FLAG] === '0') {
+    return { flagEnabled: false, canActivate: false, activation: 'default-local-v2', reason: 'flag_disabled' }
+  }
   if (desktopRuntimeRollbackRequested(env)) {
     return { flagEnabled: true, canActivate: false, activation: 'default-local-v2', reason: 'rollback_flag' }
   }

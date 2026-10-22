@@ -197,7 +197,7 @@ export interface FarmSeedDefinition {
   type: string
 }
 
-export interface FarmFertilizerDefinition { item: string; name: string; duration: number }
+export interface FarmFertilizerDefinition { item: string; name: string; duration: number; price: number }
 
 export interface IslandFolkDefinition { key: string; scene: number; about: string }
 export interface IslandMonsterDefinition { name: string; scene: number; about: string }

@@ -8,6 +8,13 @@ const send =
   (arg?: unknown): void =>
     ipcRenderer.send(channel, arg)
 
+/** Some channels carry more than one argument; openGame needs its renderer window id. */
+const sendArgs =
+  (channel: string) =>
+  (...args: unknown[]): void => {
+    ipcRenderer.send(channel, ...args)
+  }
+
 const runtime = createRendererRuntimePreload(ipcRenderer)
 
 /** C11 storage/admin surface; desktop-only and routed through the storage controller. */
@@ -51,7 +58,7 @@ const api: QQPetApi = {
   resetPet: send(IPC.resetPet),
   exportSave: () => ipcRenderer.invoke(IPC.exportSave),
   importSave: () => ipcRenderer.invoke(IPC.importSave),
-  openGame: send(IPC.openGame),
+  openGame: sendArgs(IPC.openGame),
   calendar: () => ipcRenderer.invoke(IPC.calendar),
   aiModels: (c) => ipcRenderer.invoke(IPC.aiModels, c),
   aiChat: (c, messages) => ipcRenderer.invoke(IPC.aiChat, c, messages),

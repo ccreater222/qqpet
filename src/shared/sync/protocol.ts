@@ -80,6 +80,7 @@ export interface CommandPayloadMap {
   'farm.care': { plotIds: number[]; action: 'water' | 'weed' | 'pest' | 'fertilize' }
   'farm.clear': { plotIds: number[] }
   'farm.buySeed': { seedId: string; quantity: number }
+  'farm.buyFertilizer': { fertilizerId: string; quantity: number }
   'farm.sellProduce': { itemId: string; quantity: number }
   'settings.setShared': { key: 'difficulty' | 'undying'; value: boolean | 'easy' | 'standard' }
   'server.setAdvanceWhileEmpty': { enabled: boolean }

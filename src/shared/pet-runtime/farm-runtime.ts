@@ -350,6 +350,21 @@ export function farmBuySeed(context: HandlerContext, payload: CommandPayloadMap[
   }
 }
 
+export function farmBuyFertilizer(context: HandlerContext, payload: CommandPayloadMap['farm.buyFertilizer']): HandlerResult {
+  const farm = requireFarmReady(context)
+  const fertilizer = FARM_FERTILIZERS.find(item => item.item === payload.fertilizerId)
+  if (fertilizer === undefined) reject('not_available', 'unknown farm fertilizer')
+  const cost = fertilizer.price * payload.quantity
+  payYb(context.state.save, cost)
+  const entry = farm.burden.find(item => item.Items === payload.fertilizerId)
+  if (entry !== undefined) entry.number += payload.quantity
+  else farm.burden.push({ name: fertilizer.name, Items: fertilizer.item, number: payload.quantity })
+  return {
+    result: json({ fertilizerId: payload.fertilizerId, quantity: payload.quantity, cost }),
+    events: [farmChanged(context, farm, 'buyFertilizer', { fertilizerId: payload.fertilizerId, quantity: payload.quantity, cost })],
+  }
+}
+
 export function farmSellProduce(context: HandlerContext, payload: CommandPayloadMap['farm.sellProduce']): HandlerResult {
   const farm = requireFarmReady(context)
   const index = farm.warehouse.findIndex(item => item.fruit === payload.itemId)

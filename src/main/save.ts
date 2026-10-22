@@ -4,6 +4,8 @@ import { atomicWrite } from './atomic-write'
 import { join } from 'node:path'
 import type { SaveData, SavePatch, Sex } from '../shared/save'
 import { applyPatch, buried, petOf, startSave } from '../shared/save-logic'
+import type { DeviceLocalOverlay } from '../shared/sync/data-boundary'
+import { provisionalSaveView } from './startup-view'
 
 // Resolved lazily: a test sidecar swaps userData before the first use, and a
 // module-level const would freeze the path from before that swap.
@@ -59,8 +61,8 @@ export function loadSave(): SaveData {
 }
 
 /** Installs a provisional empty view while the runtime loads; it never writes the legacy file. */
-export function loadEmptySaveView(): SaveData {
-  save = startSave(null)
+export function loadEmptySaveView(overlay: DeviceLocalOverlay | null = null): SaveData {
+  save = provisionalSaveView(overlay)
   return save
 }
 

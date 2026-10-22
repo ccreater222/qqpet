@@ -188,8 +188,8 @@ export class Native {
     })
   }
 
-  openGame(swf: string): void {
-    host().openGame(swf)
+  openGame(swf: string, windowId?: number): void {
+    host().openGame(swf, windowId ?? -1)
   }
 
   quit(): void {

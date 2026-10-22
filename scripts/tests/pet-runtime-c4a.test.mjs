@@ -176,7 +176,7 @@ test('Group E/F catalog is present and routed without unsupported fallback', () 
   ]
   const expectedF = [
     'fishing.buy', 'fishing.feed', 'fishing.harvest', 'fishing.harvestAll', 'fishing.speedUp',
-    'farm.plant', 'farm.reclaim', 'farm.harvest', 'farm.care', 'farm.clear', 'farm.buySeed', 'farm.sellProduce',
+    'farm.plant', 'farm.reclaim', 'farm.harvest', 'farm.care', 'farm.clear', 'farm.buySeed', 'farm.buyFertilizer', 'farm.sellProduce',
   ]
   assert.deepEqual([...GROUP_E_COMMAND_TYPES], expectedE)
   assert.deepEqual([...GROUP_F_COMMAND_TYPES], expectedF)
@@ -216,6 +216,7 @@ test('Group E/F catalog is present and routed without unsupported fallback', () 
     'farm.care': { plotIds: [0], action: 'water' },
     'farm.clear': { plotIds: [0] },
     'farm.buySeed': { seedId: 'RadishSeed', quantity: 1 },
+    'farm.buyFertilizer': { fertilizerId: 'Fertilizer', quantity: 1 },
     'farm.sellProduce': { itemId: 'Radish', quantity: 1 },
   }
   for (const type of C4A_COMMAND_TYPES) {
@@ -432,6 +433,32 @@ test('farm commands cover seeded shop, planting, care, harvest, warehouse and sa
   assert.equal(blob(sold.state, 'farm').warehouse.find(entry => entry.fruit === 'Radish').number, warehouse.number - 1)
 })
 
+test('fresh runtime farm can buy fertilizer then fertilize a growing plot', () => {
+  const seed = FARM_SEEDS.find(candidate => candidate.seed === 'RadishSeed')
+  const fertilizer = FARM_FERTILIZERS.find(candidate => candidate.item === 'Fertilizer')
+  assert.ok(seed && fertilizer)
+  const boughtSeed = ok(baseState(), 'farm.buySeed', { seedId: 'RadishSeed', quantity: 1 })
+  const planted = ok(boughtSeed.state, 'farm.plant', { seedId: 'RadishSeed', plotIds: [0] })
+  const before = clone(planted.state)
+  const beforeFarm = blob(before, 'farm')
+  assert.equal(beforeFarm.burden.length, 0)
+
+  const bought = ok(before, 'farm.buyFertilizer', { fertilizerId: 'Fertilizer', quantity: 1 })
+  const afterBuy = blob(bought.state, 'farm')
+  assert.equal(afterBuy.burden.find(entry => entry.Items === 'Fertilizer').number, 1)
+  assert.equal(bought.state.save.petInfo.yb, before.save.petInfo.yb - fertilizer.price)
+
+  const fertilized = ok(bought.state, 'farm.care', { plotIds: [0], action: 'fertilize' })
+  const afterCare = blob(fertilized.state, 'farm')
+  assert.equal(afterCare.burden.length, 0)
+  assert.ok(afterCare.farmland[0].time < beforeFarm.farmland[0].time)
+
+  rejected(before, 'farm.buyFertilizer', { fertilizerId: 'MissingFertilizer', quantity: 1 }, {}, 'not_available')
+  const poor = clone(before)
+  poor.save.petInfo.yb = 0
+  rejected(poor, 'farm.buyFertilizer', { fertilizerId: 'Fertilizer', quantity: 1 }, {}, 'insufficient_funds')
+})
+
 test('farm reclaim validation is strict while duplicate ids are rejected by the handler', () => {
   assert.equal(validateCommandPayload('farm.reclaim', { plotIds: [6, 7] }), true)
   assert.deepEqual(parsePetCommand({ type: 'farm.reclaim', payload: { plotIds: [6, 7] } }), {
@@ -623,7 +650,8 @@ test('C4a fishing, farm and island content tables drift-check against renderer/S
     if (row.object && row.name) fertilizerNames[row.object] = row.name
   }
   const expectedFertilizers = Object.entries(fertilizerDurations).map(([item, duration]) => ({ item, name: fertilizerNames[item], duration }))
-  assert.deepEqual(FARM_FERTILIZERS, expectedFertilizers)
+  assert.deepEqual(FARM_FERTILIZERS.map(({ item, name, duration }) => ({ item, name, duration })), expectedFertilizers)
+  assert.ok(FARM_FERTILIZERS.every(({ price }) => Number.isSafeInteger(price) && price > 0))
   assert.throws(() => assert.deepEqual(FARM_FERTILIZERS, [...expectedFertilizers, { item: 'FertilizerSynthetic', name: '合成化肥', duration: 123 }]), assert.AssertionError)
   assert.throws(() => assert.deepEqual([...FARM_FERTILIZERS, { item: 'RuntimeOnly', name: '仅运行时', duration: 1 }], expectedFertilizers), assert.AssertionError)
 })
