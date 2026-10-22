@@ -5,6 +5,9 @@ on:
     tags: ['v*']
 
 jobs:
+  acceptance:
+    uses: ./.github/workflows/ci.yml
+
   build:
     strategy:
       fail-fast: false
@@ -130,7 +133,7 @@ jobs:
       version: ${{ github.ref_name }}
 
   release:
-    needs: [build, android, harmony, ios]
+    needs: [acceptance, build, android, harmony, ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write

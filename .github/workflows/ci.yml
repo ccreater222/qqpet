@@ -1,0 +1,93 @@
+name: C12 acceptance
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c12-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  root:
+    name: Root typecheck, compat tests and web builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      NODE_OPTIONS: --max-old-space-size=2048
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch upstream release tags for fork versions
+        if: github.repository != 'AnkioTomas/qqpet'
+        run: |
+          git -c 'http.https://github.com/.extraheader=' fetch --no-tags --no-recurse-submodules \
+            https://github.com/AnkioTomas/qqpet.git 'refs/tags/v*:refs/tags/v*'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run test:compat
+      - run: npm run build
+      - run: npm run build:android-web
+      - run: npm run build:harmony-web
+      - run: npm run build:ios-web
+
+  server:
+    name: Server typecheck and integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_OPTIONS: --max-old-space-size=2048
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
+      - run: npm --prefix server run typecheck
+      - run: npm --prefix server test
+
+  e2e:
+    name: Real server + two Electron process E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_OPTIONS: --max-old-space-size=2048
+      QQPET_E2E_ARTIFACTS: ${{ runner.temp }}/c12-e2e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+      - name: Install Electron runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends xvfb
+      - run: npm ci --no-audit --no-fund
+      - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
+      - name: Run real-server Electron E2E headlessly
+        run: xvfb-run -a npm run test:e2e
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c12-e2e-evidence
+          path: ${{ runner.temp }}/c12-e2e
+          if-no-files-found: warn
