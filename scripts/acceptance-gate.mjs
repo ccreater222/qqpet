@@ -22,7 +22,7 @@ const ACCEPTANCE_DIR = join(ROOT, 'docs/superpowers/acceptance')
 const REPORT_PATH = join(ACCEPTANCE_DIR, DATE + '-c12-final-gate.md')
 const E2E_ARTIFACT_DIR = join(ACCEPTANCE_DIR, 'artifacts/c12-e2e')
 const E2E_REPORT_PATH = join(E2E_ARTIFACT_DIR, 'c12-e2e-report.json')
-const LOG_TAIL_CHARS = 8000
+const FAILURE_TAIL_CHARS = 4000
 
 function runGit(args) {
   return new Promise(resolveRun => {
@@ -83,8 +83,15 @@ function runCommand(label, command, args, options = {}) {
 }
 
 function tail(text) {
-  if (text.length <= LOG_TAIL_CHARS) return text
-  return text.slice(text.length - LOG_TAIL_CHARS)
+  if (text.length <= FAILURE_TAIL_CHARS) return text
+  return text.slice(text.length - FAILURE_TAIL_CHARS)
+}
+
+function testSummary(text) {
+  const passLine = text.split('\n').filter(line => line.startsWith('# pass ')).at(-1)
+  const failLine = text.split('\n').filter(line => line.startsWith('# fail ')).at(-1)
+  if (passLine === undefined && failLine === undefined) return null
+  return [passLine, failLine].filter(Boolean).join(', ')
 }
 
 function fence(text) {
@@ -169,6 +176,15 @@ async function main() {
     lines.push('')
     lines.push('Gate stopped after the first failure; remaining commands were not executed.')
   }
+  const summaries = results
+    .map(result => ({ label: result.label, summary: testSummary(result.stdout + result.stderr) }))
+    .filter(item => item.summary !== null)
+  if (summaries.length > 0) {
+    lines.push('')
+    lines.push('Observed node:test summaries:')
+    lines.push('')
+    for (const item of summaries) lines.push('- ' + item.label + ': `' + item.summary + '`')
+  }
   lines.push('')
   lines.push('Equivalent server command sequence: `cd server && npm run typecheck && npm test`.')
   lines.push('Equivalent mobile web sequence: `npm run build:android-web`,'
@@ -225,18 +241,21 @@ async function main() {
     lines.push('No E2E JSON report was produced. Treat the gate as failed unless the command'
       + ' failure above is explained and the E2E is rerun successfully.')
   }
-  lines.push('')
-  lines.push('## Captured output tails')
-  lines.push('')
-  for (const result of results) {
-    lines.push('### ' + result.label + ' (`exit ' + result.code + '`)')
+  const failures = results.filter(result => result.code !== 0)
+  if (failures.length > 0) {
     lines.push('')
-    if (result.error) {
-      lines.push(fence(result.error))
+    lines.push('## Failure output')
+    lines.push('')
+    for (const result of failures) {
+      lines.push('### ' + result.label + ' (`exit ' + result.code + '`)')
+      lines.push('')
+      if (result.error) {
+        lines.push(fence(result.error))
+        lines.push('')
+      }
+      lines.push(fence(tail((result.stdout + result.stderr).trim() || '(no output)')))
       lines.push('')
     }
-    lines.push(fence(tail((result.stdout + result.stderr).trim() || '(no output)')))
-    lines.push('')
   }
   await writeFile(REPORT_PATH, lines.join('\n') + '\n')
   process.stdout.write('\n[gate] report: ' + REPORT_PATH + '\n')
