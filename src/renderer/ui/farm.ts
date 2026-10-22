@@ -1,7 +1,7 @@
-import { avatar, info, onProjectionApplied, onSaveFlush, runtimeProjectionMode, save, scaleYb, setInfo, update } from '../pet/store'
+import { avatar, currentProjectionView, info, onProjectionApplied, onSaveFlush, runtimeProjectionMode, save, scaleYb, setInfo, update } from '../pet/store'
 import { registerProjectionCacheInvalidator } from '../pet/projection-cache'
 import { uiCommands } from '../pet/command-map'
-import { commandErrorText, commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
+import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import FARM from '../../shared/pet-runtime/content/farm.json'
 import { SwfPlayer } from '../swf/player'
 import { readSol, writeSol, type Sol } from '../swf/sol'
@@ -102,10 +102,12 @@ function openRuntimeFarm(): void {
     const state = runtimeFarmState()
     host.textContent = ''
     const rank = Number(state.rank ?? 1)
-    host.append(div('farmHeader', `农场 Lv${rank} 经验${state.experience ?? 0} 天气${state.weather ?? 'Sunny'} 元宝${state.wealth ?? info.yb}`))
+    host.append(div('farmHeader', `农场 Lv${rank} 经验${state.experience ?? 0} 天气${state.weather ?? 'Sunny'} 元宝${info.yb}`))
     const send = (command: unknown, ok: string): void => {
       void dispatchRuntimeCommand(command as never).then((result) => {
-        message = commandSucceeded(result) ? ok : (result !== null && result.status === 'rejected' ? commandErrorText(result.error) : '操作失败')
+        // Rejections are presented once by the shared qqpet-command-error modal;
+        // a second inline farm message would duplicate the same failure.
+        if (commandSucceeded(result)) message = ok
         render()
       })
     }
@@ -146,6 +148,7 @@ function openRuntimeFarm(): void {
       plotAction('浇水', () => uiCommands.farmCare(chosen(), 'water'), '浇水完成'),
       plotAction('除草', () => uiCommands.farmCare(chosen(), 'weed'), '除草完成'),
       plotAction('除虫', () => uiCommands.farmCare(chosen(), 'pest'), '除虫完成'),
+      plotAction('施肥', () => uiCommands.farmCare(chosen(), 'fertilize'), '施肥完成'),
       plotAction('收获', () => uiCommands.farmHarvest(chosen()), '收获成功'),
       plotAction('铲除', () => uiCommands.farmClear(chosen()), '铲除成功'),
     ))
@@ -289,13 +292,20 @@ export async function farmNews(): Promise<{ ripe: number; pests: number } | null
     } catch {
       return null
     }
-    const now = Math.floor(Date.now() / 1000)
+    const view = currentProjectionView()
+    const gameNow = view !== null && Number.isFinite(view.gameTimeMs) ? Math.floor(view.gameTimeMs / 1000) : null
     let ripe = 0
     let pests = 0
     for (const land of user.farmland ?? []) {
       if (land.crop === undefined || land.harvest !== undefined) continue
       const crop = RUNTIME_CROPS.find((entry) => entry.seed === land.crop)
-      if (Number(land.state ?? 0) >= 5 || (crop !== undefined && now - Number(land.time ?? now) >= crop.time)) { ripe++; continue }
+      // state/progress are canonical projections of maturity. If an imported
+      // blob lacks them, age may only be measured with the projection clock;
+      // wall time runs through pauses and catch-up at a different rate.
+      const canonicalRipe = Number(land.state ?? 0) >= 5 || Number(land.progress ?? 0) >= 1
+      const ageRipe = gameNow !== null && crop !== undefined && land.time !== undefined
+        && gameNow - Number(land.time) >= crop.time
+      if (canonicalRipe || ageRipe) { ripe++; continue }
       if (land.grass !== undefined || land.worm !== undefined || land.farmland === 'FarmlandG') pests++
     }
     return { ripe, pests }

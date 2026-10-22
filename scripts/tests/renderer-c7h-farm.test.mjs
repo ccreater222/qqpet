@@ -25,6 +25,7 @@ test('farm intents map to exact typed command payloads', () => {
   assert.deepEqual(uiCommands.farmPlant('RadishSeed', [0, 1]), { type: 'farm.plant', payload: { seedId: 'RadishSeed', plotIds: [0, 1] } })
   assert.deepEqual(uiCommands.farmReclaim([6, 7]), { type: 'farm.reclaim', payload: { plotIds: [6, 7] } })
   assert.deepEqual(uiCommands.farmCare([0, 1], 'water'), { type: 'farm.care', payload: { plotIds: [0, 1], action: 'water' } })
+  assert.deepEqual(uiCommands.farmCare([3, 4], 'fertilize'), { type: 'farm.care', payload: { plotIds: [3, 4], action: 'fertilize' } })
   assert.deepEqual(uiCommands.farmHarvest([2]), { type: 'farm.harvest', payload: { plotIds: [2] } })
   assert.deepEqual(uiCommands.farmClear([2]), { type: 'farm.clear', payload: { plotIds: [2] } })
   assert.deepEqual(uiCommands.farmSellProduce('Radish', 3), { type: 'farm.sellProduce', payload: { itemId: 'Radish', quantity: 3 } })
@@ -46,6 +47,7 @@ test('runtime farm renders projection labels and farmNews never writes canonical
     runtimeProjectionMode: true,
     info: { yb: 500, name: 'pet' },
     save: { saveJsonData: { farm: stored }, petInfo: { yb: 500, name: 'pet' } },
+    currentProjectionView: () => ({ gameTimeMs: now * 1000, timeZone: 'UTC' }),
     location: { hostname: 'test' },
     localStorage: { getItem: () => null, setItem: () => {} },
     registerProjectionCacheInvalidator: () => {},
@@ -75,6 +77,51 @@ test('runtime farm renders projection labels and farmNews never writes canonical
   assert.deepEqual(Array.from(farm.runtimeFarmWastelandPlotIds(stored)), Array.from({ length: 12 }, (_, index) => index + 6))
   const news = await farm.farmNews()
   assert.deepEqual(JSON.parse(JSON.stringify(news)), { ripe: 1, pests: 1 })
+  assert.deepEqual(writes, [])
+  assert.equal(farm.save.saveJsonData.farm, stored)
+})
+
+test('runtime farmNews derives ripeness from canonical progress and the projection clock, not wall time', async () => {
+  const wallNow = Math.floor(Date.now() / 1000)
+  const gameNow = wallNow - 200_000
+  const stored = JSON.stringify({
+    experience: 10,
+    rank: 2,
+    weather: 'Sunny',
+    // If wall time were authoritative, this newly sown plot would be ripe.
+    // Canonical progress says it is still growing, and the projection clock agrees.
+    farmland: [
+      { farmland: 'FarmlandS', crop: 'RadishSeed', time: gameNow - 10, state: 0, progress: 10 / 50400 },
+      // No progress/state on an imported land: its age may only use projection game time.
+      { farmland: 'FarmlandS', crop: 'RadishSeed', time: gameNow - 50400 },
+    ],
+  })
+  const writes = []
+  const farm = loadFarm({
+    runtimeProjectionMode: true,
+    info: { yb: 500, name: 'pet' },
+    save: { saveJsonData: { farm: stored }, petInfo: { yb: 500, name: 'pet' } },
+    currentProjectionView: () => ({ gameTimeMs: gameNow * 1000, timeZone: 'UTC' }),
+    location: { hostname: 'test' },
+    localStorage: { getItem: () => null, setItem: () => {} },
+    registerProjectionCacheInvalidator: () => {},
+    update: (...args) => writes.push(['update', ...args]),
+    setInfo: (...args) => writes.push(['setInfo', ...args]),
+    writeSol: (...args) => writes.push(['writeSol', ...args]),
+    readSol: () => null,
+    onSaveFlush: () => () => {},
+    onProjectionApplied: () => () => {},
+    FARM,
+    div: () => ({ append: () => {}, textContent: '' }),
+    button: () => ({ append: () => {}, addEventListener: () => {} }),
+    img: () => ({}),
+    avatar: () => '',
+    scaleYb: (value) => value,
+    openBox: () => () => {},
+    SwfPlayer: class {},
+    window: { qqpet: { setFocusable: () => {} } },
+  }, 'farmNews, save')
+  assert.deepEqual(JSON.parse(JSON.stringify(await farm.farmNews())), { ripe: 1, pests: 0 })
   assert.deepEqual(writes, [])
   assert.equal(farm.save.saveJsonData.farm, stored)
 })
@@ -138,6 +185,7 @@ test('runtime reclaim control dispatches selected wasteland ids and rerenders fr
     runtimeProjectionMode: true,
     info: { yb: 500, name: 'pet' },
     save: { saveJsonData: { farm: stored }, petInfo: { yb: 500, name: 'pet' } },
+    currentProjectionView: () => ({ gameTimeMs: 1_700_000_000_000, timeZone: 'UTC' }),
     location: { hostname: 'test' },
     localStorage: { getItem: () => null, setItem: () => {} },
     registerProjectionCacheInvalidator: () => {},
@@ -198,6 +246,123 @@ test('runtime reclaim control dispatches selected wasteland ids and rerenders fr
   assert.deepEqual(writes, [])
 })
 
+function mountRuntimeFarm(stored, dispatch = async () => ({ status: 'applied' })) {
+  const info = { yb: 500, name: 'pet' }
+  const calls = []
+  const writes = []
+  let content = null
+  let projectionListener = null
+  const farm = loadFarm({
+    runtimeProjectionMode: true,
+    info,
+    save: { saveJsonData: { farm: stored }, petInfo: { yb: 500, name: 'pet' } },
+    currentProjectionView: () => ({ gameTimeMs: 1_700_000_000_000, timeZone: 'UTC' }),
+    location: { hostname: 'test' },
+    localStorage: { getItem: () => null, setItem: () => {} },
+    registerProjectionCacheInvalidator: () => {},
+    update: (...args) => writes.push(['update', ...args]),
+    setInfo: (...args) => writes.push(['setInfo', ...args]),
+    writeSol: (...args) => writes.push(['writeSol', ...args]),
+    readSol: () => null,
+    onSaveFlush: () => () => {},
+    onProjectionApplied: (listener) => { projectionListener = listener; return () => {} },
+    uiCommands,
+    dispatchRuntimeCommand: (command) => {
+      calls.push(command)
+      return dispatch(command)
+    },
+    commandSucceeded: (result) => result?.status === 'applied',
+    FARM,
+    div: (className, ...children) => {
+      const node = fakeNode(className)
+      node.append(...children)
+      return node
+    },
+    button: (className, onClick, ...children) => {
+      const node = fakeNode(className)
+      node.append(...children)
+      node.addEventListener('click', onClick)
+      return node
+    },
+    img: () => fakeNode(),
+    avatar: () => '',
+    scaleYb: (value) => value,
+    openBox: (value) => { content = value; return () => {} },
+    SwfPlayer: class {},
+    window: { qqpet: { setFocusable: () => {} } },
+  }, 'openFarm, save')
+  farm.openFarm()
+  assert.ok(content !== null)
+  return {
+    farm,
+    info,
+    calls,
+    writes,
+    get content() { return content },
+    projectionApplied() { projectionListener?.() },
+  }
+}
+
+test('runtime fertilize dispatches selected growing plots and renders authoritative info.yb wealth', async () => {
+  const stored = JSON.stringify({
+    experience: 10, rank: 2, wealth: 999, weather: 'Sunny', burden: [], warehouse: [],
+    farmland: [
+      { farmland: 'FarmlandS', crop: 'RadishSeed', time: 1_700_000_000, state: 2, progress: 0.6 },
+      { farmland: 'FarmlandS', crop: 'CarrotSeed', time: 1_700_000_000, state: 1, progress: 0.3 },
+      { farmland: 'FarmlandS' },
+    ],
+  })
+  const mounted = mountRuntimeFarm(stored)
+  assert.match(nodeText(mounted.content.children[0]), /元宝500/)
+  assert.doesNotMatch(nodeText(mounted.content.children[0]), /元宝999/)
+
+  // A wealth-only projection must update the open panel from authoritative info,
+  // even while the farm blob still carries its stale legacy wealth field.
+  mounted.info.yb = 777
+  mounted.projectionApplied()
+  assert.match(nodeText(mounted.content.children[0]), /元宝777/)
+  assert.doesNotMatch(nodeText(mounted.content.children[0]), /元宝999/)
+
+  findButton(mounted.content, '1 白萝卜 60%').click()
+  findButton(mounted.content, '2 胡萝卜 30%').click()
+  findButton(mounted.content, '施肥').click()
+  await Promise.resolve()
+  await Promise.resolve()
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(mounted.calls)),
+    [{ type: 'farm.care', payload: { plotIds: [0, 1], action: 'fertilize' } }],
+  )
+  assert.match(nodeText(mounted.content), /施肥完成/)
+  assert.deepEqual(mounted.writes, [])
+})
+
+test('runtime farm failure keeps exactly one global error surface and no inline duplicate', async () => {
+  const stored = JSON.stringify({
+    experience: 10, rank: 2, wealth: 999, weather: 'Sunny', burden: [], warehouse: [],
+    farmland: [{ farmland: 'FarmlandS', crop: 'RadishSeed', time: 1_700_000_000, state: 2, progress: 0.6 }],
+  })
+  const errorText = '背包里的物品不足'
+  const globalSurfaces = []
+  const mounted = mountRuntimeFarm(stored, async () => {
+    // dispatchRuntimeCommand emits this single shared surface for a rejected command.
+    globalSurfaces.push({ type: 'qqpet-command-error', code: 'insufficient_item', message: errorText })
+    return { status: 'rejected', error: { code: 'insufficient_item', message: errorText } }
+  })
+
+  findButton(mounted.content, '1 白萝卜 60%').click()
+  findButton(mounted.content, '施肥').click()
+  await Promise.resolve()
+  await Promise.resolve()
+
+  const inlineDuplicate = nodeText(mounted.content).includes(errorText)
+  const surfaces = globalSurfaces.length + (inlineDuplicate ? 1 : 0)
+  assert.equal(globalSurfaces.length, 1)
+  assert.equal(inlineDuplicate, false)
+  assert.equal(surfaces, 1)
+  assert.doesNotMatch(nodeText(mounted.content), /施肥完成/)
+})
+
 test('runtime farm branch dispatches only commands and leaves the SWF path intact', () => {
   const source = readFileSync(new URL('../../src/renderer/ui/farm.ts', import.meta.url), 'utf8')
   const runtimeStart = source.indexOf('function openRuntimeFarm')
@@ -207,10 +372,18 @@ test('runtime farm branch dispatches only commands and leaves the SWF path intac
   for (const call of ['farmBuySeed', 'farmReclaim', 'farmPlant', 'farmCare', 'farmHarvest', 'farmClear', 'farmSellProduce']) {
     assert.match(runtimeBody, new RegExp('uiCommands\\.' + call))
   }
+  assert.match(runtimeBody, /farmCare\(chosen\(\), 'fertilize'\)/)
+  assert.match(runtimeBody, /元宝\$\{info\.yb\}/)
+  assert.doesNotMatch(runtimeBody, /state\.wealth/)
+  assert.doesNotMatch(runtimeBody, /commandErrorText|result\.status === 'rejected'/)
   assert.doesNotMatch(runtimeBody, /\b(update|setInfo|writeSol)\s*\(/)
   const openFarmBody = source.slice(source.indexOf('export function openFarm'), source.indexOf("registerProjectionCacheInvalidator('farm'"))
   assert.match(openFarmBody, /player\.load\('pet\/qqfarm\/Farm\.swf'/)
   assert.match(openFarmBody, /writeSol\(KEY/)
   const newsBody = source.slice(source.indexOf('export async function farmNews'), source.indexOf('ripening ??= ripeTimes()'))
+  assert.match(newsBody, /currentProjectionView\(\)/)
+  assert.match(newsBody, /land\.state/)
+  assert.match(newsBody, /land\.progress/)
+  assert.doesNotMatch(newsBody, /Date\.now\(\)/)
   assert.doesNotMatch(newsBody, /update\('saveJsonData'/)
 })
