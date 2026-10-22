@@ -7,6 +7,7 @@ export interface FinalizeSurvivorOptions {
   terminal: boolean
   suspendedAtMs?: number
   existingCloseReason?: CoverageEndProvenance
+  existingEndWallMs?: number
 }
 
 export interface FinalizeSurvivorResult {
@@ -45,14 +46,21 @@ export function finalizeSurvivor(
   const suspendedAt = options.suspendedAtMs
   const suspended = suspendedAt !== undefined
   const cappedBySuspend = suspended && options.eventBoundaryMs > suspendedAt
-  let end = Math.max(options.commitWallMs, options.eventBoundaryMs)
-  if (suspended) end = Math.min(end, suspendedAt)
-  end = Math.max(options.commitWallMs, end)
+  let end: number
+  if (options.existingEndWallMs !== undefined) {
+    // A persisted end is authoritative; replay/finalization must never extend it.
+    end = Math.max(options.commitWallMs, options.existingEndWallMs)
+  } else {
+    end = Math.max(options.commitWallMs, options.eventBoundaryMs)
+    if (suspended) end = Math.min(end, suspendedAt)
+    end = Math.max(options.commitWallMs, end)
+  }
 
   const provenance: CoverageEndProvenance =
-    suspended || cappedBySuspend || options.existingCloseReason === 'suspend'
+    options.existingCloseReason ??
+    (suspended || cappedBySuspend
       ? 'suspend'
-      : options.eventReason
+      : options.eventReason)
 
   if (options.terminal) {
     return {

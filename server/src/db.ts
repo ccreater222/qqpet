@@ -606,7 +606,8 @@ export class DatabaseStore {
       operation()
       const changed = this.db.prepare('UPDATE pets SET revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?')
         .run(Date.now(), petId, expectedRevision)
-      return Number(changed.changes) === 1
+      if (Number(changed.changes) !== 1) throw new Error('revision_conflict')
+      return true
     })
   }
 
@@ -1031,12 +1032,26 @@ export class DatabaseStore {
     return rows.map(mapCoverageOperation)
   }
 
-  private coverageCloseReasonFor(petId: string, operationId: string, survivor: CoverageSurvivor): CoverageEndProvenance | undefined {
+  private coverageEndFor(
+    petId: string,
+    operationId: string,
+    survivor: CoverageSurvivor,
+  ): { closeReason?: CoverageEndProvenance; endWallMs?: number } {
     const row = this.db.prepare(
-      'SELECT close_reason FROM session_coverage WHERE pet_id = ? AND coverage_id = ?',
-    ).get(petId, stableCoverageId(operationId, survivor)) as { close_reason?: unknown } | undefined
-    if (row === undefined || row.close_reason === null || row.close_reason === undefined) return undefined
-    return String(row.close_reason) as CoverageEndProvenance
+      'SELECT close_reason, disconnected_at_ms FROM session_coverage WHERE pet_id = ? AND coverage_id = ?',
+    ).get(petId, stableCoverageId(operationId, survivor)) as {
+      close_reason?: unknown
+      disconnected_at_ms?: unknown
+    } | undefined
+    if (row === undefined) return {}
+    const result: { closeReason?: CoverageEndProvenance; endWallMs?: number } = {}
+    if (row.close_reason !== null && row.close_reason !== undefined) {
+      result.closeReason = String(row.close_reason) as CoverageEndProvenance
+    }
+    if (row.disconnected_at_ms !== null && row.disconnected_at_ms !== undefined) {
+      result.endWallMs = Number(row.disconnected_at_ms)
+    }
+    return result
   }
 
   private upsertStableCoverageRow(
@@ -1046,10 +1061,10 @@ export class DatabaseStore {
     connectedAtMs: number,
     endWallMs: number,
     closeReason: CoverageEndProvenance,
-  ): void {
+  ): number {
     const coverageId = stableCoverageId(operationId, survivor)
     const key = survivorKey(survivor)
-    this.db.prepare(
+    const result = this.db.prepare(
       `INSERT INTO session_coverage
        (pet_id, coverage_id, device_id, connection_id, authenticated_session_id,
         connected_at_ms, disconnected_at_ms, last_heartbeat_at_ms, close_reason)
@@ -1073,6 +1088,7 @@ export class DatabaseStore {
       endWallMs,
       closeReason,
     )
+    return Number(result.changes)
   }
 
   /** Close every open interval at the commit boundary and record a pending operation. */
@@ -1159,26 +1175,34 @@ export class DatabaseStore {
       const operation = this.getCoverageOperation(petId, operationId)
       if (operation === undefined || operation.state === 'completed') return 0
       let finalized = 0
+      // A repeated suspension is idempotent: the first known suspend wall is the cap.
+      const suspendedAt = operation.suspendedAtMs ?? at
       const survivors = operation.survivors.map(original => {
         if (original.eligible === false || original.activeEndWallMs !== undefined) return original
-        const existing = this.coverageCloseReasonFor(petId, operationId, original)
+        const existing = this.coverageEndFor(petId, operationId, original)
         const result = finalizeSurvivor(original, {
           commitWallMs: operation.commitWallMs,
           eventBoundaryMs: at,
           eventReason: 'suspend',
           terminal: false,
-          suspendedAtMs: at,
-          ...(existing === undefined ? {} : { existingCloseReason: existing }),
+          suspendedAtMs: suspendedAt,
+          ...(existing.closeReason === undefined ? {} : { existingCloseReason: existing.closeReason }),
+          ...(existing.endWallMs === undefined ? {} : { existingEndWallMs: existing.endWallMs }),
         })
-        if (result.materialize) {
-          this.upsertStableCoverageRow(petId, operationId, original, operation.commitWallMs, result.endWallMs, 'suspend')
-          finalized += 1
-        }
+        const changed = this.upsertStableCoverageRow(
+          petId,
+          operationId,
+          original,
+          operation.commitWallMs,
+          result.endWallMs,
+          'suspend',
+        )
+        if (changed > 0) finalized += 1
         return result.survivor
       })
       this.db.prepare(
         'UPDATE coverage_operations SET state = ?, suspended_at_ms = ?, survivors_json = ? WHERE pet_id = ? AND operation_id = ?',
-      ).run('suspended', at, JSON.stringify(survivors), petId, operationId)
+      ).run('suspended', suspendedAt, JSON.stringify(survivors), petId, operationId)
       return finalized
     })
   }
@@ -1238,14 +1262,15 @@ export class DatabaseStore {
             ? Math.min(options.at, original.lastHeartbeatWallMs + COVERAGE_CRASH_GRACE_MS)
             : options.at
           const boundary = suspendedAt === null ? heartbeatBound : Math.min(suspendedAt, heartbeatBound)
-          const existing = this.coverageCloseReasonFor(operation.petId, operation.operationId, original)
+          const existing = this.coverageEndFor(operation.petId, operation.operationId, original)
           const result = finalizeSurvivor(original, {
             commitWallMs: operation.commitWallMs,
             eventBoundaryMs: boundary,
             eventReason: options.reason,
             terminal: true,
             ...(suspendedAt === null ? {} : { suspendedAtMs: suspendedAt }),
-            ...(existing === undefined ? {} : { existingCloseReason: existing }),
+            ...(existing.closeReason === undefined ? {} : { existingCloseReason: existing.closeReason }),
+            ...(existing.endWallMs === undefined ? {} : { existingEndWallMs: existing.endWallMs }),
           })
           if (result.materialize) {
             this.upsertStableCoverageRow(

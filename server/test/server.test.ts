@@ -229,6 +229,90 @@ test('duplicate opId returns the stored result without re-applying or consuming 
   await owner.close()
 })
 
+test('duplicate opId with a different command type returns op_id_conflict', async t => {
+  const harness = await createHarness(t)
+  const owner = await pairOwner(harness)
+  const opId = 'op-conflict-type'
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'conflict-type-adopt',
+    opId,
+    command: { type: 'pet.adopt', payload: { sex: 'GG' } },
+  })
+  const adopted = await owner.next('commandResult')
+  if (adopted.t !== 'commandResult') throw new Error('missing adopt result')
+  assert.equal(adopted.status, 'applied')
+  await owner.next('projection')
+
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'conflict-type-rename',
+    opId,
+    command: { type: 'pet.rename', payload: { name: 'WrongCommand' } },
+  })
+  const conflict = await owner.next('commandResult')
+  if (conflict.t !== 'commandResult') throw new Error('missing conflict result')
+  assert.equal(conflict.status, 'rejected')
+  assert.equal(conflict.commandType, 'pet.rename')
+  assert.equal(conflict.error?.code, 'op_id_conflict')
+  assert.equal(conflict.error?.refreshProjection, false)
+
+  const store = openDatabase(harness.dbPath)
+  const pet = store.getPet('default')
+  const count = store.db.prepare(
+    'SELECT COUNT(*) AS count FROM commands WHERE pet_id = ? AND op_id = ?',
+  ).get('default', opId) as { count: number }
+  assert.equal(count.count, 1)
+  assert.equal(pet?.revision, adopted.revision)
+  assert.equal(pet?.commandSeq, adopted.commandSeq)
+  store.close()
+  await owner.close()
+})
+
+test('duplicate opId with a different payload returns op_id_conflict', async t => {
+  const harness = await createHarness(t)
+  const owner = await pairOwner(harness)
+  const opId = 'op-conflict-payload'
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'conflict-payload-first',
+    opId,
+    command: { type: 'pet.adopt', payload: { sex: 'GG' } },
+  })
+  const adopted = await owner.next('commandResult')
+  if (adopted.t !== 'commandResult') throw new Error('missing adopt result')
+  assert.equal(adopted.status, 'applied')
+  await owner.next('projection')
+
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'conflict-payload-second',
+    opId,
+    command: { type: 'pet.adopt', payload: { sex: 'MM' } },
+  })
+  const conflict = await owner.next('commandResult')
+  if (conflict.t !== 'commandResult') throw new Error('missing conflict result')
+  assert.equal(conflict.status, 'rejected')
+  assert.equal(conflict.commandType, 'pet.adopt')
+  assert.equal(conflict.error?.code, 'op_id_conflict')
+
+  const store = openDatabase(harness.dbPath)
+  const pet = store.getPet('default')
+  const rows = store.db.prepare(
+    'SELECT op_id, command_type, payload_json FROM commands WHERE pet_id = ?',
+  ).all('default') as Array<{ op_id: string; command_type: string; payload_json: string }>
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].payload_json, JSON.stringify({ sex: 'GG' }))
+  assert.equal(pet?.revision, adopted.revision)
+  assert.equal(pet?.commandSeq, adopted.commandSeq)
+  store.close()
+  await owner.close()
+})
+
 test('a rejected command is persisted with a new commandSeq and leaves revision unchanged', async t => {
   const harness = await createHarness(t)
   const owner = await pairOwner(harness)
@@ -276,6 +360,30 @@ test('revision compare-and-swap rejects a stale writer without mutating canonica
   assert.equal(store.compareAndSwapRevision('default', expected, () => undefined), false)
   const after = store.getPet('default')
   assert.equal(after?.revision, expected + 1)
+  store.close()
+})
+
+test('compareAndSwapRevision rolls back callback writes when the revision update loses', async t => {
+  const harness = await createHarness(t)
+  const store = openDatabase(harness.dbPath)
+  const pet = store.getPet('default')
+  const settings = store.getSettings('default')
+  assert.ok(pet)
+  assert.ok(settings)
+  assert.throws(
+    () => store.compareAndSwapRevision('default', pet.revision, () => {
+      store.db.prepare(
+        'UPDATE pet_settings SET time_zone = ?, updated_at_ms = ? WHERE pet_id = ?',
+      ).run('UTC', settings.updatedAtMs + 1, 'default')
+      store.db.prepare('UPDATE pets SET revision = revision + 1 WHERE id = ?').run('default')
+    }),
+    /revision_conflict/,
+  )
+  const after = store.getPet('default')
+  const settingsAfter = store.getSettings('default')
+  assert.equal(after?.revision, pet.revision)
+  assert.equal(settingsAfter?.timeZone, settings.timeZone)
+  assert.equal(settingsAfter?.updatedAtMs, settings.updatedAtMs)
   store.close()
 })
 
@@ -1032,6 +1140,19 @@ test('finalizeSurvivor preserves existing ends and caps provenance at a known su
     terminal: true,
   })
   assert.equal(clamped.endWallMs, 100)
+
+  const storedCap = finalizeSurvivor(survivor, {
+    commitWallMs: 100,
+    eventBoundaryMs: 900,
+    eventReason: 'shutdown',
+    terminal: true,
+    suspendedAtMs: 800,
+    existingCloseReason: 'suspend',
+    existingEndWallMs: 600,
+  })
+  assert.equal(storedCap.endWallMs, 600)
+  assert.equal(storedCap.survivor.activeEndWallMs, 600)
+  assert.equal(storedCap.survivor.activeEndProvenance, 'suspend')
 })
 
 test('canonical load assembles engine state from canonical tables', async t => {
@@ -1178,6 +1299,80 @@ test('startup repair finalizes pending and suspended coverage operations monoton
   assert.equal(Number(suspendedRowAfter.connected_at_ms), commitWall)
   assert.equal(Number(suspendedRowAfter.disconnected_at_ms), suspendedAt)
   assert.equal(suspendedRowAfter.close_reason, 'suspend')
+  store.close()
+})
+
+test('repeated coverage suspension keeps the first suspend cap and is idempotent', async t => {
+  const harness = await createHarness(t)
+  const store = openDatabase(harness.dbPath)
+  const now = Date.now()
+  const commitWall = now - 120_000
+  const firstSuspend = now - 20_000
+  const repeatedSuspend = now - 10_000
+  const survivor: CoverageSurvivor = {
+    kind: 'server_connection',
+    connectionId: 'c-repeat-suspend',
+    deviceId: 'd-repeat-suspend',
+    lastHeartbeatWallMs: now - 5_000,
+    eligible: true,
+  }
+  store.closeAndCreateCoverageOperation('default', 'op-repeat-suspend', commitWall, [survivor], 'pet_reset')
+  assert.equal(store.markCoverageOperationSuspended('default', 'op-repeat-suspend', firstSuspend), 1)
+  const rowBefore = store.db.prepare(
+    'SELECT disconnected_at_ms, close_reason FROM session_coverage WHERE coverage_id = ?',
+  ).get('op-repeat-suspend:c-repeat-suspend') as Record<string, unknown>
+  assert.equal(Number(rowBefore.disconnected_at_ms), firstSuspend)
+  assert.equal(rowBefore.close_reason, 'suspend')
+
+  assert.equal(store.markCoverageOperationSuspended('default', 'op-repeat-suspend', repeatedSuspend), 0)
+  const operation = store.getCoverageOperation('default', 'op-repeat-suspend')
+  assert.equal(operation?.state, 'suspended')
+  assert.equal(operation?.suspendedAtMs, firstSuspend)
+  const rowAfter = store.db.prepare(
+    'SELECT disconnected_at_ms, close_reason FROM session_coverage WHERE coverage_id = ?',
+  ).get('op-repeat-suspend:c-repeat-suspend') as Record<string, unknown>
+  assert.equal(Number(rowAfter.disconnected_at_ms), firstSuspend)
+  assert.equal(rowAfter.close_reason, 'suspend')
+  store.close()
+})
+
+test('coverage finalization uses the stored suspend end as the survivor cap', async t => {
+  const harness = await createHarness(t)
+  const store = openDatabase(harness.dbPath)
+  const now = Date.now()
+  const commitWall = now - 120_000
+  const storedSuspendEnd = now - 40_000
+  const survivor: CoverageSurvivor = {
+    kind: 'server_connection',
+    connectionId: 'c-stored-cap',
+    deviceId: 'd-stored-cap',
+    lastHeartbeatWallMs: now - 5_000,
+    eligible: true,
+  }
+  store.closeAndCreateCoverageOperation('default', 'op-stored-cap', commitWall, [survivor], 'pet_reset')
+  store.db.prepare(
+    `INSERT INTO session_coverage
+     (pet_id, coverage_id, device_id, connected_at_ms, disconnected_at_ms, last_heartbeat_at_ms, close_reason)
+     VALUES ('default', ?, ?, ?, ?, ?, 'suspend')`,
+  ).run(
+    'op-stored-cap:c-stored-cap',
+    'd-stored-cap',
+    commitWall,
+    storedSuspendEnd,
+    storedSuspendEnd,
+  )
+  store.markCoverageOperationSuspended('default', 'op-stored-cap', storedSuspendEnd + 1_000)
+  store.repairCoverageOnStartup(now + 60_000)
+
+  const operation = store.getCoverageOperation('default', 'op-stored-cap')
+  assert.equal(operation?.state, 'completed')
+  assert.equal(operation?.survivors[0].eligible, false)
+  assert.equal(operation?.survivors[0].activeEndWallMs, storedSuspendEnd)
+  const row = store.db.prepare(
+    'SELECT disconnected_at_ms, close_reason FROM session_coverage WHERE coverage_id = ?',
+  ).get('op-stored-cap:c-stored-cap') as Record<string, unknown>
+  assert.equal(Number(row.disconnected_at_ms), storedSuspendEnd)
+  assert.equal(row.close_reason, 'suspend')
   store.close()
 })
 

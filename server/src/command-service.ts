@@ -9,7 +9,7 @@ import {
   type WireCommandResult,
 } from '../../src/shared/sync/index'
 import type { OrderedEvent } from '../../src/shared/pet-runtime/events'
-import type { CoverageSurvivor, EngineState } from '../../src/shared/pet-runtime/index'
+import { stableStringify, type CoverageSurvivor, type EngineState } from '../../src/shared/pet-runtime/index'
 import { PROTOCOL_VERSION } from '../../src/shared/sync/protocol'
 import { AuthService } from './auth'
 import type { AuthorityRecord, CommandRecord, DatabaseStore, PetRecord } from './db'
@@ -69,6 +69,15 @@ function duplicateResult(row: CommandRecord, requestId: string): WireCommandResu
   } as WireCommandResult & { original: 'applied' | 'rejected' }
 }
 
+function sameCommandIdentity(row: CommandRecord, command: PetCommand): boolean {
+  if (row.commandType !== command.type) return false
+  try {
+    return stableStringify(JSON.parse(row.payloadJson)) === stableStringify(command.payload)
+  } catch {
+    return false
+  }
+}
+
 export class CommandService {
   private readonly queues = new Map<string, Promise<unknown>>()
   private coverageSource: CoverageSource | undefined
@@ -122,6 +131,29 @@ export class CommandService {
     this.auth.recheck(context.petId, context.deviceId)
     const duplicate = this.store.commandByOpId(context.petId, context.deviceId, opId)
     if (duplicate !== undefined) {
+      if (sameCommandIdentity(duplicate, command) === false) {
+        const snapshot = this.store.loadCanonical(context.petId)
+        this.metrics.increment('commands.rejected')
+        this.metrics.increment('commands.by_type.' + command.type + '.rejected')
+        return {
+          result: {
+            t: 'commandResult',
+            v: PROTOCOL_VERSION,
+            requestId,
+            opId,
+            commandType: command.type,
+            status: 'rejected',
+            commandSeq: snapshot.pet.commandSeq + 1,
+            revision: snapshot.pet.revision,
+            eventSeq: snapshot.pet.eventSeq,
+            error: {
+              code: 'op_id_conflict',
+              message: 'opId was already used for a different command',
+              refreshProjection: false,
+            },
+          },
+        }
+      }
       this.metrics.increment('commands.duplicate')
       return { result: duplicateResult(duplicate, requestId) }
     }
