@@ -76,9 +76,12 @@ export class SyncServer {
     this.http = createServer((request, response) => {
       void this.handleHttp(request, response)
     })
+    // Keep ws' parser from racing us to a protocol 1009 close. Frames that
+    // exceed the application limit are rejected in SessionService with 4005.
+    const wsMaxPayload = Math.max(config.maxFrameBytes * 2, 64 * 1024 * 1024)
     this.wss = new WebSocketServer({
       noServer: true,
-      maxPayload: config.maxFrameBytes,
+      maxPayload: wsMaxPayload,
       perMessageDeflate: false,
     })
     this.http.on('upgrade', (request, socket, head) => {
@@ -92,6 +95,19 @@ export class SyncServer {
       })
     })
     this.wss.on('connection', (socket, request) => {
+      // ws rejects frames above its parser cap before emitting 'message'.
+      // Remap that transport 1009 close to the protocol's 4005 contract.
+      const close = socket.close.bind(socket)
+      Object.defineProperty(socket, 'close', {
+        configurable: true,
+        value: (code?: number, reason?: string | Buffer): void => {
+          if (code === 1009) {
+            close(4005, 'payload_too_large')
+            return
+          }
+          close(code, reason)
+        },
+      })
       this.sessions.attach(socket, request)
     })
   }
@@ -101,6 +117,8 @@ export class SyncServer {
     await mkdir(dirname(this.config.dbPath), { recursive: true })
     await mkdir(this.config.backupDir, { recursive: true })
     this.store.verifyRestoreGeneration(this.config.restoreGenerationFile)
+    // Fail closed before accepting connections if any canonical pet is corrupt.
+    for (const pet of this.store.listPets()) this.store.loadCanonical(pet.id)
     const startupAt = this.now()
     const repaired = this.store.repairCoverageOnStartup(startupAt)
     if (repaired > 0) this.logger.info('coverage.repaired', { intervals: repaired })

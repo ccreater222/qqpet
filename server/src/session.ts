@@ -29,29 +29,40 @@ import type { Logger } from './logging'
 const CLOSE_AUTH_FAILED = 4000
 const CLOSE_PROTOCOL_MISMATCH = 4001
 const CLOSE_SUPERSEDED = 4002
+const CLOSE_RATE_LIMITED = 4003
 const CLOSE_INVALID_FRAME = 4004
 const CLOSE_PAYLOAD_TOO_LARGE = 4005
 const CLOSE_SERVER_ERROR = 4006
+const PRE_AUTH_RATE_PER_SECOND = 5
+const PRE_AUTH_BURST = 10
+const EXPENSIVE_RATE_PER_SECOND = 2
+const EXPENSIVE_BURST = 4
 
 class RateWindow {
   private tokens: number
   private updatedAt: number
+  private readonly capacity: number
 
   constructor(
     private readonly perSecond: number,
     burst: number,
     at: number,
   ) {
-    this.tokens = burst
+    this.capacity = Math.max(1, burst)
+    this.tokens = this.capacity
     this.updatedAt = at
   }
 
   take(at: number): boolean {
-    this.tokens = Math.min(this.tokens + (at - this.updatedAt) / 1000 * this.perSecond, this.perSecond * 2)
+    this.tokens = Math.min(this.tokens + (at - this.updatedAt) / 1000 * this.perSecond, this.capacity)
     this.updatedAt = at
     if (this.tokens < 1) return false
     this.tokens -= 1
     return true
+  }
+
+  refund(): void {
+    this.tokens = Math.min(this.capacity, this.tokens + 1)
   }
 }
 
@@ -67,6 +78,9 @@ export class SessionService {
   private heartbeatTimer: NodeJS.Timeout | undefined
   private pingTimer: NodeJS.Timeout | undefined
   private catchingUpSource: ((petId: string) => boolean) | undefined
+  private readonly preAuthRates = new Map<string, RateWindow>()
+  private readonly deviceCommandRates = new Map<string, RateWindow>()
+  private readonly deviceExpensiveRates = new Map<string, RateWindow>()
 
   constructor(
     private readonly config: ServerConfig,
@@ -139,7 +153,38 @@ export class SessionService {
     this.hub.closeAll('shutdown')
   }
 
-  attach(socket: WebSocket, _request: IncomingMessage): void {
+  private rateFor(
+    rates: Map<string, RateWindow>,
+    key: string,
+    perSecond: number,
+    burst: number,
+    at: number,
+  ): RateWindow {
+    let rate = rates.get(key)
+    if (rate === undefined) {
+      rate = new RateWindow(perSecond, burst, at)
+      rates.set(key, rate)
+    }
+    return rate
+  }
+
+  private deviceRateKey(connection: LiveConnection): string {
+    return connection.petId + ':' + connection.deviceId
+  }
+
+  private takeExpensiveRate(connection: LiveConnection): boolean {
+    const at = this.now()
+    return this.rateFor(
+      this.deviceExpensiveRates,
+      this.deviceRateKey(connection),
+      EXPENSIVE_RATE_PER_SECOND,
+      EXPENSIVE_BURST,
+      at,
+    ).take(at)
+  }
+
+  attach(socket: WebSocket, request: IncomingMessage): void {
+    const preAuthKey = request.socket.remoteAddress ?? 'unknown'
     const connection: LiveConnection = {
       socket,
       connectionId: 'c-' + this.nextConnection++,
@@ -153,7 +198,6 @@ export class SessionService {
     }
     let initialized = false
     let closeRecorded = false
-    let rate: RateWindow | undefined
     const helloDeadline = setTimeout(() => {
       if (!initialized) this.close(socket, CLOSE_AUTH_FAILED, 'auth_failed')
     }, this.config.helloTimeoutMs)
@@ -173,14 +217,16 @@ export class SessionService {
     })
     socket.on('message', (data: RawData, isBinary: boolean) => {
       connection.lastActivityMs = this.now()
-      const before = initialized
-      void this.onMessage(socket, connection, data, isBinary, rate).then(nextRate => {
-        if (connection.authenticated && !before && nextRate !== undefined) {
+      void this.onMessage(socket, connection, data, isBinary, preAuthKey)
+        .then(() => {
+          if (connection.authenticated === false) return
           initialized = true
-          rate = nextRate
           clearTimeout(helloDeadline)
-        }
-      })
+        })
+        .catch(error => {
+          this.logger.error('socket.message_failed', { connectionId: connection.connectionId, error })
+          this.close(socket, CLOSE_SERVER_ERROR, 'server_error')
+        })
     })
   }
 
@@ -189,44 +235,57 @@ export class SessionService {
     connection: LiveConnection,
     data: RawData,
     isBinary: boolean,
-    rate: RateWindow | undefined,
-  ): Promise<RateWindow | undefined> {
+    preAuthKey: string,
+  ): Promise<void> {
     if (isBinary) {
       this.close(socket, CLOSE_INVALID_FRAME, 'invalid_frame')
-      return rate
+      return
     }
     const bytes = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer)
     if (bytes.byteLength > this.config.maxFrameBytes) {
       this.close(socket, CLOSE_PAYLOAD_TOO_LARGE, 'payload_too_large')
-      return rate
+      return
     }
     if (!connection.authenticated) {
       if (bytes.byteLength > 16 * 1024) {
         this.close(socket, CLOSE_PAYLOAD_TOO_LARGE, 'payload_too_large')
-        return rate
+        return
+      }
+      const at = this.now()
+      const preAuthRate = this.rateFor(
+        this.preAuthRates,
+        preAuthKey,
+        PRE_AUTH_RATE_PER_SECOND,
+        PRE_AUTH_BURST,
+        at,
+      )
+      if (preAuthRate.take(at) === false) {
+        this.close(socket, CLOSE_RATE_LIMITED, 'rate_limited')
+        return
       }
       let parsed: unknown
       try {
         parsed = JSON.parse(bytes.toString('utf8'))
       } catch {
         this.close(socket, CLOSE_INVALID_FRAME, 'invalid_frame')
-        return rate
+        return
       }
       await this.hello(socket, connection, parsed)
-      return connection.authenticated
-        ? new RateWindow(this.config.commandRatePerSecond, this.config.commandRateBurst, this.now())
-        : rate
-    }
-    if (bytes.byteLength > this.config.maxCommandBytes && this.looksLikeCommand(bytes)) {
-      this.close(socket, CLOSE_PAYLOAD_TOO_LARGE, 'payload_too_large')
-      return rate
+      if (connection.authenticated) preAuthRate.refund()
+      return
     }
     let parsed: unknown
     try {
       parsed = JSON.parse(bytes.toString('utf8'))
     } catch {
       this.send(socket, this.error('invalid_frame', 'invalid JSON frame', false, this.requestIdOf(bytes)))
-      return rate
+      return
+    }
+    // Parse before enforcing the command limit. Matching raw substrings lets
+    // pretty-printed or escaped JSON bypass maxCommandBytes.
+    if (asObject(parsed)?.t === 'command' && bytes.byteLength > this.config.maxCommandBytes) {
+      this.close(socket, CLOSE_PAYLOAD_TOO_LARGE, 'payload_too_large')
+      return
     }
     const validated = parseClientMessage(parsed)
     if (validated.ok === false) {
@@ -235,11 +294,11 @@ export class SessionService {
       } else {
         this.send(socket, this.error('invalid_frame', validated.error.message, false, this.requestIdFromUnknown(parsed)))
       }
-      return rate
+      return
     }
     if (validated.value.t === 'hello') {
       this.send(socket, this.error('invalid_frame', 'connection is already authenticated', false, validated.value.requestId))
-      return rate
+      return
     }
     if (validated.value.t === 'ping') {
       this.send(socket, {
@@ -248,30 +307,56 @@ export class SessionService {
         nonce: validated.value.nonce,
         serverTimeMs: this.now(),
       })
-      return rate
+      return
     }
     if (validated.value.t === 'resync') {
+      if (this.takeExpensiveRate(connection) === false) {
+        this.close(socket, CLOSE_RATE_LIMITED, 'rate_limited')
+        return
+      }
       this.resync(connection, validated.value)
-      return rate
+      return
     }
     if (validated.value.t === 'exportBundle') {
+      if (this.takeExpensiveRate(connection) === false) {
+        this.close(socket, CLOSE_RATE_LIMITED, 'rate_limited')
+        return
+      }
       this.exportBundle(connection, validated.value)
-      return rate
+      return
     }
     if (validated.value.t === 'commandStatus') {
       this.commandStatus(socket, connection, validated.value)
-      return rate
+      return
     }
     if (validated.value.t === 'command') {
-      const nextRate = rate ?? new RateWindow(this.config.commandRatePerSecond, this.config.commandRateBurst, this.now())
-      if (nextRate.take(this.now()) === false) {
-        this.close(socket, CLOSE_AUTH_FAILED + 3, 'rate_limited')
-        return nextRate
+      const at = this.now()
+      const commandRate = this.rateFor(
+        this.deviceCommandRates,
+        this.deviceRateKey(connection),
+        this.config.commandRatePerSecond,
+        this.config.commandRateBurst,
+        at,
+      )
+      if (commandRate.take(at) === false) {
+        this.close(socket, CLOSE_RATE_LIMITED, 'rate_limited')
+        return
       }
       await this.command(socket, connection, validated.value)
-      return nextRate
     }
-    return rate
+  }
+
+  private closeForAuthError(socket: WebSocket, error: unknown): void {
+    if (error instanceof RevokedDeviceError) {
+      this.close(socket, CLOSE_SUPERSEDED, 'revoked')
+      return
+    }
+    if (error instanceof AuthenticationError) {
+      this.close(socket, CLOSE_AUTH_FAILED, 'auth_failed')
+      return
+    }
+    this.logger.error('auth.internal_error', { error })
+    this.close(socket, CLOSE_SERVER_ERROR, 'server_error')
   }
 
   private async hello(socket: WebSocket, connection: LiveConnection, value: unknown): Promise<void> {
@@ -287,26 +372,35 @@ export class SessionService {
       return
     }
     const hello = validated.value
-    let authenticated
+    let identified: ReturnType<AuthService['identify']>
     try {
-      authenticated = this.auth.authenticate(hello)
+      identified = this.auth.identify(hello)
     } catch (error) {
-      if (error instanceof RevokedDeviceError) {
-        this.close(socket, CLOSE_SUPERSEDED, 'revoked')
-        return
-      }
-      if (error instanceof AuthenticationError) {
-        this.close(socket, CLOSE_AUTH_FAILED, 'auth_failed')
-        return
-      }
-      this.logger.error('auth.internal_error', { error })
+      this.closeForAuthError(socket, error)
+      return
+    }
+    if (this.hub.count(identified.petId) >= this.config.maxConnectionsPerPet) {
+      this.close(socket, CLOSE_SUPERSEDED, 'too_many_connections')
+      return
+    }
+    let snapshot: ReturnType<DatabaseStore['loadCanonical']>
+    try {
+      snapshot = this.store.loadCanonical(identified.petId)
+    } catch (error) {
+      this.logger.error('auth.snapshot_failed', { petId: identified.petId, error })
       this.close(socket, CLOSE_SERVER_ERROR, 'server_error')
       return
     }
-    const snapshot = this.store.loadCanonical(authenticated.petId)
     const authorityProblem = this.authorityProblem(hello, snapshot)
     if (authorityProblem !== undefined) {
-      this.authorityReset(socket, hello, authenticated.issuedToken, authorityProblem)
+      this.authorityReset(socket, hello, snapshot, authorityProblem)
+      return
+    }
+    let authenticated: ReturnType<AuthService['authenticate']>
+    try {
+      authenticated = this.auth.authenticate(hello)
+    } catch (error) {
+      this.closeForAuthError(socket, error)
       return
     }
     const at = this.now()
@@ -322,11 +416,6 @@ export class SessionService {
     connection.coverageId = coverageId
     connection.authenticated = true
     this.hub.add(connection)
-    if (this.hub.count(authenticated.petId) > this.config.maxConnectionsPerPet) {
-      this.hub.remove(connection, 'disconnect')
-      this.close(socket, CLOSE_SUPERSEDED, 'too_many_connections')
-      return
-    }
 
     const delivery = this.delivery(hello, snapshot.pet, authenticated.petId)
     const welcome: Welcome = {
@@ -577,15 +666,11 @@ export class SessionService {
   private authorityReset(
     socket: WebSocket,
     hello: ClientHello,
-    issuedToken: string | undefined,
+    snapshot: ReturnType<DatabaseStore['loadCanonical']>,
     reason: 'restore_rollback' | 'authority_mismatch' | 'cache_newer',
   ): void {
-    const pet = hello.petId === undefined ? this.store.listPets()[0] : this.store.getPet(hello.petId)
-    const authority = pet === undefined ? undefined : this.store.getAuthority(pet.id)
-    if (pet === undefined || authority === undefined || issuedToken !== undefined) {
-      this.close(socket, CLOSE_AUTH_FAILED, 'auth_failed')
-      return
-    }
+    const pet = snapshot.pet
+    const authority = snapshot.authority
     this.send(socket, {
       t: 'authorityResetRequired',
       code: 'authority_reset_required',
@@ -638,7 +723,5 @@ export class SessionService {
     return typeof object?.requestId === 'string' && object.requestId.length > 0 ? object.requestId : undefined
   }
 
-  private looksLikeCommand(bytes: Buffer): boolean {
-    return bytes.toString('utf8').includes('"t":"command"')
-  }
+
 }

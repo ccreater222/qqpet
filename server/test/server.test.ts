@@ -430,6 +430,13 @@ function nextClose(ws: WebSocket): Promise<{ code: number; reason: string }> {
   return new Promise(resolve => ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })))
 }
 
+function nextServerMessage(ws: WebSocket): Promise<ServerToClient> {
+  return new Promise((resolve, reject) => {
+    ws.once('message', data => resolve(JSON.parse(data.toString()) as ServerToClient))
+    ws.once('error', reject)
+  })
+}
+
 test('device.list is owner-only and returns redacted metadata', async t => {
   const harness = await createHarness(t)
   const owner = await pairOwner(harness)
@@ -1071,6 +1078,44 @@ test('oversized command frames are closed with 4005 before dispatch', async t =>
   assert.equal(close.reason, 'payload_too_large')
 })
 
+test('oversized WebSocket frames close with 4005 instead of ws 1009', async t => {
+  const harness = await createHarness(t, { maxFrameBytes: 4096, maxCommandBytes: 1024 })
+  const owner = await pairOwner(harness)
+  const closed = nextClose(owner.ws)
+  owner.ws.send('x'.repeat(8192))
+  const close = await closed
+  assert.equal(close.code, 4005)
+  assert.equal(close.reason, 'payload_too_large')
+})
+
+test('pretty-printed and escaped oversized command frames close with 4005', async t => {
+  const harness = await createHarness(t, { maxFrameBytes: 8192, maxCommandBytes: 1024 })
+  const owner = await pairOwner(harness)
+  const escapedType = 'comm' + String.fromCharCode(92) + 'u0061nd'
+  const frame = JSON.stringify({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'pretty-oversized',
+    opId: 'pretty-oversized-1',
+    command: { type: 'pet.rename', payload: { name: 'x'.repeat(2048) } },
+  }, null, 2).replace('"t": "command"', '"t": "' + escapedType + '"')
+  assert.equal(frame.includes('"t":"command"'), false)
+  assert.ok(Buffer.byteLength(frame) > harness.config.maxCommandBytes)
+  assert.ok(Buffer.byteLength(frame) <= harness.config.maxFrameBytes)
+
+  const closed = nextClose(owner.ws)
+  owner.ws.send(frame)
+  const close = await closed
+  assert.equal(close.code, 4005)
+  assert.equal(close.reason, 'payload_too_large')
+
+  const store = openDatabase(harness.dbPath)
+  assert.equal(store.getPet('default')?.revision, 0)
+  const count = store.db.prepare('SELECT COUNT(*) AS count FROM commands WHERE pet_id = ?').get('default') as { count: number }
+  assert.equal(count.count, 0)
+  store.close()
+})
+
 test('command rate limiting closes with 4003 after the burst is exhausted', async t => {
   const harness = await createHarness(t, { commandRatePerSecond: 1, commandRateBurst: 1 })
   const owner = await pairOwner(harness)
@@ -1094,16 +1139,133 @@ test('command rate limiting closes with 4003 after the burst is exhausted', asyn
   assert.equal(close.reason, 'rate_limited')
 })
 
-test('connections per pet limit closes the extra socket with 4002', async t => {
+test('command rate budget is shared by every socket for one device', async t => {
+  const harness = await createHarness(t, { commandRatePerSecond: 1, commandRateBurst: 1 })
+  const owner = await pairOwner(harness)
+  const second = await connect(harness, { kind: 'token', token: owner.token })
+
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'shared-rate-1',
+    opId: 'shared-rate-1',
+    command: { type: 'pet.adopt', payload: { sex: 'GG' } },
+  })
+  const result = await owner.next('commandResult')
+  assert.equal(result.t, 'commandResult')
+  if (result.t === 'commandResult') assert.equal(result.status, 'applied')
+
+  const closed = nextClose(second.ws)
+  second.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'shared-rate-2',
+    opId: 'shared-rate-2',
+    command: { type: 'pet.adopt', payload: { sex: 'MM' } },
+  })
+  const close = await closed
+  assert.equal(close.code, 4003)
+  assert.equal(close.reason, 'rate_limited')
+  assert.equal(owner.ws.readyState, WebSocket.OPEN)
+  await owner.close()
+})
+
+test('resync and export share an expensive-frame budget across device sockets', async t => {
+  const harness = await createHarness(t)
+  const owner = await pairOwner(harness)
+  const second = await connect(harness, { kind: 'token', token: owner.token })
+
+  const ownerClosed = nextClose(owner.ws)
+  for (let index = 0; index < 5; index += 1) {
+    owner.send({
+      t: 'resync',
+      v: PROTOCOL_VERSION,
+      requestId: 'resync-rate-' + index,
+      discardCachedAuthority: true,
+    })
+  }
+  const resyncClose = await ownerClosed
+  assert.equal(resyncClose.code, 4003)
+  assert.equal(resyncClose.reason, 'rate_limited')
+
+  const secondClosed = nextClose(second.ws)
+  second.send({ t: 'exportBundle', v: PROTOCOL_VERSION, requestId: 'export-after-resync' })
+  const exportClose = await secondClosed
+  assert.equal(exportClose.code, 4003)
+  assert.equal(exportClose.reason, 'rate_limited')
+})
+
+test('unauthenticated frame flood is rate limited across sockets', async t => {
+  const harness = await createHarness(t)
+  const sockets = await Promise.all(
+    Array.from({ length: 11 }, () => rawConnect(harness.url)),
+  )
+  const closes = sockets.map(socket => nextClose(socket))
+  for (const socket of sockets) socket.send('{')
+  const results = await Promise.all(closes)
+  assert.equal(results.filter(result => result.code === 4003).length, 1)
+  assert.equal(results.filter(result => result.code === 4004).length, 10)
+})
+
+test('rejected pairing does not burn the one-shot code or orphan a device', async t => {
   const harness = await createHarness(t, { maxConnectionsPerPet: 1 })
   const owner = await pairOwner(harness)
   const store = openDatabase(harness.dbPath)
   const playerCode = store.issuePairingCode('default', 'player', 10 * 60_000).code
+  const devicesBefore = store.listDevices('default').length
   store.close()
+
   await assert.rejects(
     connect(harness, { kind: 'pairing', code: playerCode, deviceLabel: 'Extra' }),
     /socket closed: 4002/,
   )
+
+  const check = openDatabase(harness.dbPath)
+  assert.equal(check.listDevices('default').length, devicesBefore)
+  const pairing = check.getMigration(playerCode)
+  assert.ok(pairing)
+  assert.equal(pairing.usedAtMs, null)
+  check.close()
+
+  await owner.close()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const player = await connect(harness, { kind: 'pairing', code: playerCode, deviceLabel: 'Extra' })
+  await player.next('ready')
+  assert.match(player.token, /^[A-Za-z0-9_-]{43,}$/)
+  const after = openDatabase(harness.dbPath)
+  assert.equal(after.listDevices('default').length, devicesBefore + 1)
+  after.close()
+  await player.close()
+})
+
+test('authority reset rejection does not consume the pairing code', async t => {
+  const harness = await createHarness(t)
+  const ws = await rawConnect(harness.url)
+  const resetMessage = nextServerMessage(ws)
+  const closed = nextClose(ws)
+  ws.send(JSON.stringify({
+    t: 'hello',
+    v: PROTOCOL_VERSION,
+    requestId: 'stale-authority',
+    appVersion: 'test',
+    cachedAuthority: { authorityId: 'stale-authority', restoreGeneration: 0, epoch: 0 },
+    auth: { kind: 'pairing', code: harness.pairingCode, deviceLabel: 'Owner desktop' },
+  }))
+  const [reset, close] = await Promise.all([resetMessage, closed])
+  assert.equal(reset.t, 'authorityResetRequired')
+  if (reset.t === 'authorityResetRequired') assert.equal(reset.reason, 'authority_mismatch')
+  assert.equal(close.code, 4002)
+  assert.equal(close.reason, 'authority_reset_required')
+
+  const check = openDatabase(harness.dbPath)
+  assert.equal(check.listDevices('default').length, 0)
+  const pairing = check.getMigration(harness.pairingCode)
+  assert.ok(pairing)
+  assert.equal(pairing.usedAtMs, null)
+  check.close()
+
+  const owner = await pairOwner(harness)
+  assert.match(owner.token, /^[A-Za-z0-9_-]{43,}$/)
   await owner.close()
 })
 
