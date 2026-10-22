@@ -71,8 +71,8 @@ export class SyncServer {
     const commands = new CommandService(store, auth, new RuntimeHost(), this.logger, this.metrics, now)
     this.sessions = new SessionService(config, store, auth, commands, this.logger, now)
     this.scheduler = new SchedulerService(config, store, commands, this.sessions.hub, this.logger, this.metrics, now)
-    commands.setCatchingUpGate(petId => this.scheduler.isCatchingUp(petId))
-    this.sessions.setCatchingUpSource(petId => this.scheduler.isCatchingUp(petId))
+    commands.setCatchingUpGate(petId => this.scheduler.isCatchUpBlocked(petId))
+    this.sessions.setCatchingUpSource(petId => this.scheduler.isCatchUpBlocked(petId))
     this.http = createServer((request, response) => {
       void this.handleHttp(request, response)
     })
@@ -179,12 +179,13 @@ export class SyncServer {
     const schedulerHealth = this.scheduler.healthAll()
     const firstHealth = schedulerHealth[0]
     const catchingUp = schedulerHealth.some(value => value.catchingUp)
+    const schedulerReady = schedulerHealth.every(value => value.ready)
     const authority = first === undefined ? undefined : this.store.getAuthority(first.id)
     const settings = first === undefined ? undefined : this.store.getSettings(first.id)
     return {
       ok: true,
       service: 'qqpet-server',
-      ready: this.started && catchingUp === false && authority?.state === 'active',
+      ready: this.started && schedulerReady && catchingUp === false && authority?.state === 'active',
       journalMode: String(Object.values(journal)[0] ?? '').toLowerCase(),
       synchronous: Number(Object.values(synchronous)[0]) === 2 ? 'full' : String(Object.values(synchronous)[0]),
       foreignKeys: Number(Object.values(foreignKeys)[0] ?? 0),

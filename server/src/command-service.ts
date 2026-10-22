@@ -24,6 +24,15 @@ export interface CommitContext {
   role: 'owner' | 'player'
 }
 
+export interface CommandExecutionOptions {
+  /**
+   * Runs after all import authorization, catch-up, idempotency and plan
+   * validation checks succeed, while still occupying this pet's command queue.
+   * The callback runs exactly once for the command attempt and before mutation.
+   */
+  beforePortableImportCommit?: () => Promise<void>
+}
+
 export interface CommandCommit {
   result: WireCommandResult
   projection?: {
@@ -117,17 +126,22 @@ export class CommandService {
     opId: string,
     command: PetCommand,
     observedRevision?: number,
+    options: CommandExecutionOptions = {},
   ): Promise<CommandCommit> {
-    return this.enqueue(context.petId, () => this.executeSerialized(context, requestId, opId, command, observedRevision))
+    return this.enqueue(
+      context.petId,
+      () => this.executeSerialized(context, requestId, opId, command, observedRevision, options),
+    )
   }
 
-  private executeSerialized(
+  private async executeSerialized(
     context: CommitContext,
     requestId: string,
     opId: string,
     command: PetCommand,
     observedRevision?: number,
-  ): CommandCommit {
+    options: CommandExecutionOptions = {},
+  ): Promise<CommandCommit> {
     this.auth.recheck(context.petId, context.deviceId)
     const duplicate = this.store.commandByOpId(context.petId, context.deviceId, opId)
     if (duplicate !== undefined) {
@@ -176,10 +190,28 @@ export class CommandService {
       return this.executeExportForDetach(context, requestId, opId, snapshot.authority, snapshot.pet, snapshot.engine)
     }
     if (command.type === 'admin.importPortableBundle') {
-      return this.executePortableImport(context, requestId, opId, command, snapshot.pet, snapshot.authority, false)
+      return this.executePortableImport(
+        context,
+        requestId,
+        opId,
+        command,
+        snapshot.pet,
+        snapshot.authority,
+        false,
+        options.beforePortableImportCommit,
+      )
     }
     if (command.type === 'admin.resumeServer') {
-      return this.executePortableImport(context, requestId, opId, command, snapshot.pet, snapshot.authority, true)
+      return this.executePortableImport(
+        context,
+        requestId,
+        opId,
+        command,
+        snapshot.pet,
+        snapshot.authority,
+        true,
+        options.beforePortableImportCommit,
+      )
     }
     if (snapshot.authority.state !== 'active') {
       return this.rejectWithoutMutation(context, requestId, opId, command, snapshot.pet, {
@@ -459,7 +491,7 @@ export class CommandService {
     })
   }
 
-  private executePortableImport(
+  private async executePortableImport(
     context: CommitContext,
     requestId: string,
     opId: string,
@@ -469,8 +501,18 @@ export class CommandService {
     pet: PetRecord,
     authority: AuthorityRecord,
     resumeMode: boolean,
-  ): CommandCommit {
+    beforeCommit?: () => Promise<void>,
+  ): Promise<CommandCommit> {
     const at = this.now()
+    // Device administration does not claim canonical pet authority. Any other
+    // applied command means the destination has already chosen a canonical
+    // lineage, so an independent local lineage is a fork rather than migration.
+    const appliedCommand = this.store.db.prepare(
+      `SELECT 1 AS found FROM commands
+       WHERE pet_id = ? AND status = 'applied'
+         AND command_type NOT IN ('device.list', 'device.revoke')
+       LIMIT 1`,
+    ).get(context.petId) as { found: number } | undefined
     const planned = planPortableImport({
       bundle: command.payload.bundle,
       current: authority,
@@ -479,6 +521,7 @@ export class CommandService {
       resumeMode,
       uploaderDeviceId: context.deviceId,
       rebindLocalSessions: command.payload.rebindLocalSessions === true,
+      destinationHasNoAppliedCommands: appliedCommand === undefined,
       ...(resumeMode ? { expectedEpoch: (command.payload as { expectedEpoch: number }).expectedEpoch } : {}),
     })
     if (planned.ok === false) {
@@ -488,6 +531,7 @@ export class CommandService {
         refreshProjection: true,
       })
     }
+    if (beforeCommit !== undefined) await beforeCommit()
     const survivors = this.coverageSource === undefined ? [] : this.coverageSource.currentSurvivors(context.petId)
     const operationId = randomUUID()
     const handoffId = randomUUID()
@@ -495,8 +539,8 @@ export class CommandService {
       const nextPet = this.store.applyCanonicalImport({
         petId: context.petId,
         engine: planned.plan.engine,
-        authorityId: authority.authorityId,
-        restoreGeneration: authority.restoreGeneration,
+        authorityId: planned.plan.authorityId,
+        restoreGeneration: planned.plan.restoreGeneration,
         nextEpoch: planned.plan.nextEpoch,
         handoffId,
         sourceRevision: command.payload.bundle.authority.revision,

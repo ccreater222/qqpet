@@ -50,6 +50,8 @@ export class SchedulerService {
   /** Pets whose last observed authenticated-client count was zero (restart counts as zero). */
   private readonly empty = new Set<string>()
   private readonly catchingUp = new Set<string>()
+  /** Failed catch-up target; the pet stays not-ready until its anchor reaches it. */
+  private readonly catchUpFailures = new Map<string, number>()
 
   constructor(
     private readonly config: ServerConfig,
@@ -84,11 +86,21 @@ export class SchedulerService {
     return this.catchingUp.has(petId)
   }
 
+  /** Catch-up in progress or the last catch-up failed and has not reached its target. */
+  isCatchUpBlocked(petId: string): boolean {
+    return this.catchingUp.has(petId) || this.catchUpFailures.has(petId)
+  }
+
   isReady(petId: string): boolean {
     if (this.stopped) return false
-    if (this.catchingUp.has(petId)) return false
+    if (this.isCatchUpBlocked(petId)) return false
     const authority = this.store.getAuthority(petId)
     return authority?.state === 'active'
+  }
+
+  private clearCatchUpFailureIfReached(petId: string, anchorMs: number): void {
+    const target = this.catchUpFailures.get(petId)
+    if (target !== undefined && anchorMs >= target) this.catchUpFailures.delete(petId)
   }
 
   /** Runs one scheduler pass over every pet; used by the 1s timer and deterministic tests. */
@@ -136,6 +148,7 @@ export class SchedulerService {
     const snapshot = this.store.loadCanonical(petId)
     if (snapshot.authority.state !== 'active') {
       this.catchingUp.delete(petId)
+      this.catchUpFailures.delete(petId)
       this.empty.delete(petId)
       return
     }
@@ -148,6 +161,7 @@ export class SchedulerService {
         this.empty.add(petId)
         this.catchingUp.delete(petId)
         await this.setAnchor(petId, target)
+        this.clearCatchUpFailureIfReached(petId, target)
         this.metrics.increment('scheduler.frozen_anchor_updates')
         return
       }
@@ -166,10 +180,14 @@ export class SchedulerService {
 
     if (anchor > target) {
       await this.setAnchor(petId, target)
+      this.clearCatchUpFailureIfReached(petId, target)
       return
     }
     const due = dueFixedTicks(anchor, target)
-    if (due <= 0) return
+    if (due <= 0) {
+      this.clearCatchUpFailureIfReached(petId, anchor)
+      return
+    }
 
     this.catchingUp.add(petId)
     const startedAt = Date.now()
@@ -181,12 +199,23 @@ export class SchedulerService {
         result = await this.runChunk(petId, target)
         this.metrics.increment('scheduler.catchup_chunks')
       }
+      const committedAnchor = this.store.getPet(petId)?.lastSchedulerWallMs
+      if (committedAnchor !== undefined && committedAnchor >= target) {
+        this.catchUpFailures.delete(petId)
+      } else {
+        this.catchUpFailures.set(petId, target)
+      }
       this.metrics.increment('scheduler.catchup_runs')
       this.metrics.increment('scheduler.catchup_duration_ms', Date.now() - startedAt)
+    } catch (error) {
+      // Commands must stay fenced at the last committed game time. A later
+      // scheduler pass retries the original target and only then clears this.
+      this.catchUpFailures.set(petId, target)
+      throw error
     } finally {
       this.catchingUp.delete(petId)
     }
-    this.broadcastReady(petId)
+    if (this.catchUpFailures.has(petId) === false) this.broadcastReady(petId)
   }
 
   private firstActiveCoverageWall(snapshot: ReturnType<DatabaseStore['loadCanonical']>): number | undefined {
@@ -298,7 +327,7 @@ export class SchedulerService {
     return {
       petId,
       ready: this.isReady(petId),
-      catchingUp: this.catchingUp.has(petId),
+      catchingUp: this.isCatchUpBlocked(petId),
       gameTimeMs: pet.gameTimeMs,
       wallLagMs: Math.max(0, now - pet.lastSchedulerWallMs),
       nextTickAtMs: pet.lastSchedulerWallMs + GAME_TICK_MS,

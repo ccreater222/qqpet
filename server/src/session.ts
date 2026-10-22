@@ -563,14 +563,17 @@ export class SessionService {
 
   private async command(socket: WebSocket, connection: LiveConnection, request: CommandRequest): Promise<void> {
     try {
-      if (request.command.type === 'admin.importPortableBundle' || request.command.type === 'admin.resumeServer') {
-        await this.backupBeforeImport(connection.petId, request.opId)
-      }
+      const isPortableImport = request.command.type === 'admin.importPortableBundle'
+        || request.command.type === 'admin.resumeServer'
       const committed = await this.commands.execute({
         petId: connection.petId,
         deviceId: connection.deviceId,
         role: connection.role,
-      }, request.requestId, request.opId, request.command, request.observedRevision)
+      }, request.requestId, request.opId, request.command, request.observedRevision, {
+        ...(isPortableImport
+          ? { beforePortableImportCommit: () => this.backupBeforeImport(connection.petId, request.opId) }
+          : {}),
+      })
       if (committed.coverageReopen !== undefined) {
         const live = new Map(
           this.hub.listConnections(connection.petId)

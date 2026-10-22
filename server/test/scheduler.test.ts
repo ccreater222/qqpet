@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -462,6 +462,75 @@ test('commands are rejected with server_catching_up during catch-up and a final 
   await owner.close()
 })
 
+test('failed catch-up stays not-ready and fences commands until a retry reaches the target', async t => {
+  const clock = makeClock(Date.UTC(2026, 2, 8, 9, 0, 0))
+  const h = await createHarness(t, clock, {
+    advanceWhileEmpty: true,
+    timeZone: 'America/New_York',
+    catchupChunkTicks: 120,
+  })
+  adoptDirect(h)
+  const owner = await pairOwner(h)
+  const before = canonical(h)
+  clock.set(Date.UTC(2026, 2, 9, 11, 0, 0))
+
+  const originalCommit = h.server.store.commitSchedulerBatch.bind(h.server.store)
+  let forcedFailures = 1
+  h.server.store.commitSchedulerBatch = (...args) => {
+    if (forcedFailures > 0) {
+      forcedFailures -= 1
+      throw new Error('forced daily-boundary catch-up failure')
+    }
+    return originalCommit(...args)
+  }
+
+  await h.server.scheduler.runOnce()
+  assert.equal(forcedFailures, 0)
+  assert.equal(canonical(h).pet.gameTimeMs, before.pet.gameTimeMs)
+  assert.equal(h.server.scheduler.isCatchingUp('default'), false)
+  assert.equal(h.server.scheduler.isCatchUpBlocked('default'), true)
+  assert.equal(h.server.scheduler.isReady('default'), false)
+  const failedHealth = h.server.scheduler.health('default')
+  assert.ok(failedHealth)
+  assert.equal(failedHealth.ready, false)
+  assert.equal(failedHealth.catchingUp, true)
+  const failedHttpHealth = await fetch('http://127.0.0.1:' + h.server.address().port + '/health')
+    .then(response => response.json()) as Record<string, unknown>
+  assert.equal(failedHttpHealth.ready, false)
+
+  const rejected = await sendCommand(owner, 'command-during-failed-catchup', {
+    type: 'pet.rename',
+    payload: { name: 'MustNotApply' },
+  })
+  assert.equal(rejected.status, 'rejected')
+  assert.equal(rejected.error?.code, 'server_catching_up')
+  assert.equal(canonical(h).engine.save.petInfo.name, before.engine.save.petInfo.name)
+
+  await h.server.scheduler.runOnce()
+  assert.equal(h.server.scheduler.isCatchUpBlocked('default'), false)
+  assert.equal(h.server.scheduler.isReady('default'), true)
+  const healthy = h.server.scheduler.health('default')
+  assert.ok(healthy)
+  assert.equal(healthy.ready, true)
+  assert.equal(healthy.catchingUp, false)
+  const recoveredHttpHealth = await fetch('http://127.0.0.1:' + h.server.address().port + '/health')
+    .then(response => response.json()) as Record<string, unknown>
+  assert.equal(recoveredHttpHealth.ready, true)
+
+  const after = canonical(h)
+  assert.equal(after.pet.lastSchedulerWallMs, clock.now())
+  assert.equal(after.pet.gameTimeMs, before.pet.gameTimeMs + (clock.now() - before.pet.lastSchedulerWallMs))
+  assert.ok(eventsOfType(h, 'task.progress').some(payload => payload.dailyReset === true))
+
+  const accepted = await sendCommand(owner, 'command-after-catchup-retry', {
+    type: 'pet.rename',
+    payload: { name: 'AfterRetry' },
+  })
+  assert.equal(accepted.status, 'applied')
+  assert.equal(canonical(h).engine.save.petInfo.name, 'AfterRetry')
+  await owner.close()
+})
+
 test('scheduled work rewards are ordered and committed exactly once across a restart', async t => {
   const clock = makeClock(Date.now())
   const h = await createHarness(t, clock, { advanceWhileEmpty: true })
@@ -583,6 +652,129 @@ test('portable import rejects out-of-bounds anchors by default and explicit clam
   assert.equal(reopened.disconnectedAtWallMs, undefined)
   assert.equal(reopened.connectedAtWallMs, Number(operation.commit_wall_ms))
   await owner.close()
+})
+
+test('portable import adopts an independent local authority into an unclaimed server pet', async t => {
+  const clock = makeClock(Date.now())
+  const h = await createHarness(t, clock, { advanceWhileEmpty: true })
+  const owner = await pairOwner(h)
+  const placeholder = canonical(h).authority
+  assert.equal(placeholder.owner, 'server')
+  assert.equal(placeholder.restoreGeneration, 0)
+  const localAuthorityId = '11111111-1111-4111-8111-111111111111'
+  assert.notEqual(placeholder.authorityId, localAuthorityId)
+
+  const source = buildLocalBundle(h, {
+    authorityId: localAuthorityId,
+    restoreGeneration: 1,
+    epoch: 1,
+    handoffId: 'local-handoff-migration',
+    anchorMs: clock.now(),
+    mutateEngine: engine => {
+      engine.save.settings.undying = true
+    },
+  })
+  const imported = await sendCommand(owner, 'import-independent-local', {
+    type: 'admin.importPortableBundle',
+    payload: { bundle: source },
+  })
+  assert.equal(imported.status, 'applied')
+  const adopted = canonical(h)
+  assert.equal(adopted.authority.authorityId, localAuthorityId)
+  assert.equal(adopted.authority.restoreGeneration, 1)
+  assert.equal(adopted.authority.epoch, 2)
+  assert.equal(adopted.authority.owner, 'server')
+  assert.equal(adopted.authority.state, 'active')
+  assert.equal(adopted.engine.save.settings.undying, true)
+
+  const fork = await sendCommand(owner, 'import-independent-fork', {
+    type: 'admin.importPortableBundle',
+    payload: {
+      bundle: {
+        ...source,
+        authority: {
+          ...source.authority,
+          authorityId: '22222222-2222-4222-8222-222222222222',
+          epoch: 2,
+        },
+      },
+    },
+  })
+  assert.equal(fork.status, 'rejected')
+  assert.equal(fork.error?.code, 'authority_fork_risk')
+  await owner.close()
+
+  const reconnected = await connect(h, { kind: 'token', token: owner.token })
+  assert.equal(reconnected.welcome.authority.authorityId, localAuthorityId)
+  assert.equal(reconnected.welcome.authority.restoreGeneration, 1)
+  assert.equal(reconnected.welcome.authority.epoch, 2)
+  await reconnected.close()
+})
+
+test('pre-import backups run once only for a valid owner import', async t => {
+  const clock = makeClock(Date.now())
+  const h = await createHarness(t, clock, { advanceWhileEmpty: true })
+  const owner = await pairOwner(h)
+  const playerCode = h.server.store.issuePairingCode('default', 'player', 10 * 60_000, clock.now())
+  const player = await connect(h, { kind: 'pairing', code: playerCode.code, deviceLabel: 'Player phone' })
+  await player.next('ready')
+
+  const backupNames = async (): Promise<string[]> => (await readdir(h.config.backupDir))
+    .filter(name => name.includes('-pre-import-'))
+  assert.deepEqual(await backupNames(), [])
+
+  const localAuthorityId = '33333333-3333-4333-8333-333333333333'
+  const staleBundle = buildLocalBundle(h, {
+    authorityId: localAuthorityId,
+    restoreGeneration: 1,
+    epoch: 1,
+    handoffId: 'local-handoff-backup',
+    anchorMs: clock.now() - 7 * 24 * 60 * 60_000,
+  })
+  const unauthorized = await sendCommand(player, 'backup-unauthorized', {
+    type: 'admin.importPortableBundle',
+    payload: { bundle: staleBundle },
+  })
+  assert.equal(unauthorized.status, 'rejected')
+  assert.equal(unauthorized.error?.code, 'unauthorized')
+  assert.deepEqual(await backupNames(), [])
+
+  const rejected = await sendCommand(owner, 'backup-rejected', {
+    type: 'admin.importPortableBundle',
+    payload: { bundle: staleBundle },
+  })
+  assert.equal(rejected.status, 'rejected')
+  assert.equal(rejected.error?.code, 'anchor_out_of_bounds')
+  assert.deepEqual(await backupNames(), [])
+
+  const validBundle = buildLocalBundle(h, {
+    authorityId: localAuthorityId,
+    restoreGeneration: 1,
+    epoch: 1,
+    handoffId: 'local-handoff-backup',
+    anchorMs: clock.now(),
+  })
+  const importCommand = {
+    type: 'admin.importPortableBundle' as const,
+    payload: { bundle: validBundle },
+  }
+  const applied = await sendCommand(owner, 'backup-valid', importCommand)
+  assert.equal(applied.status, 'applied')
+  assert.equal((await backupNames()).length, 1)
+
+  const duplicate = await sendCommand(owner, 'backup-valid', importCommand)
+  assert.equal(duplicate.status, 'duplicate')
+  assert.equal((await backupNames()).length, 1)
+
+  const rejectedAfterAdoption = await sendCommand(owner, 'backup-rejected-after', {
+    type: 'admin.importPortableBundle',
+    payload: { bundle: staleBundle },
+  })
+  assert.equal(rejectedAfterAdoption.status, 'rejected')
+  assert.equal(rejectedAfterAdoption.error?.code, 'authority_fork_risk')
+  assert.equal((await backupNames()).length, 1)
+  await owner.close()
+  await player.close()
 })
 
 test('future-skewed imports use wall now without backfill and beyond-window imports reject unless clamped', async t => {

@@ -5,6 +5,7 @@ import {
   type EngineState,
   type SessionCoverageInterval,
 } from '../../src/shared/pet-runtime/index'
+import { assertEngineState } from '../../src/shared/sync/portable'
 import type { AuthorityRecord } from './db'
 import type { PortablePetBundleV1 } from '../../src/shared/sync/index'
 import { finalizeSurvivor, stableCoverageId, survivorDeviceId } from './coverage'
@@ -19,6 +20,9 @@ export type ImportPlanErrorCode = 'anchor_out_of_bounds' | 'authority_fork_risk'
 export interface ImportPlan {
   engine: EngineState
   importedCoverage: SessionCoverageInterval[]
+  authorityId: string
+  restoreGeneration: number
+  adoptedIncomingAuthority: boolean
   nextEpoch: number
   effectiveAnchorWallMs: number
   clockSkippedMs: number
@@ -37,6 +41,8 @@ export interface ImportPlanOptions {
   resumeMode: boolean
   uploaderDeviceId: string
   rebindLocalSessions: boolean
+  /** True only when the destination has no applied command/canonical claim. */
+  destinationHasNoAppliedCommands: boolean
   expectedEpoch?: number
 }
 
@@ -66,7 +72,19 @@ export function planPortableImport(options: ImportPlanOptions): ImportPlanResult
   if (options.resumeMode && current.state !== 'archived') {
     return fail('authority_not_active', 'resumeServer requires an archived server authority')
   }
-  if (stamp.authorityId !== current.authorityId || stamp.restoreGeneration !== current.restoreGeneration) {
+  const sameLineage = stamp.authorityId === current.authorityId && stamp.restoreGeneration === current.restoreGeneration
+  // A freshly initialized server has a placeholder server lineage (epoch 0,
+  // generation 0) and no applied command. Adopting the first genuine local
+  // bundle is the primary local-to-server migration path. Once any command has
+  // committed, or the destination lineage has advanced, a lineage mismatch is
+  // a real fork and remains fenced.
+  const adoptIncomingAuthority = options.resumeMode === false
+    && options.destinationHasNoAppliedCommands
+    && current.owner === 'server'
+    && current.state === 'active'
+    && current.epoch === 0
+    && current.restoreGeneration === 0
+  if (sameLineage === false && adoptIncomingAuthority === false) {
     return fail('authority_fork_risk', 'bundle authority lineage does not match the server authority')
   }
   if (options.expectedEpoch !== undefined && options.expectedEpoch !== stamp.epoch) {
@@ -75,7 +93,7 @@ export function planPortableImport(options: ImportPlanOptions): ImportPlanResult
   if (stamp.epoch < current.epoch) {
     return fail('authority_fork_risk', 'uploaded bundle epoch is stale')
   }
-  if (stamp.epoch === current.epoch) {
+  if (adoptIncomingAuthority === false && stamp.epoch === current.epoch) {
     const exactArchivedHandoff = options.resumeMode && current.state === 'archived' && stamp.handoffId === current.handoffId
     if (exactArchivedHandoff === false) {
       return fail('authority_fork_risk', 'equal epoch is only accepted for the exact archived handoff being resumed')
@@ -85,7 +103,13 @@ export function planPortableImport(options: ImportPlanOptions): ImportPlanResult
     return fail('invalid_payload', 'bundle authority revision/eventSeq is invalid')
   }
 
-  const engine = JSON.parse(JSON.stringify(bundle.engine)) as EngineState
+  let engine: EngineState
+  try {
+    engine = JSON.parse(JSON.stringify(bundle.engine)) as EngineState
+    assertEngineState(engine)
+  } catch {
+    return fail('invalid_payload', 'bundle engine is invalid')
+  }
   const importedAnchor = engine.lastSchedulerWallMs
   if (isSafeNonNegative(importedAnchor) === false) return fail('invalid_payload', 'imported scheduler anchor is invalid')
 
@@ -148,12 +172,20 @@ export function planPortableImport(options: ImportPlanOptions): ImportPlanResult
   rebound.sessionCoverage = importedCoverage
   delete rebound.coverageReopen
 
+  try {
+    assertEngineState(rebound)
+  } catch {
+    return fail('invalid_payload', 'imported engine plan is invalid')
+  }
   const nextEpoch = Math.max(current.epoch, stamp.epoch) + 1
   return {
     ok: true,
     plan: {
       engine: rebound,
       importedCoverage,
+      authorityId: adoptIncomingAuthority ? stamp.authorityId : current.authorityId,
+      restoreGeneration: adoptIncomingAuthority ? stamp.restoreGeneration : current.restoreGeneration,
+      adoptedIncomingAuthority: adoptIncomingAuthority,
       nextEpoch,
       effectiveAnchorWallMs,
       clockSkippedMs,
