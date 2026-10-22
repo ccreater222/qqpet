@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { backup as sqliteBackup, DatabaseSync } from 'node:sqlite'
 import { createRngState, dayKeyAt, nextDailyBoundaryMs, type EngineState } from '../../src/shared/pet-runtime/index'
 import { emptyEggSave } from '../../src/shared/pet-runtime/handlers-a'
@@ -315,17 +316,49 @@ function nowInteger(value: number | undefined): number {
   return resolved
 }
 
+function immutableDatabaseLocation(path: string): string {
+  const url = pathToFileURL(path)
+  url.searchParams.set('immutable', '1')
+  return url.href
+}
+
+/** Read the operator's external restore-generation fence without creating the file. */
+export function readRestoreGenerationRecord(filePath?: string): number | undefined {
+  if (filePath === undefined || filePath === '') return undefined
+  let raw: string
+  try {
+    raw = readFileSync(filePath, 'utf8').trim()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+  if (raw === '') return undefined
+  const recorded = Number(raw)
+  if (Number.isSafeInteger(recorded) === false || recorded < 0) throw new Error('restore generation record is invalid')
+  return recorded
+}
+
+interface DatabaseStoreOptions {
+  readOnly?: boolean
+}
+
 export class DatabaseStore {
   readonly db: DatabaseSync
+  private readonly readOnly: boolean
   private closed = false
 
-  constructor(path: string) {
-    this.db = new DatabaseSync(path)
-    this.db.exec('PRAGMA busy_timeout = 5000;')
-    this.db.exec('PRAGMA foreign_keys = ON;')
-    this.db.exec('PRAGMA journal_mode = WAL;')
-    this.db.exec('PRAGMA synchronous = FULL;')
-    this.migrate()
+  constructor(path: string, options: DatabaseStoreOptions = {}) {
+    this.readOnly = options.readOnly === true
+    this.db = this.readOnly
+      ? new DatabaseSync(immutableDatabaseLocation(path), { readOnly: true })
+      : new DatabaseSync(path)
+    if (this.readOnly === false) {
+      this.db.exec('PRAGMA busy_timeout = 5000;')
+      this.db.exec('PRAGMA foreign_keys = ON;')
+      this.db.exec('PRAGMA journal_mode = WAL;')
+      this.db.exec('PRAGMA synchronous = FULL;')
+      this.migrate()
+    }
     this.assertHealthy()
   }
 
@@ -389,10 +422,12 @@ export class DatabaseStore {
   close(): void {
     if (this.closed) return
     this.closed = true
-    try {
-      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
-    } catch {
-      // Closing must remain possible when the database disappeared.
+    if (this.readOnly === false) {
+      try {
+        this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+      } catch {
+        // Closing must remain possible when the database disappeared.
+      }
     }
     this.db.close()
   }
@@ -1336,38 +1371,58 @@ export class DatabaseStore {
    */
   verifyRestoreGeneration(filePath?: string): number {
     const current = this.maxRestoreGeneration()
-    if (filePath === undefined || filePath === '') return current
-    let raw: string
-    try {
-      raw = readFileSync(filePath, 'utf8').trim()
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return current
-      throw error
-    }
-    if (raw === '') return current
-    const recorded = Number(raw)
-    if (Number.isSafeInteger(recorded) === false || recorded < 0) throw new Error('restore generation record is invalid')
-    if (recorded > current) {
+    const recorded = readRestoreGenerationRecord(filePath)
+    if (recorded !== undefined && recorded > current) {
       throw new Error('database restore is older than the recorded restore generation; run restore --accept-rollback')
     }
     return current
   }
 
   resetAuthorityAfterRestore(petId: string, nextGeneration: number, at = Date.now()): AuthorityRecord {
+    return this.resetAuthoritiesAfterRestore([petId], nextGeneration, at)[0]
+  }
+
+  /**
+   * Reset every restored pet in one transaction. All preconditions are checked
+   * before the first UPDATE, so the staged database is either fully reset or
+   * left untouched.
+   */
+  resetAuthoritiesAfterRestore(petIds: readonly string[], nextGeneration: number, at = Date.now()): AuthorityRecord[] {
+    if (Number.isSafeInteger(nextGeneration) === false || nextGeneration < 0) {
+      throw new Error('restore generation must be a non-negative safe integer')
+    }
+    const uniquePetIds = [...new Set(petIds)]
+    if (uniquePetIds.length === 0) throw new Error('restore requires at least one pet')
+    if (uniquePetIds.length !== petIds.length) throw new Error('restore pet list contains duplicates')
     return this.transaction(() => {
-      const current = this.getAuthority(petId)
-      if (current === undefined) throw new Error('pet authority is missing: ' + petId)
-      this.db.prepare(
+      const current = uniquePetIds.map(petId => {
+        const authority = this.getAuthority(petId)
+        if (authority === undefined) throw new Error('pet authority is missing: ' + petId)
+        if (Number.isSafeInteger(authority.restoreGeneration) === false || authority.restoreGeneration < 0) {
+          throw new Error('pet authority restore generation is invalid: ' + petId)
+        }
+        if (authority.restoreGeneration >= nextGeneration) {
+          throw new Error('restore generation does not advance pet authority: ' + petId)
+        }
+        if (Number.isSafeInteger(authority.epoch) === false || authority.epoch >= Number.MAX_SAFE_INTEGER) {
+          throw new Error('pet authority epoch is not restorable: ' + petId)
+        }
+        return { petId, authority }
+      })
+      const update = this.db.prepare(
         `UPDATE pet_authority
          SET authority_id = ?, restore_generation = ?, epoch = ?, handoff_epoch = NULL,
              owner = 'server', state = 'active', handoff_id = ?, detached_at_ms = NULL,
              source_revision = NULL, source_event_seq = NULL
          WHERE pet_id = ?`,
-      ).run(randomUUID(), nextGeneration, current.epoch + 1, randomUUID(), petId)
-      const updated = this.getAuthority(petId)
-      if (updated === undefined) throw new Error('pet authority disappeared during restore')
+      )
       void at
-      return updated
+      return current.map(({ petId, authority }) => {
+        update.run(randomUUID(), nextGeneration, authority.epoch + 1, randomUUID(), petId)
+        const updated = this.getAuthority(petId)
+        if (updated === undefined) throw new Error('pet authority disappeared during restore')
+        return updated
+      })
     })
   }
 
@@ -1480,6 +1535,50 @@ export function initializePet(store: DatabaseStore, options: InitializePetOption
 
 export function openDatabase(path: string): DatabaseStore {
   return new DatabaseStore(path)
+}
+
+export function openDatabaseReadOnly(path: string): DatabaseStore {
+  return new DatabaseStore(path, { readOnly: true })
+}
+
+export interface RestoreSourceInfo {
+  petIds: string[]
+  authorities: AuthorityRecord[]
+  maxRestoreGeneration: number
+}
+
+/**
+ * Validate a restore candidate without modifying it. SQLite is opened through
+ * an immutable read-only URI so validation cannot create WAL/SHM sidecars.
+ */
+export function inspectRestoreSource(path: string): RestoreSourceInfo {
+  const store = openDatabaseReadOnly(path)
+  try {
+    const foreignKeyViolations = store.db.prepare('PRAGMA foreign_key_check').all()
+    if (foreignKeyViolations.length > 0) throw new Error('sqlite foreign_key_check failed')
+    const pets = store.listPets()
+    if (pets.length === 0) throw new Error('backup contains no pets')
+    const authorities: AuthorityRecord[] = []
+    for (const pet of pets) {
+      if (pet.schemaVersion !== SCHEMA_VERSION) throw new Error('unsupported pet schema version: ' + pet.id)
+      const canonical = store.loadCanonical(pet.id)
+      const authority = canonical.authority
+      if (Number.isSafeInteger(authority.restoreGeneration) === false || authority.restoreGeneration < 0) {
+        throw new Error('pet authority restore generation is invalid: ' + pet.id)
+      }
+      if (Number.isSafeInteger(authority.epoch) === false || authority.epoch >= Number.MAX_SAFE_INTEGER) {
+        throw new Error('pet authority epoch is not restorable: ' + pet.id)
+      }
+      authorities.push(authority)
+    }
+    const maxRestoreGeneration = store.maxRestoreGeneration()
+    if (Number.isSafeInteger(maxRestoreGeneration) === false || maxRestoreGeneration < 0) {
+      throw new Error('restore generation is invalid')
+    }
+    return { petIds: pets.map(pet => pet.id), authorities, maxRestoreGeneration }
+  } finally {
+    store.close()
+  }
 }
 
 function mapCoverageOperation(row: Record<string, unknown>): CoverageOperationRecord {

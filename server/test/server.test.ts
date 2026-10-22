@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -640,6 +640,16 @@ function runCli(args: string[], env: NodeJS.ProcessEnv = {}): Promise<{ stdout: 
   })
 }
 
+async function runCliFailure(args: string[], env: NodeJS.ProcessEnv = {}): Promise<{ stdout: string; stderr: string }> {
+  try {
+    await runCli(args, env)
+  } catch (error) {
+    const failure = error as Error & { stdout?: string; stderr?: string }
+    return { stdout: failure.stdout ?? '', stderr: failure.stderr ?? '' }
+  }
+  assert.fail('expected CLI command to fail')
+}
+
 function rawConnect(url: string): Promise<WebSocket> {
   const ws = new WebSocket(url, { perMessageDeflate: false })
   return new Promise((resolve, reject) => {
@@ -1045,7 +1055,7 @@ test('CLI init/pair write canonical rows and hashed pairing codes', async t => {
   assert.match(pair.pairingCode, /^QQP-/)
 })
 
-test('restore --accept-rollback mints new authority and fences stale restore generations', async t => {
+test('successful restore atomically replaces the DB and advances authority/restore generation', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'qqpet-c8-restore-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const dbPath = join(directory, 'restore.sqlite')
@@ -1060,6 +1070,7 @@ test('restore --accept-rollback mints new authority and fences stale restore gen
   const original = before.getAuthority('restore-pet')
   assert.ok(original)
   before.close()
+  const beforeBytes = await readFile(dbPath)
 
   const env = { QQPET_SYNC_RESTORE_GENERATION_FILE: generationFile }
   const restored = await runCli([
@@ -1072,6 +1083,8 @@ test('restore --accept-rollback mints new authority and fences stale restore gen
   assert.equal(body.restoreGeneration, 1)
   assert.notEqual(body.authority[0].authorityId, original.authorityId)
   assert.equal((await readFile(generationFile, 'utf8')).trim(), '1')
+  assert.deepEqual(await readFile(dbPath + '.restore-previous'), beforeBytes)
+  assert.notDeepEqual(await readFile(dbPath), beforeBytes)
 
   const after = openDatabase(dbPath)
   const authority = after.getAuthority('restore-pet')
@@ -1086,6 +1099,119 @@ test('restore --accept-rollback mints new authority and fences stale restore gen
   const stale = openDatabase(dbPath)
   assert.throws(() => stale.verifyRestoreGeneration(generationFile), /older than the recorded restore generation/)
   stale.close()
+})
+
+test('stale restore generation is rejected before the live DB changes', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-c8-restore-stale-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const dbPath = join(directory, 'restore.sqlite')
+  const backupPath = join(directory, 'backup.sqlite')
+  const generationFile = join(directory, 'restore-generation.txt')
+  const credentialFile = join(directory, 'credential.txt')
+  await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
+  await writeFile(credentialFile, 'operator-credential\n', { mode: 0o600 })
+  await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
+
+  const beforeStore = openDatabase(dbPath)
+  const beforeAuthority = beforeStore.getAuthority('restore-pet')
+  assert.ok(beforeAuthority)
+  beforeStore.close()
+  const beforeBytes = await readFile(dbPath)
+  await writeFile(generationFile, '1\n')
+
+  const failure = await runCliFailure([
+    'restore', '--from', backupPath, '--accept-rollback',
+    '--db', dbPath, '--restore-generation', '1',
+    '--owner-admin-credential', credentialFile,
+  ], { QQPET_SYNC_RESTORE_GENERATION_FILE: generationFile })
+  assert.match(failure.stderr, /must advance beyond the current\/recorded generation/)
+  assert.deepEqual(await readFile(dbPath), beforeBytes)
+
+  const afterStore = openDatabase(dbPath)
+  const afterAuthority = afterStore.getAuthority('restore-pet')
+  assert.ok(afterAuthority)
+  assert.equal(afterAuthority.authorityId, beforeAuthority.authorityId)
+  assert.equal(afterAuthority.restoreGeneration, beforeAuthority.restoreGeneration)
+  afterStore.close()
+  await assert.rejects(readFile(dbPath + '.restore-previous'), /ENOENT/)
+})
+
+test('corrupt backup is rejected before the live DB changes', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-c8-restore-corrupt-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const dbPath = join(directory, 'restore.sqlite')
+  const backupPath = join(directory, 'backup.sqlite')
+  const generationFile = join(directory, 'restore-generation.txt')
+  const credentialFile = join(directory, 'credential.txt')
+  await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
+  await writeFile(credentialFile, 'operator-credential\n', { mode: 0o600 })
+  await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
+
+  const beforeStore = openDatabase(dbPath)
+  const beforeAuthority = beforeStore.getAuthority('restore-pet')
+  assert.ok(beforeAuthority)
+  beforeStore.close()
+  const beforeBytes = await readFile(dbPath)
+  await writeFile(backupPath, 'not a sqlite database\n')
+
+  const failure = await runCliFailure([
+    'restore', '--from', backupPath, '--accept-rollback',
+    '--db', dbPath, '--restore-generation', '1',
+    '--owner-admin-credential', credentialFile,
+  ], { QQPET_SYNC_RESTORE_GENERATION_FILE: generationFile })
+  assert.match(failure.stderr, /not a database|quick_check|integrity_check|malformed/i)
+  assert.deepEqual(await readFile(dbPath), beforeBytes)
+
+  const afterStore = openDatabase(dbPath)
+  const afterAuthority = afterStore.getAuthority('restore-pet')
+  assert.ok(afterAuthority)
+  assert.equal(afterAuthority.authorityId, beforeAuthority.authorityId)
+  assert.equal(afterAuthority.restoreGeneration, beforeAuthority.restoreGeneration)
+  afterStore.close()
+  await assert.rejects(readFile(dbPath + '.restore-previous'), /ENOENT/)
+})
+
+test('restore failure after the swap rolls back to the prior live DB', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-c8-restore-rollback-'))
+  const lockedDirectory = join(directory, 'locked-generation')
+  const generationFile = join(lockedDirectory, 'restore-generation.txt')
+  t.after(async () => {
+    await chmod(lockedDirectory, 0o700).catch(() => {})
+    await rm(directory, { recursive: true, force: true })
+  })
+  const dbPath = join(directory, 'restore.sqlite')
+  const backupPath = join(directory, 'backup.sqlite')
+  const credentialFile = join(directory, 'credential.txt')
+  await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
+  await writeFile(credentialFile, 'operator-credential\n', { mode: 0o600 })
+  await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
+
+  const beforeStore = openDatabase(dbPath)
+  const beforeAuthority = beforeStore.getAuthority('restore-pet')
+  assert.ok(beforeAuthority)
+  beforeStore.close()
+  const beforeBytes = await readFile(dbPath)
+  await mkdir(lockedDirectory)
+  await writeFile(generationFile, '0\n', { mode: 0o600 })
+  await chmod(lockedDirectory, 0o500)
+
+  const failure = await runCliFailure([
+    'restore', '--from', backupPath, '--accept-rollback',
+    '--db', dbPath, '--restore-generation', '1',
+    '--owner-admin-credential', credentialFile,
+  ], { QQPET_SYNC_RESTORE_GENERATION_FILE: generationFile })
+  await chmod(lockedDirectory, 0o700)
+  assert.match(failure.stderr, /EACCES|permission denied/i)
+  assert.deepEqual(await readFile(dbPath), beforeBytes)
+  assert.equal((await readFile(generationFile, 'utf8')).trim(), '0')
+
+  const afterStore = openDatabase(dbPath)
+  const afterAuthority = afterStore.getAuthority('restore-pet')
+  assert.ok(afterAuthority)
+  assert.equal(afterAuthority.authorityId, beforeAuthority.authorityId)
+  assert.equal(afterAuthority.restoreGeneration, beforeAuthority.restoreGeneration)
+  afterStore.close()
+  await assert.rejects(readFile(dbPath + '.restore-previous'), /ENOENT/)
 })
 
 test('finalizeSurvivor preserves existing ends and caps provenance at a known suspend', () => {
