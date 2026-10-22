@@ -27,7 +27,7 @@ import { DesktopRendererRuntime, installRendererRuntimeIpc } from './renderer-ru
 import { desktopStartupAuthority, LOCAL_V2_DOCUMENT_NAME } from './renderer-runtime-flags'
 import { shouldStartVoice } from './voice-startup'
 import { DesktopStorageController, type StorageRemoteFactoryOptions } from './storage-controller'
-import { installStorageIpc } from './storage-ipc'
+import { assertTrustedStorageIpcSender, installStorageIpc, validateStorageImportDialogOptions } from './storage-ipc'
 import { PairingStore } from './pairing-store'
 import { RemoteRepository } from './remote-repository'
 import { createWebSocketTransport } from './remote-websocket-transport'
@@ -420,15 +420,16 @@ app.whenReady().then(async () => {
     importSave(r.filePaths[0])
     relaunch()
   })
-  ipcMain.handle(IPC.storageImportDialog, async (event, options?: { allowClamp?: boolean; rebindLocalSessions?: boolean }) => {
-    assertTrustedRenderer(event.sender)
+  ipcMain.handle(IPC.storageImportDialog, async (event, options?: unknown) => {
     if (storage === null) throw new Error('storage_unavailable: local runtime v2 is not active')
+    assertTrustedStorageIpcSender(storage, event)
+    const parsed = validateStorageImportDialogOptions(options)
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'QQ宠物存档', extensions: ['json'] }] })
     if (r.canceled || r.filePaths.length === 0) return null
     return storage.importBundle({
       json: readFileSync(r.filePaths[0], 'utf8'),
-      allowClamp: options?.allowClamp === true,
-      rebindLocalSessions: options?.rebindLocalSessions === true,
+      allowClamp: parsed.allowClamp === true,
+      rebindLocalSessions: parsed.rebindLocalSessions === true,
     })
   })
   ipcMain.handle(IPC.calendar, () => calendar(net.fetch))

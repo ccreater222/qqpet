@@ -1,9 +1,41 @@
-import { ipcMain } from 'electron'
+import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { IPC, type DesktopRemoteStatus } from '../shared/ipc'
-import type { DesktopStorageController } from './storage-controller'
+import {
+  type DesktopStorageController,
+  validateStorageDeviceId,
+  validateStorageImportDialogOptions,
+  validateStorageImportInput,
+  validateStoragePairInput,
+  validateStorageSetModeInput,
+  validateStorageTimeZone,
+  validateStorageWeatherCity,
+} from './storage-controller'
 
 function unavailable(reason: string): never {
   throw new Error('storage_unavailable: ' + reason)
+}
+
+/**
+ * Every storage/admin handler must originate from the trusted BrowserWindow's
+ * main frame. Comparing the WebContents alone would still allow an in-window
+ * subframe to drive owner-only authority changes.
+ */
+export function assertTrustedStorageIpcSender(
+  controller: DesktopStorageController,
+  event: IpcMainInvokeEvent,
+): void {
+  if (controller.acceptsSenderFrame(event.sender, event.senderFrame) === false) {
+    throw new Error('unauthorized: unknown renderer')
+  }
+}
+
+function trustedController(
+  controller: DesktopStorageController | null,
+  event: IpcMainInvokeEvent,
+): DesktopStorageController {
+  if (controller === null) unavailable('local runtime v2 is not active')
+  assertTrustedStorageIpcSender(controller, event)
+  return controller
 }
 
 function remoteStatusOf(controller: DesktopStorageController): DesktopRemoteStatus {
@@ -19,24 +51,44 @@ function remoteStatusOf(controller: DesktopStorageController): DesktopRemoteStat
   }
 }
 
+export { validateStorageImportDialogOptions }
+
 /** C11 storage/admin IPC surface. A null controller fails closed on legacy startup. */
 export function installStorageIpc(controller: DesktopStorageController | null): void {
-  ipcMain.handle(IPC.storageStatus, () => controller === null ? unavailable('local runtime v2 is not active') : controller.status())
-  ipcMain.handle(IPC.storageSetMode, (_event, input: unknown) => controller === null ? unavailable('local runtime v2 is not active') : controller.setMode(input))
-  ipcMain.handle(IPC.storagePair, (_event, input: unknown) => controller === null ? unavailable('local runtime v2 is not active') : controller.pair(input))
-  ipcMain.handle(IPC.storageUnpair, () => controller === null ? unavailable('local runtime v2 is not active') : controller.unpair())
-  ipcMain.handle(IPC.storageDeviceList, () => controller === null ? unavailable('local runtime v2 is not active') : controller.listDevices())
-  ipcMain.handle(IPC.storageDeviceRevoke, (_event, deviceId: unknown) => controller === null ? unavailable('local runtime v2 is not active') : controller.revokeDevice(deviceId))
-  ipcMain.handle(IPC.storageSetTimeZone, (_event, timeZone: unknown) => controller === null ? unavailable('local runtime v2 is not active') : controller.setTimeZone(timeZone))
-  ipcMain.handle(IPC.storageSetWeatherCity, (_event, city: unknown) => controller === null ? unavailable('local runtime v2 is not active') : controller.setWeatherCity(city))
-  ipcMain.handle(IPC.storageExportBundle, () => controller === null ? unavailable('local runtime v2 is not active') : controller.exportBundle())
-  ipcMain.handle(IPC.storageImportBundle, (_event, input: unknown) => controller === null ? unavailable('local runtime v2 is not active') : controller.importBundle(input))
-  ipcMain.handle(IPC.storageRetryHandoff, () => controller === null ? unavailable('local runtime v2 is not active') : controller.retryHandoff())
-  ipcMain.handle(IPC.storageRollbackHandoff, () => controller === null ? unavailable('local runtime v2 is not active') : controller.rollbackHandoff())
-  ipcMain.handle(IPC.storageCreateBackup, () => controller === null ? unavailable('local runtime v2 is not active') : controller.createBackup())
+  ipcMain.handle(IPC.storageStatus, (event) => trustedController(controller, event).status())
+  ipcMain.handle(IPC.storageSetMode, (event, input: unknown) => {
+    const target = trustedController(controller, event)
+    return target.setMode(validateStorageSetModeInput(input))
+  })
+  ipcMain.handle(IPC.storagePair, (event, input: unknown) => {
+    const target = trustedController(controller, event)
+    return target.pair(validateStoragePairInput(input))
+  })
+  ipcMain.handle(IPC.storageUnpair, (event) => trustedController(controller, event).unpair())
+  ipcMain.handle(IPC.storageDeviceList, (event) => trustedController(controller, event).listDevices())
+  ipcMain.handle(IPC.storageDeviceRevoke, (event, deviceId: unknown) => {
+    const target = trustedController(controller, event)
+    return target.revokeDevice(validateStorageDeviceId(deviceId))
+  })
+  ipcMain.handle(IPC.storageSetTimeZone, (event, timeZone: unknown) => {
+    const target = trustedController(controller, event)
+    return target.setTimeZone(validateStorageTimeZone(timeZone))
+  })
+  ipcMain.handle(IPC.storageSetWeatherCity, (event, city: unknown) => {
+    const target = trustedController(controller, event)
+    return target.setWeatherCity(validateStorageWeatherCity(city))
+  })
+  ipcMain.handle(IPC.storageExportBundle, (event) => trustedController(controller, event).exportBundle())
+  ipcMain.handle(IPC.storageImportBundle, (event, input: unknown) => {
+    const target = trustedController(controller, event)
+    return target.importBundle(validateStorageImportInput(input))
+  })
+  ipcMain.handle(IPC.storageRetryHandoff, (event) => trustedController(controller, event).retryHandoff())
+  ipcMain.handle(IPC.storageRollbackHandoff, (event) => trustedController(controller, event).rollbackHandoff())
+  ipcMain.handle(IPC.storageCreateBackup, (event) => trustedController(controller, event).createBackup())
 
   // C10 compatibility surface: same controller, same pairing/status state.
-  ipcMain.handle(IPC.remoteStatus, (): DesktopRemoteStatus => {
+  ipcMain.handle(IPC.remoteStatus, (event): DesktopRemoteStatus => {
     if (controller === null) {
       return {
         enabled: false,
@@ -54,8 +106,12 @@ export function installStorageIpc(controller: DesktopStorageController | null): 
         role: 'player',
       }
     }
+    assertTrustedStorageIpcSender(controller, event)
     return remoteStatusOf(controller)
   })
-  ipcMain.handle(IPC.remotePair, (_event, input: unknown) => controller === null ? unavailable('local runtime v2 is not active') : controller.pair(input))
-  ipcMain.handle(IPC.remoteRevoke, () => controller === null ? unavailable('local runtime v2 is not active') : controller.unpair())
+  ipcMain.handle(IPC.remotePair, (event, input: unknown) => {
+    const target = trustedController(controller, event)
+    return target.pair(validateStoragePairInput(input))
+  })
+  ipcMain.handle(IPC.remoteRevoke, (event) => trustedController(controller, event).unpair())
 }

@@ -154,6 +154,7 @@ interface ProjectionStateSource {
   gameTimeMs: number
   timeZone: string
   advanceWhileEmpty: boolean
+  weatherLocation?: string
   authority: WireAuthority
   save: SharedSaveData
 }
@@ -243,6 +244,7 @@ export class RemoteRepository {
   private gameTimeMs = 0
   private timeZone = 'UTC'
   private advanceWhileEmpty = true
+  private weatherLocation = ''
   private lastError: string | undefined
   private notice: string | undefined
   private lastCommandSeq: number | undefined
@@ -350,6 +352,7 @@ export class RemoteRepository {
       gameTimeMs: this.projection?.gameTimeMs ?? this.gameTimeMs,
       timeZone: this.projection?.timeZone ?? this.timeZone,
       advanceWhileEmpty: this.projection?.advanceWhileEmpty ?? this.advanceWhileEmpty,
+      weatherCity: this.getWeatherCity(),
       authority,
       ...(this.lastError === undefined ? {} : { lastError: this.lastError, error: this.lastError }),
       state: this.state,
@@ -367,6 +370,11 @@ export class RemoteRepository {
 
   getProjection(): RendererProjection | null {
     return this.projection === null ? null : clone(this.projection)
+  }
+
+  /** Canonical owner-selected weather location ('' means automatic). */
+  getWeatherCity(): string {
+    return this.projection?.weatherLocation ?? this.weatherLocation
   }
 
   getDeviceOverlay(): DeviceLocalOverlay {
@@ -840,6 +848,7 @@ export class RemoteRepository {
     this.applyAuthority(frame.authority)
     this.timeZone = frame.timeZone
     this.advanceWhileEmpty = frame.advanceWhileEmpty
+    if (frame.weatherLocation !== undefined) this.weatherLocation = frame.weatherLocation
     this.gameTimeMs = frame.gameTimeMs
     const wasDevice = this.deviceOverlay.localDeviceId
     if (wasDevice === 'remote-device' || wasDevice.length === 0) {
@@ -914,6 +923,7 @@ export class RemoteRepository {
       gameTimeMs: cache.gameTimeMs,
       timeZone: cache.timeZone,
       advanceWhileEmpty: cache.advanceWhileEmpty,
+      weatherLocation: cache.weatherLocation,
       authority: cache.authority,
       save: cache.shared,
     })
@@ -922,6 +932,7 @@ export class RemoteRepository {
     this.gameTimeMs = cache.gameTimeMs
     this.timeZone = cache.timeZone
     this.advanceWhileEmpty = cache.advanceWhileEmpty
+    this.weatherLocation = cache.weatherLocation ?? ''
     this.restoredProjectionCache = true
   }
 
@@ -955,6 +966,7 @@ export class RemoteRepository {
       gameTimeMs: projection.gameTimeMs,
       timeZone: projection.timeZone,
       advanceWhileEmpty: projection.advanceWhileEmpty,
+      weatherLocation: projection.weatherLocation ?? this.weatherLocation,
       authority: clone(projection.authority),
       shared: clone(projection.shared),
       device: clone(projection.device ?? this.deviceOverlay),
@@ -982,6 +994,7 @@ export class RemoteRepository {
   ): void {
     this.timeZone = frame.timeZone
     this.advanceWhileEmpty = frame.advanceWhileEmpty
+    if (frame.weatherLocation !== undefined) this.weatherLocation = frame.weatherLocation
     this.gameTimeMs = frame.gameTimeMs
     this.authority = clone(frame.authority)
     if (advanceCursor) this.cursor = { revision: frame.revision, eventSeq: frame.eventSeq }
@@ -993,6 +1006,7 @@ export class RemoteRepository {
       gameTimeMs: frame.gameTimeMs,
       timeZone: frame.timeZone,
       advanceWhileEmpty: frame.advanceWhileEmpty,
+      weatherLocation: frame.weatherLocation ?? this.weatherLocation,
       authority: clone(frame.authority),
       save: composeSaveWithOverlay(shared, this.deviceOverlay),
       device: clone(this.deviceOverlay),
@@ -1030,6 +1044,7 @@ export class RemoteRepository {
       gameTimeMs: frame.gameTimeMs,
       timeZone: frame.timeZone,
       advanceWhileEmpty: frame.advanceWhileEmpty,
+      ...(frame.weatherLocation === undefined ? {} : { weatherLocation: frame.weatherLocation }),
       authority: frame.authority,
       save: frame.save,
     }
@@ -1044,6 +1059,7 @@ export class RemoteRepository {
       gameTimeMs: source.gameTimeMs,
       timeZone: source.timeZone,
       advanceWhileEmpty: source.advanceWhileEmpty,
+      weatherLocation: source.weatherLocation ?? this.weatherLocation,
       authority: source.authority,
       device: clone(this.deviceOverlay),
     }
@@ -1056,6 +1072,7 @@ export class RemoteRepository {
     this.gameTimeMs = source.gameTimeMs
     this.timeZone = source.timeZone
     this.advanceWhileEmpty = source.advanceWhileEmpty
+    if (source.weatherLocation !== undefined) this.weatherLocation = source.weatherLocation
     this.authority = clone(source.authority)
     this.persistConfig()
     this.persistProjectionCache(projection)
@@ -1149,6 +1166,7 @@ export class RemoteRepository {
     this.applyAuthority(frame.authority)
     this.timeZone = frame.timeZone
     this.advanceWhileEmpty = frame.advanceWhileEmpty
+    if (frame.weatherLocation !== undefined) this.weatherLocation = frame.weatherLocation
     this.gameTimeMs = frame.gameTimeMs
     if (frame.catchingUp) {
       // A catch-up ready is a progress marker, not readiness. Require the
@@ -1283,6 +1301,10 @@ export class RemoteRepository {
   private handleProjection(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'projection' }>): void {
     if (this.pendingResync) return
     if (this.projection !== null && frame.revision === this.cursor.revision && frame.eventSeq === this.cursor.eventSeq) {
+      if (frame.weatherLocation !== undefined) {
+        this.weatherLocation = frame.weatherLocation
+        this.projection = { ...this.projection, weatherLocation: frame.weatherLocation }
+      }
       this.applyAuthority(frame.authority)
       this.persistProjectionCache()
       this.emitStatus()

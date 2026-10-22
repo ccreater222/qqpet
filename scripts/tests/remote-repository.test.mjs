@@ -46,6 +46,7 @@ const PLAYER_TOKEN = 'device-token-player-c10-secret'
 const PAIRING_CODE = 'pairing-code-c10-secret'
 const ISSUED_TOKEN = 'issued-token-c10-secret'
 const WSS_URL = 'wss://pet.example/v1/sync'
+const WEATHER_LOCATION = '杭州'
 const AUTHORITY = {
   owner: 'server',
   authorityId: 'authority-server-c10',
@@ -95,7 +96,7 @@ function sharedWithYb(yb) {
   return shared
 }
 
-function welcomeFrame(deviceId, delivery = 'snapshot', issuedToken) {
+function welcomeFrame(deviceId, delivery = 'snapshot', issuedToken, weatherLocation = WEATHER_LOCATION) {
   return {
     t: 'welcome',
     v: PROTOCOL_VERSION,
@@ -110,6 +111,7 @@ function welcomeFrame(deviceId, delivery = 'snapshot', issuedToken) {
     gameTimeMs: GAME_TIME_MS,
     timeZone: 'Asia/Shanghai',
     advanceWhileEmpty: true,
+    weatherLocation,
     authority: clone(AUTHORITY),
     headRevision: 1,
     headEventSeq: 1,
@@ -119,7 +121,7 @@ function welcomeFrame(deviceId, delivery = 'snapshot', issuedToken) {
   }
 }
 
-function snapshotFrame(shared, revision, eventSeq, authority) {
+function snapshotFrame(shared, revision, eventSeq, authority, weatherLocation = WEATHER_LOCATION) {
   return {
     t: 'snapshot',
     v: PROTOCOL_VERSION,
@@ -128,12 +130,13 @@ function snapshotFrame(shared, revision, eventSeq, authority) {
     gameTimeMs: GAME_TIME_MS + revision * 60_000,
     timeZone: 'Asia/Shanghai',
     advanceWhileEmpty: true,
+    weatherLocation,
     authority: clone(authority),
     save: clone(shared),
   }
 }
 
-function readyFrame(revision, eventSeq, authority, catchingUp = false) {
+function readyFrame(revision, eventSeq, authority, catchingUp = false, weatherLocation = WEATHER_LOCATION) {
   return {
     t: 'ready',
     v: PROTOCOL_VERSION,
@@ -142,6 +145,7 @@ function readyFrame(revision, eventSeq, authority, catchingUp = false) {
     gameTimeMs: GAME_TIME_MS + revision * 60_000,
     timeZone: 'Asia/Shanghai',
     advanceWhileEmpty: true,
+    weatherLocation,
     authority: clone(authority),
     catchingUp,
   }
@@ -297,6 +301,7 @@ class FakeServer {
     this.shared = clone(fixtures.shared)
     this.timeZone = 'Asia/Shanghai'
     this.advanceWhileEmpty = true
+    this.weatherLocation = WEATHER_LOCATION
     this.authority = clone(AUTHORITY)
     this.pairingCode = PAIRING_CODE
     this.issuedToken = ISSUED_TOKEN
@@ -318,7 +323,7 @@ class FakeServer {
   }
 
   snapshotFrame() {
-    return snapshotFrame(this.shared, this.revision, this.eventSeq, this.authority)
+    return snapshotFrame(this.shared, this.revision, this.eventSeq, this.authority, this.weatherLocation)
   }
 
   projectionFrame() {
@@ -330,6 +335,7 @@ class FakeServer {
       gameTimeMs: this.gameTimeMs(),
       timeZone: this.timeZone,
       advanceWhileEmpty: this.advanceWhileEmpty,
+      weatherLocation: this.weatherLocation,
       authority: clone(this.authority),
       save: clone(this.shared),
       events: [{
@@ -374,7 +380,7 @@ class FakeServer {
         ? []
         : [...this.projectionEvents.values()].filter(event => event.eventSeq > frame.lastEventSeq)
       if (this.replayDeliveryOnReconnect && missed.length > 0) {
-        const welcome = welcomeFrame(deviceId, 'replay')
+        const welcome = welcomeFrame(deviceId, 'replay', undefined, this.weatherLocation)
         welcome.headRevision = this.revision
         welcome.headEventSeq = this.eventSeq
         connection.emit(welcome)
@@ -392,9 +398,10 @@ class FakeServer {
         deviceId,
         'snapshot',
         frame.auth.kind === 'pairing' ? this.issuedToken : undefined,
+        this.weatherLocation,
       ))
       connection.emit(this.snapshotFrame())
-      connection.emit(readyFrame(this.revision, this.eventSeq, this.authority))
+      connection.emit(readyFrame(this.revision, this.eventSeq, this.authority, false, this.weatherLocation))
       return
     }
     if (frame.t === 'command') {
@@ -571,6 +578,8 @@ test('hello/welcome handshake applies a snapshot and exposes the server reposito
   assert.equal(projections[0].events.length, 0)
   assert.equal(repository.getStatus().mode, 'server')
   assert.equal(repository.getStatus().serverMode, true)
+  assert.equal(repository.getWeatherCity(), WEATHER_LOCATION)
+  assert.equal(repository.getStatus().weatherCity, WEATHER_LOCATION)
   assert.equal(statuses.some(item => item.connection === 'connecting'), true)
   assert.equal(statuses.at(-1).connection, 'online')
   assert.equal(store.token, TOKEN)
@@ -1272,6 +1281,44 @@ test('pairing exchange persists the issued token and never exposes secrets', asy
   assert.equal(logs.flat().join(' ').includes(ISSUED_TOKEN), false)
 })
 
+test('canonical weather city follows live projections and survives projection-cache restart', async t => {
+  const server = new FakeServer()
+  const first = await makeRepository(server)
+  t.after(() => first.repository.stop())
+  await first.repository.start()
+  assert.equal(first.repository.getWeatherCity(), WEATHER_LOCATION)
+  const connection = [...server.clients][0]
+
+  server.weatherLocation = '北京'
+  server.revision += 1
+  server.eventSeq += 1
+  connection.emit(server.projectionFrame())
+  await until(() => first.repository.getWeatherCity() === '北京', 'live weather projection')
+  await until(() => first.store.cacheWrites.at(-1)?.weatherLocation === '北京', 'weather cache write')
+  await first.repository.stop()
+
+  const transport = new FakeTransport(() => {})
+  const restored = await makeRepository(server, {
+    store: first.store,
+    config: first.store.config,
+    transport,
+  })
+  t.after(() => restored.repository.stop())
+  const starting = restored.repository.start()
+  await until(() => restored.repository.hasProjectionCache(), 'weather cache restore')
+  assert.equal(restored.repository.getWeatherCity(), '北京')
+  const restoredConnection = transport.connections[0]
+  const welcome = welcomeFrame(OWNER_DEVICE_ID, 'snapshot', undefined, '广州')
+  welcome.headRevision = server.revision
+  welcome.headEventSeq = server.eventSeq
+  restoredConnection.emit(welcome)
+  restoredConnection.emit(snapshotFrame(server.shared, server.revision, server.eventSeq, AUTHORITY, '广州'))
+  restoredConnection.emit(readyFrame(server.revision, server.eventSeq, AUTHORITY, false, '广州'))
+  await starting
+  await until(() => restored.repository.getWeatherCity() === '广州', 'reconnected weather')
+  assert.equal(restored.repository.getStatus().weatherCity, '广州')
+})
+
 test('accepted state is persisted as a validated v2 cache and restored before the handshake', async t => {
   const server = new FakeServer()
   const first = await makeRepository(server)
@@ -1287,6 +1334,7 @@ test('accepted state is persisted as a validated v2 cache and restored before th
   assert.equal(cache.eventSeq, server.eventSeq)
   assert.deepEqual(cache.shared, server.shared)
   assert.deepEqual(cache.authority, AUTHORITY)
+  assert.equal(cache.weatherLocation, WEATHER_LOCATION)
   await first.repository.stop()
 
   const transport = new FakeTransport(() => {})
@@ -1312,6 +1360,8 @@ test('accepted state is persisted as a validated v2 cache and restored before th
   })
   assert.deepEqual(restored.repository.getProjection().shared, server.shared)
   assert.deepEqual(restored.repository.getProjection().authority, AUTHORITY)
+  assert.equal(restored.repository.getWeatherCity(), WEATHER_LOCATION)
+  assert.equal(restored.repository.getStatus().weatherCity, WEATHER_LOCATION)
   assert.equal(restored.repository.getStatus().readOnly, true, 'a restored cache is not writable before ready')
   assert.equal(restored.repository.getStatus().revision, server.revision)
   assert.equal(restored.repository.hasProjectionCache(), true)

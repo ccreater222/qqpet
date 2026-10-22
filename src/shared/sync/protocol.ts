@@ -230,6 +230,8 @@ export interface Welcome {
   gameTimeMs: number
   timeZone: string
   advanceWhileEmpty: boolean
+  /** Canonical owner-selected weather location; empty means automatic. */
+  weatherLocation?: string
   authority: WireAuthority
   headRevision: number
   headEventSeq: number
@@ -247,6 +249,8 @@ export interface SnapshotMessage {
   gameTimeMs: number
   timeZone: string
   advanceWhileEmpty: boolean
+  /** Canonical owner-selected weather location; empty means automatic. */
+  weatherLocation?: string
   authority: WireAuthority
   save: SharedSaveData
 }
@@ -267,6 +271,8 @@ export interface ReadyMessage {
   gameTimeMs: number
   timeZone: string
   advanceWhileEmpty: boolean
+  /** Canonical owner-selected weather location; empty means automatic. */
+  weatherLocation?: string
   authority: WireAuthority
   catchingUp: boolean
 }
@@ -279,6 +285,8 @@ export interface ProjectionMessage {
   gameTimeMs: number
   timeZone: string
   advanceWhileEmpty: boolean
+  /** Canonical owner-selected weather location; empty means automatic. */
+  weatherLocation?: string
   authority: WireAuthority
   save: SharedSaveData
   /** Ordered events introduced by this revision/batch. */

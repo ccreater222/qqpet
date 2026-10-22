@@ -21,6 +21,8 @@ export interface RendererProjection {
   gameTimeMs: number
   timeZone: string
   advanceWhileEmpty: boolean
+  /** Canonical server weather location, when the host has one. */
+  weatherLocation?: string
   authority: WireAuthority
   /** Host-only diagnostics; renderers must not branch canonical rules on these. */
   device?: DeviceLocalOverlay
@@ -36,6 +38,8 @@ export interface RendererRepositoryStatus {
   gameTimeMs: number
   timeZone: string
   advanceWhileEmpty: boolean
+  /** Canonical server weather location, when connected/cached. */
+  weatherCity?: string
   authority: WireAuthority
   lastError?: string
   /** Host lifecycle detail retained for diagnostics/compatibility. */

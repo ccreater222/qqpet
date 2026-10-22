@@ -324,6 +324,7 @@ export class SchedulerService {
       gameTimeMs: snapshot.pet.gameTimeMs,
       timeZone: snapshot.settings.timeZone,
       advanceWhileEmpty: snapshot.settings.advanceWhileEmpty,
+      weatherLocation: snapshot.settings.weatherLocation ?? snapshot.engine.weatherLocation,
       authority: this.hub.authority(petId),
       save: snapshot.engine.save,
     })
@@ -335,6 +336,7 @@ export class SchedulerService {
       gameTimeMs: snapshot.pet.gameTimeMs,
       timeZone: snapshot.settings.timeZone,
       advanceWhileEmpty: snapshot.settings.advanceWhileEmpty,
+      weatherLocation: snapshot.settings.weatherLocation ?? snapshot.engine.weatherLocation,
       authority: this.hub.authority(petId),
       catchingUp: false,
     })

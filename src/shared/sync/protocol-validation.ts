@@ -204,6 +204,7 @@ function welcome(value: Record<string, unknown>): boolean {
   if (value.protocolVersion !== PROTOCOL_VERSION || value.saveSchemaVersion !== SAVE_SCHEMA_VERSION) return false
   if (isSafeInteger(value.serverTimeMs) === false || isSafeInteger(value.gameTimeMs) === false) return false
   if (isNonEmptyString(value.timeZone) === false || typeof value.advanceWhileEmpty !== 'boolean') return false
+  if (optionalString(value, 'weatherLocation') === false) return false
   if (validateWireAuthority(value.authority) === false) return false
   if (isNonNegativeInteger(value.headRevision) === false || isNonNegativeInteger(value.headEventSeq) === false) return false
   if (typeof value.catchingUp !== 'boolean') return false
@@ -216,6 +217,7 @@ function snapshotLike(value: Record<string, unknown>, withEvents: boolean): bool
   if (isNonNegativeInteger(value.revision) === false || isNonNegativeInteger(value.eventSeq) === false) return false
   if (isSafeInteger(value.gameTimeMs) === false) return false
   if (isNonEmptyString(value.timeZone) === false || typeof value.advanceWhileEmpty !== 'boolean') return false
+  if (optionalString(value, 'weatherLocation') === false) return false
   if (validateWireAuthority(value.authority) === false) return false
   if (validateSharedSaveData(value.save) === false) return false
   if (withEvents && orderedEvents(value.events) === false) return false

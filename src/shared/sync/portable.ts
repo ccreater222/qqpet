@@ -133,6 +133,8 @@ export interface RemoteProjectionCacheV2 {
   gameTimeMs: number
   timeZone: string
   advanceWhileEmpty: boolean
+  /** Canonical owner-selected weather location carried by the server projection. */
+  weatherLocation?: string
   authority: WireAuthority
   shared: SharedSaveData
   device: DeviceLocalOverlay
@@ -911,7 +913,7 @@ export function assertRemoteProjectionCacheV2(value: unknown): asserts value is 
   ], '$.cache')
   assertOnlyKeys(value, [
     'format', 'schemaVersion', 'petId', 'deviceId', 'revision', 'eventSeq', 'gameTimeMs',
-    'timeZone', 'advanceWhileEmpty', 'authority', 'shared', 'device',
+    'timeZone', 'advanceWhileEmpty', 'weatherLocation', 'authority', 'shared', 'device',
   ], '$.cache')
   assertNonEmptyString(value.petId, '$.cache.petId')
   assertNonEmptyString(value.deviceId, '$.cache.deviceId')
@@ -920,6 +922,9 @@ export function assertRemoteProjectionCacheV2(value: unknown): asserts value is 
   requireNonNegativeInteger(value.gameTimeMs, '$.cache.gameTimeMs')
   assertNonEmptyString(value.timeZone, '$.cache.timeZone')
   if (typeof value.advanceWhileEmpty !== 'boolean') failSchema('invalid_schema', '$.cache.advanceWhileEmpty', 'expected a boolean')
+  if (value.weatherLocation !== undefined && typeof value.weatherLocation !== 'string') {
+    failSchema('invalid_schema', '$.cache.weatherLocation', 'expected a string')
+  }
   assertWireAuthority(value.authority, '$.cache.authority')
   assertSharedSaveData(value.shared)
   assertDeviceLocalOverlay(value.device)

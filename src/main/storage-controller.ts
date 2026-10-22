@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWrite } from './atomic-write'
 import { IPC } from '../shared/ipc'
@@ -22,7 +22,10 @@ import {
   type StorageBackupStatus,
   type StorageDeviceListView,
   type StorageExportReport,
+  type StorageHandoffDirection,
   type StorageHandoffReport,
+  type StorageHandoffState,
+  type StorageImportInput,
   type StorageImportReport,
   type StorageMigrationStatus,
   type StorageMode,
@@ -84,6 +87,7 @@ export interface StorageRemoteAuthority {
   load(): Promise<SaveData>
   getStatus(): RendererRepositoryStatus
   getProjection(): RendererProjection | null
+  getWeatherCity(): string
   command<K extends CommandKey>(
     command: Extract<PetCommand, { type: K }>,
     options?: { opId?: string },
@@ -112,7 +116,11 @@ export interface StorageRemoteFactoryOptions {
 
 export interface StorageWindowLike {
   isDestroyed?(): boolean
-  webContents: { send(channel: string, ...args: unknown[]): void }
+  webContents: {
+    send(channel: string, ...args: unknown[]): void
+    mainFrame?: unknown
+    getURL?(): string
+  }
 }
 
 export interface DesktopStorageControllerOptions {
@@ -131,7 +139,12 @@ interface PendingUpload {
   opId: string
   command: Extract<PetCommand, { type: 'admin.importPortableBundle' | 'admin.resumeServer' }>
   requestedRebind: boolean
+  archiveReason: 'use_server' | 'mode_switch'
 }
+
+const STORAGE_HANDOFF_FILE = 'storage-handoff.json'
+const STORAGE_HANDOFF_FORMAT = 'qqpet-storage-handoff' as const
+const STORAGE_HANDOFF_SCHEMA_VERSION = 1 as const
 
 type UploadOutcome = 'applied' | 'rolled_back' | 'frozen'
 
@@ -154,12 +167,32 @@ function recordOf(value: unknown): Record<string, unknown> {
     : {}
 }
 
-function validatePairInput(value: unknown): StoragePairInput {
+function requiredObject(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('invalid_payload: pairing input must be an object')
+    throw new Error('invalid_payload: ' + label + ' must be an object')
   }
-  const record = value as Record<string, unknown>
-  if (typeof record.serverUrl !== 'string') {
+  return value as Record<string, unknown>
+}
+
+function optionalBoolean(record: Record<string, unknown>, key: string): boolean | undefined {
+  const value = record[key]
+  if (value === undefined) return undefined
+  if (typeof value !== 'boolean') throw new Error('invalid_payload: ' + key + ' must be a boolean')
+  return value
+}
+
+function optionalNonNegativeInteger(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key]
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || Number.isSafeInteger(value) === false || value < 0) {
+    throw new Error('invalid_payload: ' + key + ' must be a non-negative safe integer')
+  }
+  return value
+}
+
+export function validateStoragePairInput(value: unknown): StoragePairInput {
+  const record = requiredObject(value, 'pairing input')
+  if (typeof record.serverUrl !== 'string' || record.serverUrl.length === 0) {
     throw new Error('invalid_payload: serverUrl must be a ws:// or wss:// URL')
   }
   assertRemoteServerUrl(record.serverUrl)
@@ -168,34 +201,81 @@ function validatePairInput(value: unknown): StoragePairInput {
   return { serverUrl: record.serverUrl, code: record.code, deviceLabel: record.deviceLabel }
 }
 
-function validateModeInput(value: unknown): StorageSetModeInput {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('invalid_payload: mode input must be an object')
-  }
-  const record = value as Record<string, unknown>
+export function validateStorageSetModeInput(value: unknown): StorageSetModeInput {
+  const record = requiredObject(value, 'mode input')
   if (record.mode !== 'local' && record.mode !== 'server') throw new Error('invalid_payload: mode must be local or server')
   if (record.initialSource !== undefined && record.initialSource !== 'upload-local' && record.initialSource !== 'use-server') {
     throw new Error('invalid_payload: initialSource must be upload-local or use-server')
   }
   if (record.serverUrl !== undefined) {
-    if (typeof record.serverUrl !== 'string') throw new Error('invalid_payload: serverUrl must be a string')
+    if (typeof record.serverUrl !== 'string' || record.serverUrl.length === 0) throw new Error('invalid_payload: serverUrl must be a string')
     assertRemoteServerUrl(record.serverUrl)
   }
-  if (record.pairingCode !== undefined && typeof record.pairingCode !== 'string') throw new Error('invalid_payload: pairingCode must be a string')
-  if (record.deviceLabel !== undefined && typeof record.deviceLabel !== 'string') throw new Error('invalid_payload: deviceLabel must be a string')
-  if (record.expectedEpoch !== undefined && (typeof record.expectedEpoch !== 'number' || Number.isSafeInteger(record.expectedEpoch) === false)) {
-    throw new Error('invalid_payload: expectedEpoch must be a safe integer')
+  if (record.pairingCode !== undefined && (typeof record.pairingCode !== 'string' || record.pairingCode.length === 0)) {
+    throw new Error('invalid_payload: pairingCode must be a non-empty string')
   }
+  if (record.deviceLabel !== undefined && (typeof record.deviceLabel !== 'string' || record.deviceLabel.length === 0)) {
+    throw new Error('invalid_payload: deviceLabel must be a non-empty string')
+  }
+  const allowClamp = optionalBoolean(record, 'allowClamp')
+  const rebindLocalSessions = optionalBoolean(record, 'rebindLocalSessions')
+  const expectedEpoch = optionalNonNegativeInteger(record, 'expectedEpoch')
   return {
     mode: record.mode,
     ...(record.serverUrl === undefined ? {} : { serverUrl: record.serverUrl }),
     ...(record.pairingCode === undefined ? {} : { pairingCode: record.pairingCode }),
     ...(record.deviceLabel === undefined ? {} : { deviceLabel: record.deviceLabel }),
     ...(record.initialSource === undefined ? {} : { initialSource: record.initialSource }),
-    ...(record.allowClamp === undefined ? {} : { allowClamp: record.allowClamp === true }),
-    ...(record.rebindLocalSessions === undefined ? {} : { rebindLocalSessions: record.rebindLocalSessions === true }),
-    ...(record.expectedEpoch === undefined ? {} : { expectedEpoch: record.expectedEpoch }),
+    ...(allowClamp === undefined ? {} : { allowClamp }),
+    ...(rebindLocalSessions === undefined ? {} : { rebindLocalSessions }),
+    ...(expectedEpoch === undefined ? {} : { expectedEpoch }),
   }
+}
+
+export function validateStorageImportInput(value: unknown): StorageImportInput {
+  const record = requiredObject(value, 'import input')
+  if (typeof record.json !== 'string' || record.json.length === 0) throw new Error('invalid_payload: bundle json is required')
+  const allowClamp = optionalBoolean(record, 'allowClamp')
+  const rebindLocalSessions = optionalBoolean(record, 'rebindLocalSessions')
+  const expectedEpoch = optionalNonNegativeInteger(record, 'expectedEpoch')
+  return {
+    json: record.json,
+    ...(allowClamp === undefined ? {} : { allowClamp }),
+    ...(rebindLocalSessions === undefined ? {} : { rebindLocalSessions }),
+    ...(expectedEpoch === undefined ? {} : { expectedEpoch }),
+  }
+}
+
+export interface StorageImportDialogOptions {
+  allowClamp?: boolean
+  rebindLocalSessions?: boolean
+}
+
+export function validateStorageImportDialogOptions(value: unknown): StorageImportDialogOptions {
+  if (value === undefined) return {}
+  const record = requiredObject(value, 'import options')
+  const allowClamp = optionalBoolean(record, 'allowClamp')
+  const rebindLocalSessions = optionalBoolean(record, 'rebindLocalSessions')
+  return {
+    ...(allowClamp === undefined ? {} : { allowClamp }),
+    ...(rebindLocalSessions === undefined ? {} : { rebindLocalSessions }),
+  }
+}
+
+export function validateStorageDeviceId(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0) throw new Error('invalid_payload: deviceId is required')
+  return value
+}
+
+export function validateStorageTimeZone(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0) throw new Error('invalid_payload: timeZone is required')
+  assertTimeZone(value)
+  return value
+}
+
+export function validateStorageWeatherCity(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('invalid_payload: city must be a string')
+  return value
 }
 
 /**
@@ -253,6 +333,10 @@ export class DesktopStorageController {
     return join(this.userDataPath, STORAGE_CONFIG_FILE)
   }
 
+  get pendingHandoffPath(): string {
+    return join(this.userDataPath, STORAGE_HANDOFF_FILE)
+  }
+
   get requestedMode(): StorageMode {
     return this.mode
   }
@@ -271,6 +355,40 @@ export class DesktopStorageController {
 
   acceptsSender(sender: unknown): boolean {
     return this.window !== null && sender === this.window.webContents
+  }
+
+  /**
+   * Admin IPC additionally requires the trusted window's main frame and,
+   * when both URLs are available, the same origin as the current renderer.
+   */
+  acceptsSenderFrame(sender: unknown, frame: unknown): boolean {
+    if (this.acceptsSender(sender) === false) return false
+    if (typeof frame !== 'object' || frame === null) return false
+    const candidate = frame as { parent?: unknown; url?: unknown }
+    if (candidate.parent !== null && candidate.parent !== undefined) return false
+    const windowMainFrame = this.window?.webContents.mainFrame
+    if (windowMainFrame !== undefined && frame !== windowMainFrame) return false
+    const senderMainFrame = (sender as { mainFrame?: unknown }).mainFrame
+    if (senderMainFrame !== undefined && frame !== senderMainFrame) return false
+    if (typeof candidate.url !== 'string' || candidate.url.length === 0) return false
+    let frameOrigin: string
+    try {
+      frameOrigin = new URL(candidate.url).origin
+    } catch {
+      return false
+    }
+    const getURL = (sender as { getURL?: () => string }).getURL
+    if (typeof getURL === 'function') {
+      const current = getURL.call(sender)
+      if (typeof current === 'string' && current.length > 0) {
+        try {
+          if (frameOrigin !== new URL(current).origin) return false
+        } catch {
+          return false
+        }
+      }
+    }
+    return true
   }
 
   attachWindow(window: StorageWindowLike): void {
@@ -311,6 +429,8 @@ export class DesktopStorageController {
   }
 
   private async initializeNow(): Promise<StorageStatusView> {
+    this.restorePendingHandoffState()
+    const pendingAtStartup = this.pendingUpload !== null || this.pendingServerBundle !== null
     const config = this.readConfig()
     this.mode = config.mode
     this.serverUrl = config.serverUrl
@@ -324,7 +444,7 @@ export class DesktopStorageController {
         // A restored RemoteProjectionCacheV2 already holds the newest device-local
         // values; the archived local document may be older after a server-mode
         // restart. Seed only when there is no cache to protect.
-        if (this.remote !== null && this.remote.hasProjectionCache?.() !== true) {
+        if (pendingAtStartup === false && this.remote !== null && this.remote.hasProjectionCache?.() !== true) {
           await this.seedRemoteOverlay(this.remote, true)
         }
       } else {
@@ -338,6 +458,7 @@ export class DesktopStorageController {
       await this.local.start()
       this.local.setSendEnabled(true)
     }
+    await this.reconcilePendingHandoffAfterStartup()
     this.emitStatus()
     return this.status()
   }
@@ -397,7 +518,7 @@ export class DesktopStorageController {
   }
 
   async setMode(input: unknown): Promise<StorageStatusView> {
-    const parsed = validateModeInput(input)
+    const parsed = validateStorageSetModeInput(input)
     if (parsed.mode === 'local') return this.switchToLocal()
     if (this.activeMode === 'server') {
       this.mode = 'server'
@@ -420,6 +541,7 @@ export class DesktopStorageController {
       const outcome = await this.uploadLocalToServer({
         allowClamp: parsed.allowClamp === true,
         rebindLocalSessions: parsed.rebindLocalSessions === true,
+        archiveReason: 'mode_switch',
       })
       if (outcome !== 'applied') {
         this.mapModeLocal()
@@ -428,7 +550,13 @@ export class DesktopStorageController {
         return this.status()
       }
     } else {
-      await this.useServerAuthority()
+      const outcome = await this.useServerAuthority()
+      if (outcome !== 'applied') {
+        this.mapModeLocal()
+        this.persistConfig()
+        this.emitStatus()
+        return this.status()
+      }
     }
     this.mode = 'server'
     this.activeMode = 'server'
@@ -440,7 +568,7 @@ export class DesktopStorageController {
   }
 
   async pair(input: unknown): Promise<StorageStatusView> {
-    const pairing = validatePairInput(input)
+    const pairing = validateStoragePairInput(input)
     await this.stopRemote()
     const tokenStore = this.createTokenStore()
     const localOverlay = this.localOverlayForRemote()
@@ -510,10 +638,10 @@ export class DesktopStorageController {
   }
 
   async revokeDevice(deviceId: unknown): Promise<StorageDeviceListView> {
-    if (typeof deviceId !== 'string' || deviceId.length === 0) throw new Error('invalid_payload: deviceId is required')
+    const targetDeviceId = validateStorageDeviceId(deviceId)
     if (this.remote === null) throw new Error('offline: pair a server first')
     if (this.remote.getStatus().role !== 'owner') throw new Error('unauthorized: only an owner device can revoke devices')
-    const result = await this.remote.command({ type: 'device.revoke', payload: { deviceId } })
+    const result = await this.remote.command({ type: 'device.revoke', payload: { deviceId: targetDeviceId } })
     const error = commandResultError(result)
     if (error !== null) throw new Error(error.code + ': ' + error.message)
     return this.listDevices()
@@ -531,9 +659,8 @@ export class DesktopStorageController {
   }
 
   async setTimeZone(timeZone: unknown): Promise<StorageStatusView> {
-    if (typeof timeZone !== 'string' || timeZone.length === 0) throw new Error('invalid_payload: timeZone is required')
-    assertTimeZone(timeZone)
-    const result = await this.commandAuthority({ type: 'server.setTimeZone', payload: { timeZone } })
+    const next = validateStorageTimeZone(timeZone)
+    const result = await this.commandAuthority({ type: 'server.setTimeZone', payload: { timeZone: next } })
     const error = commandResultError(result)
     if (error !== null) throw new Error(error.code + ': ' + error.message)
     this.emitStatus()
@@ -541,8 +668,7 @@ export class DesktopStorageController {
   }
 
   async setWeatherCity(city: unknown): Promise<StorageStatusView> {
-    if (typeof city !== 'string') throw new Error('invalid_payload: city must be a string')
-    const next = city.trim()
+    const next = validateStorageWeatherCity(city).trim()
     const result = await this.commandAuthority({ type: 'server.setWeatherCity', payload: { city: next } })
     const error = commandResultError(result)
     if (error !== null) throw new Error(error.code + ': ' + error.message)
@@ -566,14 +692,12 @@ export class DesktopStorageController {
    * and reports validation/authority/clamp outcomes.
    */
   async importBundle(input: unknown): Promise<StorageImportReport> {
-    if (typeof input !== 'object' || input === null || Array.isArray(input)) throw new Error('invalid_payload: import input must be an object')
-    const record = input as Record<string, unknown>
-    if (typeof record.json !== 'string' || record.json.length === 0) throw new Error('invalid_payload: bundle json is required')
+    const parsed = validateStorageImportInput(input)
     const before = this.currentRestoreGeneration()
     const base: StorageImportReport = { status: 'invalid', mode: this.activeMode, restoreGenerationReset: false }
     let bundle: PortablePetBundleV1
     try {
-      bundle = migratePortablePetBundle(JSON.parse(record.json) as unknown)
+      bundle = migratePortablePetBundle(JSON.parse(parsed.json) as unknown)
     } catch (error) {
       return { ...base, status: 'invalid', message: messageOf(error), errorCode: errorCodeOf(error) }
     }
@@ -583,8 +707,8 @@ export class DesktopStorageController {
         return { ...base, status: 'rejected', errorCode: 'unauthorized', message: 'only an owner device may import a portable bundle', restoreGenerationReset }
       }
       this.capturedEvents = []
-      const allowClamp = record.allowClamp === true
-      const rebindLocalSessions = record.rebindLocalSessions === true
+      const allowClamp = parsed.allowClamp === true
+      const rebindLocalSessions = parsed.rebindLocalSessions === true
       const command = {
         type: 'admin.importPortableBundle' as const,
         payload: { bundle, ...(allowClamp ? { allowClamp: true } : {}), ...(rebindLocalSessions ? { rebindLocalSessions: true } : {}) },
@@ -607,12 +731,8 @@ export class DesktopStorageController {
     if (current === null) {
       return { ...base, status: 'rejected', errorCode: 'authority_not_active', message: 'local authority is not loaded', restoreGenerationReset }
     }
-    const allowClamp = record.allowClamp === true
-    const rebindLocalSessions = record.rebindLocalSessions === true
-    if (record.expectedEpoch !== undefined
-      && (typeof record.expectedEpoch !== 'number' || Number.isSafeInteger(record.expectedEpoch) === false)) {
-      return { ...base, status: 'invalid', errorCode: 'invalid_payload', message: 'expectedEpoch must be a safe integer', restoreGenerationReset }
-    }
+    const allowClamp = parsed.allowClamp === true
+    const rebindLocalSessions = parsed.rebindLocalSessions === true
     const planned = planPortableImportPlan({
       bundle,
       current,
@@ -620,7 +740,7 @@ export class DesktopStorageController {
       allowClamp,
       rebindLocalSessions,
       destinationLocalDeviceId: current.localDeviceId,
-      ...(record.expectedEpoch === undefined ? {} : { expectedEpoch: record.expectedEpoch as number }),
+      ...(parsed.expectedEpoch === undefined ? {} : { expectedEpoch: parsed.expectedEpoch }),
     })
     if (planned.ok === false) {
       return { ...base, status: 'rejected', errorCode: planned.code, message: planned.message, restoreGenerationReset }
@@ -671,8 +791,9 @@ export class DesktopStorageController {
   /** Retries a frozen upload or failed server-detach import; never issues a fresh epoch. */
   async retryHandoff(): Promise<StorageStatusView> {
     if (this.pendingUpload !== null && this.remote !== null && this.local.getStatus().authorityState === 'handoff_pending') {
-      const result = await this.remote.command(this.pendingUpload.command, { opId: this.pendingUpload.opId })
-      const outcome = await this.applyUploadResult(result, this.pendingUpload.bundle, this.pendingUpload.requestedRebind)
+      const pending = this.pendingUpload
+      const result = await this.remote.command(pending.command, { opId: pending.opId })
+      const outcome = await this.applyUploadResult(result, pending.archiveReason, pending.requestedRebind)
       if (outcome === 'applied') this.activateServerMode()
       this.emitStatus()
       return this.status()
@@ -703,6 +824,7 @@ export class DesktopStorageController {
           message: '交接结果未知（' + messageOf(error) + '），保持冻结，未回滚。',
           atWallMs: this.now(),
         }
+        try { this.persistPendingHandoffState() } catch { /* keep the in-memory frozen state */ }
         this.emitStatus()
         return this.status()
       }
@@ -710,6 +832,7 @@ export class DesktopStorageController {
       if (resultError !== null) {
         await this.local.rollbackDetach()
         this.pendingUpload = null
+        this.clearPersistedPendingHandoffState()
         this.handoffValue = {
           direction: 'local_to_server',
           state: 'rolled_back',
@@ -721,8 +844,9 @@ export class DesktopStorageController {
         this.persistConfig()
         this.pushActiveProjection()
       } else {
-        await this.applyUploadResult(result, this.pendingUpload.bundle, this.pendingUpload.requestedRebind)
-        this.activateServerMode()
+        const pending = this.pendingUpload
+        const outcome = await this.applyUploadResult(result, pending.archiveReason, pending.requestedRebind)
+        if (outcome === 'applied') this.activateServerMode()
       }
       this.emitStatus()
       return this.status()
@@ -834,11 +958,16 @@ export class DesktopStorageController {
   // --- internals -------------------------------------------------------------------
 
   private weatherCity(): string {
-    if (this.activeMode === 'local') {
-      const local = this.local.getWeatherCity?.()
-      if (typeof local === 'string' && local.length > 0) return local
+    if (this.activeMode === 'server') {
+      if (this.remote !== null) {
+        const canonical = this.remote.getWeatherCity()
+        this.lastWeatherCity = canonical
+        return canonical
+      }
+      return this.lastWeatherCity
     }
-    return this.lastWeatherCity
+    const local = this.local.getWeatherCity?.()
+    return typeof local === 'string' ? local : this.lastWeatherCity
   }
 
   private currentRestoreGeneration(): number {
@@ -1005,29 +1134,60 @@ export class DesktopStorageController {
     this.pushActiveProjection()
   }
 
-  private async useServerAuthority(): Promise<void> {
+  private async useServerAuthority(): Promise<UploadOutcome> {
     if (this.local.getStatus().authorityState === 'handoff_pending') {
       await this.local.rollbackDetach()
     }
-    await this.local.archiveAuthority('use_server')
-    this.handoffValue = {
-      direction: 'none',
-      state: 'applied',
-      message: '使用服务器宠物：本机权威已归档，未上传本机数据。',
-      atWallMs: this.now(),
+    if (this.remote === null) throw new Error('pairing_required: pair this device with a server first')
+    const authorityState = this.remote.getStatus().authority.state
+    if (authorityState === 'active') {
+      await this.local.archiveAuthority('use_server')
+      this.clearPersistedPendingHandoffState()
+      this.handoffValue = {
+        direction: 'none',
+        state: 'applied',
+        message: '使用服务器宠物：本机权威已归档，未上传本机数据。',
+        atWallMs: this.now(),
+      }
+      return 'applied'
     }
+    if (authorityState === 'archived') {
+      // Never archive the only active local copy just because the server cache
+      // exists. The archived server must first accept admin.resumeServer with
+      // this exact local bundle; only an applied result permits local archiving.
+      const outcome = await this.uploadLocalToServer({
+        allowClamp: false,
+        rebindLocalSessions: false,
+        archiveReason: 'use_server',
+      })
+      if (outcome === 'applied') {
+        this.handoffValue = {
+          ...this.handoffValue,
+          message: '服务器权威已恢复，本机权威已归档。',
+        }
+      }
+      return outcome
+    }
+    throw new Error('authority_not_active: server authority is not active or archived')
   }
 
-  private async uploadLocalToServer(options: { allowClamp: boolean; rebindLocalSessions: boolean }): Promise<UploadOutcome> {
+  private async uploadLocalToServer(options: {
+    allowClamp: boolean
+    rebindLocalSessions: boolean
+    archiveReason: 'use_server' | 'mode_switch'
+  }): Promise<UploadOutcome> {
     const localProjection = this.local.getProjection()
     if (localProjection === null || localProjection.save.havePet === false) {
       throw new Error('local_pet_unavailable: local authority has no pet to upload')
     }
     if (this.remote === null) throw new Error('pairing_required: pair this device with a server first')
+    const authorityState = this.remote.getStatus().authority.state
+    if (authorityState !== 'active' && authorityState !== 'archived') {
+      throw new Error('authority_not_active: server authority cannot accept a portable bundle')
+    }
     const remoteEpoch = this.remote.getStatus().authority.epoch
     const bundle = await this.local.exportForDetach(remoteEpoch)
     const opId = `handoff-${bundle.authority.handoffId}`
-    const authorityState = this.remote.getStatus().authority.state
     const payloadBase = {
       bundle,
       ...(options.allowClamp ? { allowClamp: true } : {}),
@@ -1036,7 +1196,13 @@ export class DesktopStorageController {
     const command = authorityState === 'archived'
       ? { type: 'admin.resumeServer' as const, payload: { ...payloadBase, expectedEpoch: bundle.authority.epoch } }
       : { type: 'admin.importPortableBundle' as const, payload: payloadBase }
-    this.pendingUpload = { bundle, opId, command, requestedRebind: options.rebindLocalSessions }
+    this.pendingUpload = {
+      bundle,
+      opId,
+      command,
+      requestedRebind: options.rebindLocalSessions,
+      archiveReason: options.archiveReason,
+    }
     this.capturedEvents = []
     this.handoffValue = {
       direction: 'local_to_server',
@@ -1046,6 +1212,22 @@ export class DesktopStorageController {
         ? '本机已冻结，正在通过 admin.resumeServer 恢复服务器权威…'
         : '本机已冻结，正在上传到服务器…',
       atWallMs: this.now(),
+    }
+    try {
+      this.persistPendingHandoffState()
+    } catch (error) {
+      this.pendingUpload = null
+      await this.local.rollbackDetach()
+      this.handoffValue = {
+        direction: 'local_to_server',
+        state: 'failed',
+        retryable: false,
+        message: '无法持久化交接状态，本机已恢复活动权威：' + messageOf(error),
+        atWallMs: this.now(),
+      }
+      this.mapModeLocal()
+      this.persistConfig()
+      throw new Error('storage_persistence_failed: ' + messageOf(error))
     }
     let result: CommandResult
     try {
@@ -1058,16 +1240,22 @@ export class DesktopStorageController {
         message: '上传结果未知（' + messageOf(error) + '），本机保持冻结；可重试或回滚。',
         atWallMs: this.now(),
       }
+      try { this.persistPendingHandoffState() } catch { /* keep the in-memory frozen state */ }
       return 'frozen'
     }
-    return this.applyUploadResult(result, bundle, options.rebindLocalSessions)
+    return this.applyUploadResult(result, options.archiveReason, options.rebindLocalSessions)
   }
 
-  private async applyUploadResult(result: CommandResult, _bundle: PortablePetBundleV1, requestedRebind: boolean): Promise<UploadOutcome> {
+  private async applyUploadResult(
+    result: CommandResult,
+    archiveReason: 'use_server' | 'mode_switch',
+    requestedRebind: boolean,
+  ): Promise<UploadOutcome> {
     const resultError = commandResultError(result)
     if (resultError !== null) {
-      this.pendingUpload = null
       await this.local.rollbackDetach()
+      this.pendingUpload = null
+      this.clearPersistedPendingHandoffState()
       this.handoffValue = {
         direction: 'local_to_server',
         state: 'rolled_back',
@@ -1079,8 +1267,22 @@ export class DesktopStorageController {
       this.persistConfig()
       return 'rolled_back'
     }
+    try {
+      await this.local.archiveAuthority(archiveReason)
+    } catch (error) {
+      this.handoffValue = {
+        direction: 'local_to_server',
+        state: 'frozen',
+        retryable: true,
+        message: '服务器已接管权威，但本机归档失败：' + messageOf(error) + '；请重试交接。',
+        atWallMs: this.now(),
+      }
+      try { this.persistPendingHandoffState() } catch { /* keep the in-memory frozen state */ }
+      return 'frozen'
+    }
     const data = recordOf(commandResultData(result))
     this.pendingUpload = null
+    this.clearPersistedPendingHandoffState()
     this.handoffValue = {
       direction: 'local_to_server',
       state: 'applied',
@@ -1254,19 +1456,23 @@ export class DesktopStorageController {
       return this.status()
     }
     this.pendingServerBundle = { bundle }
-    await this.stopRemote()
-    this.activeMode = 'local'
-    this.local.setSendEnabled(true)
-    await this.local.loadFenced()
     this.handoffValue = {
       direction: 'server_to_local',
       state: 'pending',
       message: '服务器已归档，正在把分离包导入本机…',
       atWallMs: this.now(),
     }
+    // Persist the detached bundle before stopping the connection or mutating
+    // local state so an app restart can finish this exact handoff.
+    this.persistPendingHandoffState()
+    await this.stopRemote()
+    this.activeMode = 'local'
+    this.local.setSendEnabled(true)
+    await this.local.loadFenced()
     const applied = await this.importDetachedBundle(bundle)
     if (applied) {
       this.pendingServerBundle = null
+      this.clearPersistedPendingHandoffState()
       this.mode = 'local'
       this.mapModeLocal()
       if (remoteOverlay !== null) await this.mergeRemoteOverlayIntoLocal(remoteOverlay)
@@ -1276,6 +1482,7 @@ export class DesktopStorageController {
       this.mode = 'server'
       this.activeMode = 'local'
       this.local.setSendEnabled(true)
+      this.persistPendingHandoffState()
     }
     this.persistConfig()
     this.pushActiveProjection()
@@ -1374,8 +1581,205 @@ export class DesktopStorageController {
     const pending = this.pendingServerBundle
     if (pending === null) return
     const applied = await this.importDetachedBundle(pending.bundle)
-    if (applied) this.pendingServerBundle = null
+    if (applied) {
+      await this.stopRemote()
+      this.pendingServerBundle = null
+      this.mode = 'local'
+      this.mapModeLocal()
+      this.clearPersistedPendingHandoffState()
+      this.persistConfig()
+      this.pushActiveProjection()
+    } else {
+      // The server remains archived. Persist the requested server mode and
+      // the pending bundle so a later retry/restart cannot start a stale
+      // local writer over the fenced projection.
+      this.mode = 'server'
+      this.activeMode = 'local'
+      this.local.setSendEnabled(true)
+      this.persistPendingHandoffState()
+      this.persistConfig()
+    }
     this.emitStatus()
+  }
+
+  private restoredHandoffReport(value: unknown, fallbackDirection: StorageHandoffDirection): StorageHandoffReport {
+    const record = recordOf(value)
+    const direction: StorageHandoffDirection = record.direction === 'local_to_server' || record.direction === 'server_to_local' || record.direction === 'none'
+      ? record.direction
+      : fallbackDirection
+    let state: StorageHandoffState | null = null
+    if (record.state === 'idle' || record.state === 'pending' || record.state === 'applied' || record.state === 'rolled_back' || record.state === 'frozen' || record.state === 'failed') {
+      state = record.state
+    }
+    if (state === null) {
+      return {
+        direction: fallbackDirection,
+        state: 'frozen',
+        retryable: true,
+        message: '检测到未完成的权威交接，正在重启对账…',
+      }
+    }
+    const report: StorageHandoffReport = { direction, state }
+    for (const key of ['message', 'reason'] as const) {
+      if (typeof record[key] === 'string') report[key] = record[key]
+    }
+    for (const key of ['atWallMs', 'clockSkippedMs', 'nextEpoch', 'restoreGenerationBefore', 'restoreGenerationAfter'] as const) {
+      if (typeof record[key] === 'number' && Number.isSafeInteger(record[key])) report[key] = record[key]
+    }
+    for (const key of ['requestedRebind', 'rebindReported', 'importClamped', 'retryable'] as const) {
+      if (typeof record[key] === 'boolean') report[key] = record[key]
+    }
+    if (Array.isArray(record.cancelledSessionKinds) && record.cancelledSessionKinds.every(kind => typeof kind === 'string')) {
+      report.cancelledSessionKinds = [...record.cancelledSessionKinds] as string[]
+    }
+    return report
+  }
+
+  /** Restore only the non-secret handoff envelope and authenticated bundle copies. */
+  private restorePendingHandoffState(): void {
+    if (existsSync(this.pendingHandoffPath) === false) return
+    try {
+      const raw = recordOf(JSON.parse(readFileSync(this.pendingHandoffPath, 'utf8')) as unknown)
+      if (raw.format !== STORAGE_HANDOFF_FORMAT || raw.schemaVersion !== STORAGE_HANDOFF_SCHEMA_VERSION) {
+        throw new Error('unsupported handoff journal')
+      }
+      if (raw.kind === 'local_to_server') {
+        const upload = recordOf(raw.upload)
+        const bundle = migratePortablePetBundle(upload.bundle)
+        if (typeof upload.opId !== 'string' || upload.opId.length === 0) throw new Error('missing handoff opId')
+        const commandType = upload.commandType
+        if (commandType !== 'admin.importPortableBundle' && commandType !== 'admin.resumeServer') {
+          throw new Error('invalid handoff command')
+        }
+        const requestedRebind = upload.rebindLocalSessions === true
+        const payloadBase = {
+          bundle,
+          ...(upload.allowClamp === true ? { allowClamp: true as const } : {}),
+          ...(requestedRebind ? { rebindLocalSessions: true as const } : {}),
+        }
+        let command: PendingUpload['command']
+        if (commandType === 'admin.resumeServer') {
+          if (typeof upload.expectedEpoch !== 'number' || Number.isSafeInteger(upload.expectedEpoch) === false || upload.expectedEpoch < 0) {
+            throw new Error('invalid resume epoch')
+          }
+          command = { type: 'admin.resumeServer', payload: { ...payloadBase, expectedEpoch: upload.expectedEpoch } }
+        } else {
+          command = { type: 'admin.importPortableBundle', payload: payloadBase }
+        }
+        this.pendingUpload = {
+          bundle,
+          opId: upload.opId,
+          command,
+          requestedRebind,
+          archiveReason: upload.archiveReason === 'use_server' ? 'use_server' : 'mode_switch',
+        }
+        this.handoffValue = this.restoredHandoffReport(raw.handoff, 'local_to_server')
+        return
+      }
+      if (raw.kind === 'server_to_local') {
+        const bundle = migratePortablePetBundle(raw.bundle)
+        this.pendingServerBundle = { bundle }
+        this.handoffValue = this.restoredHandoffReport(raw.handoff, 'server_to_local')
+        return
+      }
+      throw new Error('unknown handoff direction')
+    } catch {
+      this.pendingUpload = null
+      this.pendingServerBundle = null
+      try { rmSync(this.pendingHandoffPath, { force: true }) } catch { /* corrupt journal is not authoritative */ }
+    }
+  }
+
+  /** Durably record enough state to resume the exact operation after restart. */
+  private persistPendingHandoffState(): void {
+    if (this.pendingUpload !== null) {
+      const pending = this.pendingUpload
+      const command = pending.command
+      atomicWrite(this.pendingHandoffPath, JSON.stringify({
+        format: STORAGE_HANDOFF_FORMAT,
+        schemaVersion: STORAGE_HANDOFF_SCHEMA_VERSION,
+        kind: 'local_to_server',
+        upload: {
+          bundle: pending.bundle,
+          opId: pending.opId,
+          commandType: command.type,
+          allowClamp: command.payload.allowClamp === true,
+          rebindLocalSessions: pending.requestedRebind,
+          archiveReason: pending.archiveReason,
+          ...(command.type === 'admin.resumeServer' ? { expectedEpoch: command.payload.expectedEpoch } : {}),
+        },
+        handoff: clone(this.handoffValue),
+      }, null, 2))
+      return
+    }
+    if (this.pendingServerBundle !== null) {
+      atomicWrite(this.pendingHandoffPath, JSON.stringify({
+        format: STORAGE_HANDOFF_FORMAT,
+        schemaVersion: STORAGE_HANDOFF_SCHEMA_VERSION,
+        kind: 'server_to_local',
+        bundle: this.pendingServerBundle.bundle,
+        handoff: clone(this.handoffValue),
+      }, null, 2))
+      return
+    }
+    this.clearPersistedPendingHandoffState()
+  }
+
+  private clearPersistedPendingHandoffState(): void {
+    try { rmSync(this.pendingHandoffPath, { force: true }) } catch { /* the next startup will validate and clear it */ }
+  }
+
+  private async reconcilePendingHandoffAfterStartup(): Promise<void> {
+    if (this.pendingUpload !== null) {
+      const localState = this.local.getStatus().authorityState
+      if (localState === 'handoff_pending') {
+        if (this.remote === null) {
+          try { await this.connectStoredRemote() } catch { /* stay fenced until connectivity returns */ }
+        }
+        if (this.remote === null || this.remote.getStatus().connection !== 'online') return
+        const pending = this.pendingUpload
+        let result: CommandResult
+        try {
+          result = await this.remote.command(pending.command, { opId: pending.opId })
+        } catch (error) {
+          this.handoffValue = {
+            ...this.handoffValue,
+            direction: 'local_to_server',
+            state: 'frozen',
+            retryable: true,
+            message: '重启对账时上传结果未知：' + messageOf(error) + '；本机保持冻结。',
+            atWallMs: this.now(),
+          }
+          try { this.persistPendingHandoffState() } catch { /* keep the in-memory frozen state */ }
+          return
+        }
+        const outcome = await this.applyUploadResult(result, pending.archiveReason, pending.requestedRebind)
+        if (outcome === 'applied') this.activateServerMode()
+        return
+      }
+      if (localState === 'archived') {
+        if (this.remote === null) {
+          try { await this.connectStoredRemote() } catch { /* retry later */ }
+        }
+        if (this.remote !== null && this.remote.getStatus().authority.state === 'active') {
+          this.pendingUpload = null
+          this.clearPersistedPendingHandoffState()
+          this.activateServerMode()
+        }
+        return
+      }
+      // The local authority is active, so the uncertain upload no longer owns
+      // a fenced copy. Drop a stale journal instead of replaying it.
+      this.pendingUpload = null
+      this.clearPersistedPendingHandoffState()
+      this.mode = 'local'
+      this.mapModeLocal()
+      this.persistConfig()
+      return
+    }
+    if (this.pendingServerBundle !== null) {
+      await this.retryServerImport()
+    }
   }
 
   private mapModeLocal(): void {

@@ -1639,6 +1639,8 @@ test('retention cannot delete stable rows referenced by a pending coverage opera
 test('owner server settings commands persist without unauthenticated HTTP exposure', async t => {
   const harness = await createHarness(t)
   const owner = await pairOwner(harness)
+  assert.equal(owner.welcome.weatherLocation, '北京')
+  let latestProjection: Extract<ServerToClient, { t: 'projection' }> | undefined
   for (const command of [
     { type: 'server.setAdvanceWhileEmpty' as const, payload: { enabled: false } },
     { type: 'server.setWeatherCity' as const, payload: { city: '上海' } },
@@ -1654,8 +1656,11 @@ test('owner server settings commands persist without unauthenticated HTTP exposu
     const result = await owner.next('commandResult')
     if (result.t !== 'commandResult') throw new Error('missing result for ' + command.type)
     assert.equal(result.status, 'applied')
-    await owner.next('projection')
+    const projection = await owner.next('projection')
+    if (projection.t !== 'projection') throw new Error('missing projection for ' + command.type)
+    latestProjection = projection
   }
+  assert.equal(latestProjection?.weatherLocation, '上海')
   const store = openDatabase(harness.dbPath)
   const settings = store.getSettings('default')
   assert.equal(settings?.advanceWhileEmpty, false)
@@ -1674,7 +1679,13 @@ test('owner server settings commands persist without unauthenticated HTTP exposu
   const playerCode = store2.issuePairingCode('default', 'player', 10 * 60_000).code
   store2.close()
   const player = await connect(harness, { kind: 'pairing', code: playerCode, deviceLabel: 'Player' })
-  await player.next('ready')
+  assert.equal(player.welcome.weatherLocation, '上海')
+  const playerSnapshot = await player.next('snapshot')
+  if (playerSnapshot.t !== 'snapshot') throw new Error('missing snapshot')
+  assert.equal(playerSnapshot.weatherLocation, '上海')
+  const playerReady = await player.next('ready')
+  if (playerReady.t !== 'ready') throw new Error('missing ready')
+  assert.equal(playerReady.weatherLocation, '上海')
   player.send({
     t: 'command',
     v: PROTOCOL_VERSION,

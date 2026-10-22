@@ -449,6 +449,7 @@ export class SessionService {
       gameTimeMs: snapshot.pet.gameTimeMs,
       timeZone: snapshot.settings.timeZone,
       advanceWhileEmpty: snapshot.settings.advanceWhileEmpty,
+      weatherLocation: snapshot.settings.weatherLocation ?? snapshot.engine.weatherLocation,
       authority: this.hub.authority(authenticated.petId),
       headRevision: snapshot.pet.revision,
       headEventSeq: snapshot.pet.eventSeq,
@@ -459,7 +460,7 @@ export class SessionService {
     this.send(socket, welcome)
     if (plan.replay !== undefined) this.send(socket, plan.replay)
     if (plan.delivery === 'snapshot' || plan.delivery === 'replay+snapshot') {
-      this.send(socket, this.snapshot(snapshot.pet, authenticated.petId, snapshot.engine.save))
+      this.send(socket, this.snapshot(snapshot.pet, authenticated.petId, snapshot.engine.save, snapshot.engine.weatherLocation))
     }
     this.sendReady(connection, snapshot)
   }
@@ -526,7 +527,7 @@ export class SessionService {
       })
   }
 
-  private snapshot(pet: PetRecord, petId: string, save: unknown): SnapshotMessage {
+  private snapshot(pet: PetRecord, petId: string, save: unknown, engineWeatherLocation: string): SnapshotMessage {
     const settings = this.store.getSettings(petId)
     if (settings === undefined) throw new Error('settings missing')
     assertPublicSave(save)
@@ -538,6 +539,7 @@ export class SessionService {
       gameTimeMs: pet.gameTimeMs,
       timeZone: settings.timeZone,
       advanceWhileEmpty: settings.advanceWhileEmpty,
+      weatherLocation: settings.weatherLocation ?? engineWeatherLocation,
       authority: this.hub.authority(petId),
       save: save as SnapshotMessage['save'],
     }
@@ -555,6 +557,7 @@ export class SessionService {
       gameTimeMs: snapshot.pet.gameTimeMs,
       timeZone: snapshot.settings.timeZone,
       advanceWhileEmpty: snapshot.settings.advanceWhileEmpty,
+      weatherLocation: snapshot.settings.weatherLocation ?? snapshot.engine.weatherLocation,
       authority: this.hub.authority(connection.petId),
       catchingUp: this.isCatchingUp(connection.petId),
     })
@@ -568,7 +571,7 @@ export class SessionService {
       this.sendReady(connection, snapshot)
       return
     }
-    this.hub.send(connection, this.snapshot(snapshot.pet, connection.petId, snapshot.engine.save))
+    this.hub.send(connection, this.snapshot(snapshot.pet, connection.petId, snapshot.engine.save, snapshot.engine.weatherLocation))
     this.sendReady(connection, snapshot)
   }
 
@@ -643,6 +646,7 @@ export class SessionService {
             gameTimeMs: snapshot.pet.gameTimeMs,
             timeZone: snapshot.settings.timeZone,
             advanceWhileEmpty: snapshot.settings.advanceWhileEmpty,
+            weatherLocation: snapshot.settings.weatherLocation ?? snapshot.engine.weatherLocation,
             authority: this.hub.authority(connection.petId),
             save: snapshot.engine.save,
             events: [],

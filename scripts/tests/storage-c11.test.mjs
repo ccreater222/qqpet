@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -245,6 +245,7 @@ class FakeRemoteAuthority {
     this.commands = []
     this.commandResults = []
     this.role = options.role ?? 'owner'
+    this.weatherCity = options.weatherCity ?? '杭州'
     this.deviceOverlay = clone(options.deviceOverlay ?? fixtures.device)
     this.projectionCacheRestored = options.hasProjectionCache === true
     this.projection = {
@@ -255,6 +256,7 @@ class FakeRemoteAuthority {
       gameTimeMs: GAME_TIME_MS,
       timeZone: 'Asia/Shanghai',
       advanceWhileEmpty: true,
+      weatherLocation: this.weatherCity,
       authority: serverAuthority(),
     }
     this.status = {
@@ -270,6 +272,7 @@ class FakeRemoteAuthority {
       gameTimeMs: GAME_TIME_MS,
       timeZone: 'Asia/Shanghai',
       advanceWhileEmpty: true,
+      weatherCity: this.weatherCity,
       state: 'online',
     }
   }
@@ -280,6 +283,7 @@ class FakeRemoteAuthority {
   async load() { return clone(this.projection.save) }
   getStatus() { return clone(this.status) }
   getProjection() { return clone(this.projection) }
+  getWeatherCity() { return this.weatherCity }
 
   async command(command, options = {}) {
     this.commands.push({ type: command.type, payload: clone(command.payload), options: clone(options) })
@@ -413,6 +417,9 @@ test('local to server handoff freezes local before upload and applies the owner 
   assert.equal(status.handoff.state, 'applied')
   assert.equal(status.handoff.direction, 'local_to_server')
   assert.equal(status.handoff.requestedRebind, true)
+  assert.ok(harness.local.calls.includes('archiveAuthority'))
+  assert.equal(harness.local.status.authorityState, 'archived')
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), false)
   harness.remote.projectionListener(
     { ...harness.remote.getProjection(), revision: 4, eventSeq: 5 },
     [{
@@ -482,6 +489,48 @@ test('a lost-upload retry that finds a stored rejection stays rejected and unfre
   assert.ok(harness.local.calls.includes('rollbackDetach'))
 })
 
+test('use-server against an archived server resumes with the current local bundle before archiving local', async () => {
+  const harness = makeController()
+  harness.remote.status.authority.state = 'archived'
+  harness.remote.projection.authority.state = 'archived'
+  harness.remote.commandResults.push(applied('admin.resumeServer', {
+    imported: true,
+    epoch: 5,
+    importClamped: false,
+    clockSkippedMs: 0,
+  }))
+  await harness.controller.setMode({ mode: 'server', initialSource: 'use-server' })
+  assert.equal(harness.remote.commands.length, 1)
+  assert.equal(harness.remote.commands[0].type, 'admin.resumeServer')
+  assert.equal(harness.remote.commands[0].payload.bundle.authority.owner, 'local')
+  assert.equal(harness.remote.commands[0].payload.expectedEpoch, harness.remote.commands[0].payload.bundle.authority.epoch)
+  assert.equal(harness.local.calls.includes('exportForDetach:2'), true)
+  assert.ok(harness.local.calls.indexOf('exportForDetach:2') < harness.local.calls.indexOf('archiveAuthority'))
+  const status = harness.controller.status()
+  assert.equal(status.mode, 'server')
+  assert.equal(status.activeMode, 'server')
+  assert.equal(harness.local.status.authorityState, 'archived')
+  assert.equal(status.handoff.state, 'applied')
+})
+
+test('a rejected archived-server resume rolls the frozen local authority back', async () => {
+  const harness = makeController()
+  harness.remote.status.authority.state = 'archived'
+  harness.remote.projection.authority.state = 'archived'
+  harness.remote.commandResults.push(rejected('admin.resumeServer', 'authority_fork_risk', 'stale archive lineage'))
+  await harness.controller.setMode({ mode: 'server', initialSource: 'use-server' })
+  assert.equal(harness.remote.commands.length, 1)
+  assert.equal(harness.remote.commands[0].type, 'admin.resumeServer')
+  assert.equal(harness.local.calls.includes('rollbackDetach'), true)
+  assert.equal(harness.local.calls.includes('archiveAuthority'), false)
+  const status = harness.controller.status()
+  assert.equal(status.mode, 'local')
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.readOnly, false)
+  assert.equal(status.handoff.state, 'rolled_back')
+  assert.equal(harness.local.status.authorityState, 'active')
+})
+
 test('server to local detach validates the exact stamp before local import and lets local tick', async () => {
   const harness = makeController()
   harness.remote.commandResults.push(applied('admin.importPortableBundle', {}))
@@ -521,6 +570,74 @@ test('a failed server to local import leaves local read-only with a retryable fr
   assert.equal(status.handoff.state, 'frozen')
   assert.equal(status.handoff.retryable, true)
   assert.equal(status.handoff.reason, 'local_import_failed')
+})
+
+test('a successful retry of a failed server-detach import persists local mode and clears the journal', async () => {
+  const local = new FakeLocalAuthority({ failImport: true })
+  const harness = makeController({ local })
+  harness.remote.commandResults.push(applied('admin.importPortableBundle', {}))
+  await harness.controller.setMode({ mode: 'server', initialSource: 'upload-local' })
+  const bundle = serverBundle()
+  harness.remote.commandResults.push(applied('admin.exportForDetach', { authority: bundle.authority, bundle }))
+  await harness.controller.setMode({ mode: 'local' })
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), true)
+  assert.equal(JSON.parse(readFileSync(join(harness.dir, 'storage-config.json'), 'utf8')).mode, 'server')
+
+  local.failImport = false
+  const status = await harness.controller.retryHandoff()
+  assert.equal(status.mode, 'local')
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.handoff.state, 'applied')
+  assert.equal(local.status.authorityState, 'active')
+  assert.equal(JSON.parse(readFileSync(join(harness.dir, 'storage-config.json'), 'utf8')).mode, 'local')
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), false)
+})
+
+test('startup reconciles a frozen local-to-server upload with the persisted opId and archives local', async () => {
+  const harness = makeController()
+  const originalCommand = FakeRemoteAuthority.prototype.command
+  harness.remote.command = async function command(command, options = {}) {
+    this.commands.push({ type: command.type, payload: clone(command.payload), options: clone(options) })
+    throw new Error('offline: result unknown')
+  }
+  await harness.controller.setMode({ mode: 'server', initialSource: 'upload-local' })
+  assert.equal(harness.controller.status().handoff.state, 'frozen')
+  const opId = harness.remote.commands[0].options.opId
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), true)
+
+  harness.remote.command = originalCommand
+  harness.remote.commandResults.push(applied('admin.importPortableBundle', { epoch: 6 }))
+  const restarted = makeController({ dir: harness.dir, local: harness.local, remote: harness.remote })
+  const status = await restarted.controller.initialize()
+  assert.equal(harness.remote.commands.length, 2)
+  assert.equal(harness.remote.commands[1].options.opId, opId)
+  assert.equal(harness.local.status.authorityState, 'archived')
+  assert.equal(status.mode, 'server')
+  assert.equal(status.activeMode, 'server')
+  assert.equal(status.handoff.state, 'applied')
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), false)
+})
+
+test('startup reconciles a persisted server-to-local detach bundle and keeps local as requested mode', async () => {
+  const local = new FakeLocalAuthority({ failImport: true })
+  const harness = makeController({ local })
+  harness.remote.commandResults.push(applied('admin.importPortableBundle', {}))
+  await harness.controller.setMode({ mode: 'server', initialSource: 'upload-local' })
+  const bundle = serverBundle()
+  harness.remote.commandResults.push(applied('admin.exportForDetach', { authority: bundle.authority, bundle }))
+  await harness.controller.setMode({ mode: 'local' })
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), true)
+  assert.equal(JSON.parse(readFileSync(join(harness.dir, 'storage-config.json'), 'utf8')).mode, 'server')
+
+  local.failImport = false
+  const restarted = makeController({ dir: harness.dir, local, remote: harness.remote })
+  const status = await restarted.controller.initialize()
+  assert.equal(status.mode, 'local')
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.handoff.state, 'applied')
+  assert.equal(local.status.authorityState, 'active')
+  assert.equal(JSON.parse(readFileSync(join(harness.dir, 'storage-config.json'), 'utf8')).mode, 'local')
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), false)
 })
 
 test('device-local zoom, display and AI credentials survive local to server to local', async () => {
@@ -973,6 +1090,18 @@ test('duplicate rejected device, setting and import results take the stored erro
   assert.equal(appliedImport.status, 'applied')
   assert.equal(appliedImport.nextEpoch, 12)
   assert.equal(appliedImport.importClamped, true)
+})
+
+test('storage status reports the server canonical weather city across restart', async () => {
+  const harness = makeController({ remoteOptions: { weatherCity: '广州' } })
+  await harness.controller.setMode({ mode: 'server', initialSource: 'use-server' })
+  assert.equal(harness.controller.status().weatherCity, '广州')
+  assert.equal(harness.remote.getWeatherCity(), '广州')
+
+  const restarted = makeController({ dir: harness.dir, local: harness.local, remote: harness.remote })
+  const status = await restarted.controller.initialize()
+  assert.equal(status.activeMode, 'server')
+  assert.equal(status.weatherCity, '广州')
 })
 
 test('timezone, weather city and advance policy route through the active command surface', async () => {

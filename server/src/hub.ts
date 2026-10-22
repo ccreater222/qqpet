@@ -94,6 +94,7 @@ export class SocketHub {
       gameTimeMs: pet.gameTimeMs,
       timeZone: settings?.timeZone ?? snapshot.engine.timeZone,
       advanceWhileEmpty: settings?.advanceWhileEmpty ?? snapshot.engine.advanceWhileEmpty,
+      weatherLocation: settings?.weatherLocation ?? snapshot.engine.weatherLocation ?? '',
       authority,
       save: snapshot.engine.save,
       events,
