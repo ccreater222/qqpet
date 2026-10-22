@@ -282,18 +282,34 @@ docker build -f server/Dockerfile -t qqpet-server .
 The image is multi-stage, runs as the non-root `node` user, stores state under
 `/var/lib/qqpet-sync`, exposes port 8787, and has a `/healthz` healthcheck.
 
-The included Compose file runs the server plus Caddy in front of it:
+The included Compose file runs the server plus Caddy in front of it.
+`QQPET_OWNER_ADMIN_CREDENTIAL_FILE` is mandatory: the Compose file uses
+`${QQPET_OWNER_ADMIN_CREDENTIAL_FILE:?...}`, so an unset/empty variable fails
+interpolation and a missing file fails `docker compose config`/`up`.
 
 ```bash
 cd server
 cp .env.example .env
 # Edit .env: set QQPET_DOMAIN to a DNS name pointing at this host.
-# Create the owner credential file and make it owner-readable only.
-install -m 0600 deploy/owner_admin_credential.example deploy/owner-admin-credential
+# Generate a random owner credential, never a checked-in placeholder.
+umask 077
+mkdir -p deploy
+openssl rand -hex 32 > deploy/owner-admin-credential
+chmod 0600 deploy/owner-admin-credential
+export QQPET_OWNER_ADMIN_CREDENTIAL_FILE="$PWD/deploy/owner-admin-credential"
+# Fail closed if the variable or file is absent.
+docker compose config >/dev/null
 docker compose up -d --build
 docker compose ps
 curl --fail http://127.0.0.1:8787/readyz
 ```
+
+The exact Compose variable/path used above is
+`QQPET_OWNER_ADMIN_CREDENTIAL_FILE=./deploy/owner-admin-credential` (resolved
+by Compose relative to `server/`). The file is mounted read-only at
+`/run/secrets/owner_admin_credential`; inside the container the matching setting
+is `QQPET_OWNER_ADMIN_CREDENTIAL=/run/secrets/owner_admin_credential`. Keep the
+host file mode `0600` and out of version control.
 
 `docker-compose.yml` uses:
 
@@ -302,7 +318,9 @@ curl --fail http://127.0.0.1:8787/readyz
 - `no-new-privileges`;
 - a server healthcheck and Caddy dependency on health;
 - a loopback-only published server port (Caddy is the public ingress);
-- a Compose secret for the owner admin credential.
+- a required read-only bind mount for the owner admin credential, with an
+  `env_file` existence check so a missing file fails Compose config instead of
+  being auto-created as a host directory.
 
 Caddy obtains TLS certificates automatically and proxies WebSocket upgrades by
 default. The server is not published on the public interface directly. If you
@@ -351,14 +369,42 @@ upstream.
 `server/deploy/nginx.conf.example` shows the required pieces:
 
 - TLS certificate/key paths;
-- `Upgrade` and `Connection` headers;
-- `proxy_http_version 1.1`;
+- `Upgrade` and `Connection` headers and `proxy_http_version 1.1` on both
+  `/v1/sync` and its `/sync` alias;
+- exact proxy locations for the documented `/health`, `/healthz`, and `/readyz`
+  probes;
 - a long `proxy_read_timeout`/`proxy_send_timeout`;
 - a 20 MiB client body limit;
 - a 301 redirect from HTTP to HTTPS.
 
 Replace the certificate paths/server name and include the file from the Nginx
-`http {}` block.
+`http {}` block. If you intentionally stop exposing an alias, remove it from
+this example and the endpoint table together; a documented alias must not fall
+through to the catch-all 404.
+
+### Operational smoke checks
+
+From the repository root:
+
+```bash
+# Compose interpolation succeeds with a 0600 file and fails closed when it is
+# unset or missing.
+npm run smoke:compose
+
+# Build/run the image, check readiness/WAL/FULL/non-root, then prove backup and
+# restore content preservation. Temporary containers, volumes and images are
+# torn down.
+npm run smoke:docker
+
+# Render server/deploy/nginx.conf.example with a self-signed certificate in
+# front of the production image and prove authenticated WSS upgrades and all
+# documented HTTP routes through Nginx.
+QQPET_PROXY_NGINX_IMAGE=nginx:1.27-alpine npm run smoke:proxy
+```
+
+The Docker smoke is also a required acceptance-gate command and a GitHub Actions
+job. Release builds depend on the complete reusable `ci.yml` acceptance workflow,
+including these operational jobs.
 
 ## systemd deployment
 

@@ -22,7 +22,10 @@ server {
     # HTTP/proxy envelope.
     client_max_body_size 20m;
 
-    location /v1/sync {
+    # Keep these routes exactly aligned with server/README.md:
+    # /v1/sync is canonical, /sync is its WebSocket alias, and /healthz,
+    # /readyz and /health are the documented HTTP probes.
+    location = /v1/sync {
         proxy_pass http://qqpet_sync;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -36,6 +39,25 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         proxy_buffering off;
+    }
+
+    location = /sync {
+        proxy_pass http://qqpet_sync;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    location = /health {
+        proxy_pass http://qqpet_sync;
+        proxy_set_header Host $host;
+        access_log off;
     }
 
     location = /healthz {

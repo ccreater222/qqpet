@@ -21,10 +21,20 @@ services:
       QQPET_SYNC_ADVANCE_WHILE_EMPTY: ${QQPET_SYNC_ADVANCE_WHILE_EMPTY:-1}
       QQPET_SYNC_CATCHUP_CHUNK_TICKS: ${QQPET_SYNC_CATCHUP_CHUNK_TICKS:-1440}
       QQPET_SYNC_LOG_LEVEL: ${QQPET_SYNC_LOG_LEVEL:-info}
+    # Compose validates env_file paths at config/up time. The owner credential
+    # is a bare token (no KEY= prefix), so Compose ignores it as an assignment;
+    # this entry exists to make a missing credential path fail closed instead of
+    # being auto-created as a directory by the bind mount below.
+    env_file:
+      - ${QQPET_OWNER_ADMIN_CREDENTIAL_FILE:?QQPET_OWNER_ADMIN_CREDENTIAL_FILE is required and must point to a 0600 owner credential file}
     volumes:
       - qqpet-data:/var/lib/qqpet-sync
-    secrets:
-      - owner_admin_credential
+      # Required, checked-in-default-free credential mount. Generate with
+      # `openssl rand -hex 32` and chmod 0600.
+      - type: bind
+        source: ${QQPET_OWNER_ADMIN_CREDENTIAL_FILE:?QQPET_OWNER_ADMIN_CREDENTIAL_FILE is required and must point to a 0600 owner credential file}
+        target: /run/secrets/owner_admin_credential
+        read_only: true
     tmpfs:
       - /tmp:size=32m,noexec,nosuid
     # Keep the authority port off the public interface. Caddy is the only
@@ -59,7 +69,3 @@ volumes:
   qqpet-data:
   caddy-data:
   caddy-config:
-
-secrets:
-  owner_admin_credential:
-    file: ${QQPET_OWNER_ADMIN_CREDENTIAL_FILE:-./deploy/owner_admin_credential.example}

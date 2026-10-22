@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
+import { E2E_MIN_STEPS } from '../lib/acceptance-evidence.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '../..')
@@ -24,6 +25,8 @@ const SERVER_ENTRY = join(ROOT, 'server/dist/server/src/index.js')
 const HARNESS_ENTRY = join(ROOT, 'out/e2e/electron-harness.mjs')
 const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const CATCHUP_WAIT_MS = Number(process.env.QQPET_E2E_CATCHUP_WAIT_MS ?? '62000')
+const CODE_REVISION = process.env.QQPET_CODE_REVISION?.trim()
+  || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim()
 
 if (process.platform === 'linux' && process.env.DISPLAY === undefined && process.env.QQPET_E2E_XVFB === undefined) {
   const wrapped = spawnSync('xvfb-run', ['-a', process.execPath, fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
@@ -397,7 +400,9 @@ async function main() {
   await writeFile(credentialFile, 'c12-e2e-owner-admin-credential\n', { mode: 0o600 })
 
   const report = {
+    schemaVersion: 1,
     startedAt,
+    codeRevision: CODE_REVISION,
     platform: process.platform,
     arch: process.arch,
     node: process.version,
@@ -910,8 +915,14 @@ async function main() {
       }
     })
 
+    if (report.steps.length < E2E_MIN_STEPS) {
+      throw new Error('E2E completed only ' + report.steps.length + ' steps; minimum is ' + E2E_MIN_STEPS)
+    }
+    if (report.steps.every(step => step.status === 'pass') === false) {
+      throw new Error('E2E report contains a non-passing scenario')
+    }
     report.finishedAt = new Date().toISOString()
-    report.result = 'pass'
+    report.result = 'PASS'
     report.evidence.database = {
       path: dbPath,
       journalMode: 'wal',
@@ -926,7 +937,7 @@ async function main() {
     process.stdout.write('[e2e] ALL SCENARIOS PASSED\n')
   } catch (error) {
     report.finishedAt = new Date().toISOString()
-    report.result = 'fail'
+    report.result = 'FAIL'
     report.error = error instanceof Error ? error.stack ?? error.message : String(error)
     throw error
   } finally {

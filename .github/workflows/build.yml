@@ -6,6 +6,8 @@ on:
 
 jobs:
   acceptance:
+    # This called workflow includes root, server, real E2E, Docker
+    # backup/restore/Compose and TLS/WSS Nginx proxy smoke jobs.
     uses: ./.github/workflows/ci.yml
 
   build:

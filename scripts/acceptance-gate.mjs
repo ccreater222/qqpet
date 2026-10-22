@@ -2,16 +2,18 @@
  * C12 final acceptance gate.
  *
  * Runs the release-blocking commands in one place and writes concise evidence
- * to docs/superpowers/acceptance/. Local mode and mobile server-mode hiding are
- * checked by the existing root typecheck/compat/build commands; the real-server
- * Electron E2E is run separately and its JSON evidence is copied alongside the
- * report.
+ * to docs/superpowers/acceptance/. A zero command exit status is not enough:
+ * fresh E2E, Docker backup/restore and TLS/WSS proxy reports are parsed and must
+ * independently prove their required evidence at the exact current revision.
  */
 import { spawn } from 'node:child_process'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  cleanEvidenceDirectory,
+  evaluateAcceptanceGate,
+} from './lib/acceptance-evidence.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
@@ -22,6 +24,10 @@ const ACCEPTANCE_DIR = join(ROOT, 'docs/superpowers/acceptance')
 const REPORT_PATH = join(ACCEPTANCE_DIR, DATE + '-c12-final-gate.md')
 const E2E_ARTIFACT_DIR = join(ACCEPTANCE_DIR, 'artifacts/c12-e2e')
 const E2E_REPORT_PATH = join(E2E_ARTIFACT_DIR, 'c12-e2e-report.json')
+const DOCKER_ARTIFACT_DIR = join(ACCEPTANCE_DIR, 'artifacts/c12-docker')
+const DOCKER_REPORT_PATH = join(DOCKER_ARTIFACT_DIR, 'docker-smoke-report.json')
+const PROXY_ARTIFACT_DIR = join(ACCEPTANCE_DIR, 'artifacts/c12-proxy')
+const PROXY_REPORT_PATH = join(PROXY_ARTIFACT_DIR, 'proxy-smoke-report.json')
 const FAILURE_TAIL_CHARS = 4000
 
 function runGit(args) {
@@ -102,12 +108,33 @@ function markdownRow(values) {
   return '| ' + values.join(' | ') + ' |'
 }
 
+async function readJsonReport(path) {
+  try {
+    return JSON.parse(await readFile(path, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function validationLine(label, validation) {
+  return '- ' + label + ': **' + (validation.ok ? 'PASS' : 'FAIL') + '**'
+}
+
 async function main() {
   await mkdir(ACCEPTANCE_DIR, { recursive: true })
-  await mkdir(E2E_ARTIFACT_DIR, { recursive: true })
   const revision = await runGit(['rev-parse', 'HEAD'])
   const branch = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'])
+  // Capture cleanliness before clearing tracked historical evidence files.
   const dirtyBefore = await runGit(['status', '--porcelain'])
+  // Always start from empty evidence directories. A failed or skipped smoke
+  // command must never leave an older PASS report available for the gate.
+  await Promise.all([
+    cleanEvidenceDirectory(E2E_ARTIFACT_DIR),
+    cleanEvidenceDirectory(DOCKER_ARTIFACT_DIR),
+    cleanEvidenceDirectory(PROXY_ARTIFACT_DIR),
+  ])
+  const gateStartedAtMs = Date.now()
+  const evidenceEnv = { QQPET_CODE_REVISION: revision.stdout }
   const results = []
   const steps = [
     { label: 'root typecheck', command: 'npm', args: ['run', 'typecheck'] },
@@ -122,7 +149,24 @@ async function main() {
       label: 'real-server two-Electron E2E',
       command: NPM,
       args: ['run', 'test:e2e'],
-      env: { QQPET_E2E_ARTIFACTS: E2E_ARTIFACT_DIR },
+      env: { ...evidenceEnv, QQPET_E2E_ARTIFACTS: E2E_ARTIFACT_DIR },
+    },
+    {
+      label: 'Docker Compose required-credential config smoke',
+      command: NPM,
+      args: ['run', 'smoke:compose'],
+    },
+    {
+      label: 'Docker image/boot/health/backup/restore smoke',
+      command: NPM,
+      args: ['run', 'smoke:docker'],
+      env: { ...evidenceEnv, QQPET_DOCKER_SMOKE_REPORT: DOCKER_REPORT_PATH },
+    },
+    {
+      label: 'TLS/WSS Nginx proxy smoke',
+      command: NPM,
+      args: ['run', 'smoke:proxy'],
+      env: { ...evidenceEnv, QQPET_PROXY_REPORT: PROXY_REPORT_PATH },
     },
   ]
 
@@ -132,17 +176,32 @@ async function main() {
     if (result.code !== 0) break
   }
 
-  let e2eReport = null
-  try {
-    e2eReport = JSON.parse(await readFile(E2E_REPORT_PATH, 'utf8'))
-  } catch {
-    e2eReport = null
-  }
+  const revisionAfter = await runGit(['rev-parse', 'HEAD'])
+  const revisionStable = revisionAfter.code === 0 && revisionAfter.stdout === revision.stdout
+  const [e2eReport, dockerReport, proxyReport] = await Promise.all([
+    readJsonReport(E2E_REPORT_PATH),
+    readJsonReport(DOCKER_REPORT_PATH),
+    readJsonReport(PROXY_REPORT_PATH),
+  ])
   // Keep the concise machine-readable evidence, not multi-process debug logs.
   await rm(join(E2E_ARTIFACT_DIR, 'c12-server.log'), { force: true })
   await rm(join(E2E_ARTIFACT_DIR, 'c12-owner-harness.log'), { force: true })
 
-  const allPassed = results.length === steps.length && results.every(result => result.code === 0)
+  const gateEvaluation = evaluateAcceptanceGate({
+    results,
+    expectedStepCount: steps.length,
+    revision: revision.stdout,
+    revisionAfter: revisionAfter.stdout,
+    e2eReport,
+    dockerReport,
+    proxyReport,
+    nowMs: Date.now(),
+    notBeforeMs: gateStartedAtMs,
+  })
+  const e2eValidation = gateEvaluation.e2e
+  const dockerValidation = gateEvaluation.docker
+  const proxyValidation = gateEvaluation.proxy
+  const allPassed = gateEvaluation.ok
   const finalStatus = allPassed ? 'PASS' : 'FAIL'
   const lines = []
   lines.push('# C12 final acceptance gate')
@@ -190,11 +249,33 @@ async function main() {
   lines.push('Equivalent mobile web sequence: `npm run build:android-web`,'
     + ' `npm run build:harmony-web`, and `npm run build:ios-web`.')
   lines.push('')
+  lines.push('## Evidence validation')
+  lines.push('')
+  lines.push(validationLine('Fresh E2E report', e2eValidation))
+  lines.push(validationLine('Docker smoke report', dockerValidation))
+  lines.push(validationLine('TLS/WSS proxy smoke report', proxyValidation))
+  lines.push('- HEAD unchanged during gate: **' + (revisionStable ? 'PASS' : 'FAIL') + '**')
+  lines.push('- Current HEAD after commands: `' + revisionAfter.stdout + '`')
+  const validationErrors = [
+    ...e2eValidation.errors.map(error => 'E2E: ' + error),
+    ...dockerValidation.errors.map(error => 'Docker: ' + error),
+    ...proxyValidation.errors.map(error => 'Proxy: ' + error),
+    ...(revisionStable ? [] : ['HEAD changed while the acceptance gate was running']),
+  ]
+  if (validationErrors.length > 0) {
+    lines.push('')
+    lines.push('Validation errors:')
+    lines.push('')
+    for (const error of validationErrors) lines.push('- ' + error)
+  }
+  lines.push('')
   if (e2eReport !== null) {
     lines.push('## Real-server Electron E2E evidence')
     lines.push('')
     lines.push('- Evidence JSON: `docs/superpowers/acceptance/artifacts/c12-e2e/c12-e2e-report.json`')
     lines.push('- Result: **' + String(e2eReport.result).toUpperCase() + '**')
+    lines.push('- Tested code revision: `' + String(e2eReport.codeRevision ?? 'missing') + '`')
+    lines.push('- Named scenarios: `' + String(Array.isArray(e2eReport.steps) ? e2eReport.steps.length : 0) + '`')
     lines.push('- Two Electron processes: `' + String(e2eReport.evidence?.twoProcesses === true) + '`')
     lines.push('- Real standalone server: `' + String(e2eReport.evidence?.realStandaloneServer === true) + '`')
     lines.push('- Real WebSocket: `' + String(e2eReport.evidence?.realWebSocket === true) + '`')
@@ -240,6 +321,42 @@ async function main() {
     lines.push('')
     lines.push('No E2E JSON report was produced. Treat the gate as failed unless the command'
       + ' failure above is explained and the E2E is rerun successfully.')
+  }
+  lines.push('')
+  lines.push('## Docker build/boot/backup/restore smoke')
+  lines.push('')
+  if (dockerReport !== null) {
+    const evidence = dockerReport.evidence ?? {}
+    lines.push('- Evidence JSON: `docs/superpowers/acceptance/artifacts/c12-docker/docker-smoke-report.json`')
+    lines.push('- Result: **' + String(dockerReport.result) + '**')
+    lines.push('- Tested code revision: `' + String(dockerReport.codeRevision ?? 'missing') + '`')
+    lines.push('- Image built: `' + String(evidence.imageBuilt === true) + '`')
+    lines.push('- Container booted and `/readyz` ready: `' + String(evidence.readyzReady === true) + '`')
+    lines.push('- WAL/full: `' + String(evidence.journalMode) + '` / `' + String(evidence.synchronous) + '`')
+    lines.push('- Non-root uid: `' + String(evidence.uid ?? 'missing') + '`')
+    lines.push('- Backup content asserted: `' + String(evidence.backupContentAsserted === true) + '`')
+    lines.push('- Restore content matched: `' + String(evidence.restoreContentMatched === true) + '`')
+    lines.push('- Post-restore readiness: `' + String(evidence.postRestoreReadyz === true) + '`')
+    lines.push('- Teardown completed: `' + String(evidence.teardown === true) + '`')
+  } else {
+    lines.push('No Docker smoke JSON report was produced; the gate is failed.')
+  }
+  lines.push('')
+  lines.push('## TLS/WSS reverse-proxy smoke')
+  lines.push('')
+  if (proxyReport !== null) {
+    const evidence = proxyReport.evidence ?? {}
+    lines.push('- Evidence JSON: `docs/superpowers/acceptance/artifacts/c12-proxy/proxy-smoke-report.json`')
+    lines.push('- Result: **' + String(proxyReport.result) + '**')
+    lines.push('- Tested code revision: `' + String(proxyReport.codeRevision ?? 'missing') + '`')
+    lines.push('- Nginx proxy: `' + String(evidence.nginxProxy === true) + '`')
+    lines.push('- Self-signed TLS terminated: `' + String(evidence.tlsTerminated === true) + '`')
+    lines.push('- Authenticated WSS upgrade: `' + String(evidence.authenticatedOverWss === true) + '`')
+    lines.push('- `/v1/sync` route: `' + String(evidence.v1SyncRoute === true) + '`')
+    lines.push('- `/sync` alias route and authenticated upgrade: `' + String(evidence.syncRoute === true && evidence.syncAliasUpgrade === true && evidence.syncAliasAuthenticated === true) + '`')
+    lines.push('- `/health`, `/healthz`, `/readyz`: `' + String(evidence.healthRoute === true) + '`, `' + String(evidence.healthzRoute === true) + '`, `' + String(evidence.readyzRoute === true) + '`')
+  } else {
+    lines.push('No TLS/WSS proxy smoke JSON report was produced; the gate is failed.')
   }
   const failures = results.filter(result => result.code !== 0)
   if (failures.length > 0) {

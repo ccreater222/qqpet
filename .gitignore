@@ -3,3 +3,7 @@ out/
 dist/
 *.log
 .DS_Store
+
+# Runtime Compose secrets (the deployment directory is otherwise tracked).
+server/deploy/owner-admin-credential
+server/deploy/owner-admin-credential.*

@@ -84,10 +84,83 @@ jobs:
       - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
       - name: Run real-server Electron E2E headlessly
         run: xvfb-run -a npm run test:e2e
+      - name: Validate fresh, passing E2E evidence
+        run: node scripts/validate-evidence.mjs e2e "$QQPET_E2E_ARTIFACTS/c12-e2e-report.json"
       - name: Upload E2E evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: c12-e2e-evidence
           path: ${{ runner.temp }}/c12-e2e
+          if-no-files-found: warn
+
+  docker-smoke:
+    name: Docker build, readiness, backup/restore and Compose fail-closed
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      QQPET_DOCKER_SMOKE_REPORT: ${{ runner.temp }}/c12-docker/docker-smoke-report.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compose config succeeds only with an explicit credential file
+        run: |
+          umask 077
+          mkdir -p server/deploy
+          openssl rand -hex 32 > server/deploy/owner-admin-credential
+          chmod 0600 server/deploy/owner-admin-credential
+          credential="$PWD/server/deploy/owner-admin-credential"
+          QQPET_OWNER_ADMIN_CREDENTIAL_FILE="$credential" docker compose -f server/docker-compose.yml config >/dev/null
+          if env -u QQPET_OWNER_ADMIN_CREDENTIAL_FILE docker compose -f server/docker-compose.yml config >/dev/null 2>&1; then
+            echo 'Compose config unexpectedly succeeded without QQPET_OWNER_ADMIN_CREDENTIAL_FILE' >&2
+            exit 1
+          fi
+          if QQPET_OWNER_ADMIN_CREDENTIAL_FILE="$PWD/server/deploy/missing-credential" docker compose -f server/docker-compose.yml config >/dev/null 2>&1; then
+            echo 'Compose config unexpectedly succeeded with a missing credential file' >&2
+            exit 1
+          fi
+      - name: Repeatable Compose preflight smoke
+        run: npm run smoke:compose
+      - name: Docker image, boot, readiness, non-root and backup/restore smoke
+        run: npm run smoke:docker
+      - name: Validate Docker smoke evidence
+        run: npm run validate:evidence -- docker "$QQPET_DOCKER_SMOKE_REPORT"
+      - name: Remove generated credential
+        if: always()
+        run: rm -f server/deploy/owner-admin-credential
+      - name: Upload Docker smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c12-docker-smoke-evidence
+          path: ${{ runner.temp }}/c12-docker
+          if-no-files-found: warn
+
+  proxy-wss:
+    name: TLS/WSS Nginx reverse-proxy smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      QQPET_PROXY_REPORT: ${{ runner.temp }}/c12-proxy/proxy-smoke-report.json
+      QQPET_PROXY_NGINX_IMAGE: nginx:1.27-alpine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
+      - name: Prove HTTPS routes and authenticated WSS upgrades through Nginx
+        run: npm run smoke:proxy
+      - name: Validate TLS/WSS proxy evidence
+        run: npm run validate:evidence -- proxy "$QQPET_PROXY_REPORT"
+      - name: Upload TLS/WSS proxy evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c12-tls-wss-proxy-evidence
+          path: ${{ runner.temp }}/c12-proxy
           if-no-files-found: warn
