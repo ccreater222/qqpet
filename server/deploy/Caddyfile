@@ -1,0 +1,21 @@
+# Caddy terminates TLS and proxies HTTP + WebSocket upgrades automatically.
+# Set QQPET_DOMAIN to a DNS name that points at this host. Keep the upstream
+# private to the Compose network; the server must never be exposed over plain
+# ws:// on a non-loopback address.
+{$QQPET_DOMAIN:pet.example.com} {
+encode zstd gzip
+
+# Long-lived WebSocket sessions. Caddy does not impose a short read timeout
+# on upgraded connections by default.
+reverse_proxy qqpet-sync:8787 {
+header_up X-Forwarded-Proto {scheme}
+header_up Host {host}
+}
+
+# Health endpoints contain no save contents or secrets. Rate-limit access
+# at your edge if desired.
+@health path /healthz /health /readyz
+handle @health {
+reverse_proxy qqpet-sync:8787
+}
+}

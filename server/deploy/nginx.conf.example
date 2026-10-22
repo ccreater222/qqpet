@@ -1,0 +1,62 @@
+# Nginx TLS + WebSocket reverse proxy example. Replace the certificate paths
+# and server_name, then include this file from the http{} block.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+upstream qqpet_sync {
+    server 127.0.0.1:8787;
+    keepalive 16;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name pet.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/pet.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pet.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Command/snapshot frame ceiling is 16 MiB; leave a little room for the
+    # HTTP/proxy envelope.
+    client_max_body_size 20m;
+
+    location /v1/sync {
+        proxy_pass http://qqpet_sync;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+
+        # WebSocket sessions are long-lived; do not cut them at Nginx's default
+        # 60 seconds. The server's application ping/idle policy still applies.
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    location = /healthz {
+        proxy_pass http://qqpet_sync;
+        proxy_set_header Host $host;
+        access_log off;
+    }
+
+    location = /readyz {
+        proxy_pass http://qqpet_sync;
+        proxy_set_header Host $host;
+        access_log off;
+    }
+
+    location / {
+        return 404;
+    }
+}
+
+server {
+    listen 80;
+    server_name pet.example.com;
+    return 301 https://$host$request_uri;
+}

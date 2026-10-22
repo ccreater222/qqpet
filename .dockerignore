@@ -1,0 +1,14 @@
+.git
+.github
+node_modules
+server/node_modules
+out
+dist
+server/dist
+.worktrees
+resources
+android
+harmony
+ios
+*.log
+.DS_Store
