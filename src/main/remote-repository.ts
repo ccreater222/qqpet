@@ -29,7 +29,13 @@ import {
   type WireAuthority,
   type WireCommandResult,
 } from '../shared/sync/protocol'
-import type { PortablePetBundleV1 } from '../shared/sync/portable'
+import {
+  REMOTE_PROJECTION_CACHE_FORMAT,
+  REMOTE_PROJECTION_CACHE_SCHEMA_VERSION,
+  validateRemoteProjectionCacheV2,
+  type PortablePetBundleV1,
+  type RemoteProjectionCacheV2,
+} from '../shared/sync/portable'
 import {
   classifyProjectionDelivery,
   type ProjectionCursor,
@@ -78,6 +84,11 @@ export interface RemoteTokenStore {
   saveToken(token: string): Promise<void>
   loadConfig(): Promise<RemoteSyncConfig | null>
   saveConfig(config: RemoteSyncConfig): Promise<void>
+  /** Optional for older injected stores; PairingStore implements the durable v2 cache. */
+  loadProjectionCache?(): Promise<RemoteProjectionCacheV2 | null>
+  /** Must validate and atomically replace the cache file before resolving. */
+  saveProjectionCache?(cache: RemoteProjectionCacheV2): Promise<void>
+  clearProjectionCache?(): Promise<void>
   clear(): Promise<void>
 }
 
@@ -253,8 +264,16 @@ export class RemoteRepository {
   private expectedSnapshot = false
   private expectedReplay = false
   private snapshotSeen = false
+  private catchingUpSeen = false
   private replaySeen = false
   private replayEvents: OrderedEvent[] = []
+  private replayInvalid = false
+  private replayFromEventSeq = 0
+  private replayToEventSeq = 0
+  private welcomeHeadRevision = 0
+  private welcomeHeadEventSeq = 0
+  private welcomeAuthority: WireAuthority | null = null
+  private welcomeDelivery: 'none' | 'snapshot' | 'replay' | 'replay+snapshot' | null = null
   private pendingResync = false
 
   private persistence: Promise<void> = Promise.resolve()
@@ -314,7 +333,8 @@ export class RemoteRepository {
   }
 
   getStatus(): RendererRepositoryStatus {
-    const authority = this.projection?.authority ?? this.authority ?? EMPTY_AUTHORITY
+    const authority = this.authority ?? this.projection?.authority ?? EMPTY_AUTHORITY
+    const projectionAuthority = this.projection?.authority
     return {
       mode: 'server',
       connection: this.connectionStatus(),
@@ -328,7 +348,11 @@ export class RemoteRepository {
       ...(this.lastError === undefined ? {} : { lastError: this.lastError, error: this.lastError }),
       state: this.state,
       role: this.role,
-      readOnly: authority.state !== 'active' || this.projection === null || this.projectionRefreshPending || this.state !== 'online',
+      readOnly: authority.state !== 'active'
+        || projectionAuthority?.state !== 'active'
+        || this.projection === null
+        || this.projectionRefreshPending
+        || this.state !== 'online',
       catchingUp: this.state === 'catching_up',
       ...(this.lastCommandSeq === undefined ? {} : { commandSeq: this.lastCommandSeq }),
       ...(this.notice === undefined ? {} : { notice: this.notice }),
@@ -358,6 +382,7 @@ export class RemoteRepository {
         save: composeSaveWithOverlay(shared, this.deviceOverlay),
         device: clone(this.deviceOverlay),
       }
+      this.persistProjectionCache()
     }
     return clone(this.deviceOverlay)
   }
@@ -367,11 +392,8 @@ export class RemoteRepository {
     if (this.loaded === false) {
       this.config = await this.tokenStore.loadConfig()
       this.token = await this.tokenStore.loadToken()
+      await this.loadProjectionCache(this.config)
       this.loaded = true
-      const deviceId = this.config?.deviceId
-      if (typeof deviceId === 'string' && deviceId.length > 0) {
-        this.deviceOverlay = { ...this.deviceOverlay, localDeviceId: deviceId }
-      }
     }
     if (this.projection !== null && this.state === 'online') return this.getProjection()
     if (this.reconnectBlocked) {
@@ -454,6 +476,10 @@ export class RemoteRepository {
       const code: CommandErrorCode = this.state === 'catching_up' ? 'server_catching_up' : 'offline'
       return this.rejected(command, opId, code, 'the server connection is not ready for commands') as CommandResult<K>
     }
+    const authority = this.authority ?? this.projection?.authority
+    if (this.projection === null || authority === undefined || authority.state !== 'active' || this.projection.authority.state !== 'active') {
+      return this.rejected(command, opId, 'authority_not_active', 'the server authority is not active for commands') as CommandResult<K>
+    }
     if (isOwnerCommand(parsed.command.type) && this.role !== 'owner') {
       return this.rejected(command, opId, 'unauthorized', 'this command requires the owner device role') as CommandResult<K>
     }
@@ -488,6 +514,10 @@ export class RemoteRepository {
   async exportBundle(): Promise<PortablePetBundleV1> {
     if (this.role !== 'owner') throw new Error('unauthorized: owner export requires the owner device role')
     if (this.connection === null || this.state !== 'online') throw new Error('offline: cannot export while disconnected')
+    const authority = this.authority ?? this.projection?.authority
+    if (this.projection === null || authority === undefined || authority.state !== 'active' || this.projection.authority.state !== 'active') {
+      throw new Error('authority_not_active: the server authority is not active for export')
+    }
     const requestId = this.newRequestId()
     const promise = new Promise<PortablePetBundleV1>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -644,8 +674,16 @@ export class RemoteRepository {
     this.reconnectSleeping = false
     this.reconciledOnConnection = false
     this.snapshotSeen = false
+    this.catchingUpSeen = false
     this.replaySeen = false
     this.replayEvents = []
+    this.replayInvalid = false
+    this.replayFromEventSeq = 0
+    this.replayToEventSeq = 0
+    this.welcomeHeadRevision = 0
+    this.welcomeHeadEventSeq = 0
+    this.welcomeAuthority = null
+    this.welcomeDelivery = null
     this.pendingResync = false
     this.syncMode = 'initial'
     this.expectedSnapshot = false
@@ -667,6 +705,7 @@ export class RemoteRepository {
       return
     }
     const cached = this.authorityResetPending ? null : this.projection
+    const advertiseCursor = cached !== null
     const hello: ClientHello = {
       t: 'hello',
       v: PROTOCOL_VERSION,
@@ -674,8 +713,8 @@ export class RemoteRepository {
       appVersion: this.appVersion,
       ...(this.config?.petId === undefined || this.config.petId.length === 0 ? {} : { petId: this.config.petId }),
       ...(this.config?.deviceId === undefined || this.config.deviceId.length === 0 ? {} : { deviceId: this.config.deviceId }),
-      ...(this.authorityResetPending || this.cursor.revision === 0 ? {} : { lastRevision: this.cursor.revision }),
-      ...(this.authorityResetPending || this.cursor.eventSeq === 0 ? {} : { lastEventSeq: this.cursor.eventSeq }),
+      ...(advertiseCursor && this.cursor.revision > 0 ? { lastRevision: this.cursor.revision } : {}),
+      ...(advertiseCursor && this.cursor.eventSeq > 0 ? { lastEventSeq: this.cursor.eventSeq } : {}),
       ...(cached === null ? {} : {
         cachedAuthority: {
           authorityId: cached.authority.authorityId,
@@ -755,6 +794,7 @@ export class RemoteRepository {
       case 'deviceRevoked':
         this.notice = 'device_revoked'
         this.lastError = 'the server revoked device ' + frame.deviceId
+        this.discardProjectionForRevocation()
         this.emitStatus()
         break
       case 'authorityResetRequired':
@@ -781,7 +821,11 @@ export class RemoteRepository {
     }
     this.reconnectAttempt = 0
     this.role = frame.deviceRole
-    this.authority = frame.authority
+    this.welcomeHeadRevision = frame.headRevision
+    this.welcomeHeadEventSeq = frame.headEventSeq
+    this.welcomeAuthority = clone(frame.authority)
+    this.welcomeDelivery = frame.delivery
+    this.applyAuthority(frame.authority)
     this.timeZone = frame.timeZone
     this.advanceWhileEmpty = frame.advanceWhileEmpty
     this.gameTimeMs = frame.gameTimeMs
@@ -805,25 +849,134 @@ export class RemoteRepository {
     this.queuePersistence(() => this.tokenStore.saveConfig(this.buildConfig()))
     this.expectedSnapshot = frame.delivery === 'snapshot' || frame.delivery === 'replay+snapshot'
     this.expectedReplay = frame.delivery === 'replay' || frame.delivery === 'replay+snapshot'
-    if (frame.delivery === 'none' || frame.delivery === 'replay') {
-      if (this.authorityResetPending) {
-        // Authentication succeeded but the server planned a cached/replay-only
-        // delivery. A reset lineage must still recover from a full snapshot.
-        this.setState('catching_up')
-        this.expectedSnapshot = false
-        this.expectedReplay = false
-        this.requestResyncInternal(true)
-        return
-      }
-      this.setState('online')
+    if (this.authorityResetPending) {
+      // Authentication succeeded but the server planned a cached/replay-only
+      // delivery. A reset lineage must still recover from a full snapshot.
       this.expectedSnapshot = false
-      this.resolveStartWaiters()
-      if (frame.delivery === 'none') {
-        this.markOnline()
-      }
-    } else {
-      this.setState(frame.catchingUp ? 'catching_up' : 'connecting')
+      this.expectedReplay = false
+      this.requestResyncInternal(true)
+      return
     }
+    // A welcome only opens the exchange. start() and commands stay gated until
+    // a non-catching-up ready completes the replay/snapshot delivery.
+    this.setState(frame.catchingUp ? 'catching_up' : 'connecting')
+  }
+
+  private async loadProjectionCache(config: RemoteSyncConfig | null): Promise<void> {
+    const load = this.tokenStore.loadProjectionCache
+    if (load === undefined) return
+    let raw: unknown
+    try {
+      raw = await load.call(this.tokenStore)
+    } catch {
+      await this.discardProjectionCacheFile()
+      return
+    }
+    if (
+      validateRemoteProjectionCacheV2(raw) === false
+      || raw.authority.state === 'reset'
+      || config === null
+      || raw.petId !== config.petId
+      || raw.deviceId !== config.deviceId
+    ) {
+      if (raw !== null) await this.discardProjectionCacheFile()
+      return
+    }
+    const cache = raw
+    this.deviceOverlay = clone(cache.device)
+    this.projection = this.materialize({
+      revision: cache.revision,
+      eventSeq: cache.eventSeq,
+      gameTimeMs: cache.gameTimeMs,
+      timeZone: cache.timeZone,
+      advanceWhileEmpty: cache.advanceWhileEmpty,
+      authority: cache.authority,
+      save: cache.shared,
+    })
+    this.authority = clone(cache.authority)
+    this.cursor = { revision: cache.revision, eventSeq: cache.eventSeq }
+    this.gameTimeMs = cache.gameTimeMs
+    this.timeZone = cache.timeZone
+    this.advanceWhileEmpty = cache.advanceWhileEmpty
+  }
+
+  private async discardProjectionCacheFile(): Promise<void> {
+    const clear = this.tokenStore.clearProjectionCache
+    if (clear === undefined) return
+    try {
+      await clear.call(this.tokenStore)
+    } catch {
+      // A stale cache is never authoritative; failure to remove it must not block startup.
+    }
+  }
+
+  private queueProjectionCacheClear(): void {
+    const clear = this.tokenStore.clearProjectionCache
+    if (clear === undefined) return
+    this.queuePersistence(() => clear.call(this.tokenStore))
+  }
+
+  private projectionCache(projection: RendererProjection): RemoteProjectionCacheV2 | null {
+    if (this.config === null || this.config.petId.length === 0 || this.config.deviceId.length === 0) return null
+    const cache: RemoteProjectionCacheV2 = {
+      format: REMOTE_PROJECTION_CACHE_FORMAT,
+      schemaVersion: REMOTE_PROJECTION_CACHE_SCHEMA_VERSION,
+      petId: this.config.petId,
+      deviceId: this.config.deviceId,
+      revision: projection.revision,
+      eventSeq: projection.eventSeq,
+      gameTimeMs: projection.gameTimeMs,
+      timeZone: projection.timeZone,
+      advanceWhileEmpty: projection.advanceWhileEmpty,
+      authority: clone(projection.authority),
+      shared: clone(projection.shared),
+      device: clone(projection.device ?? this.deviceOverlay),
+    }
+    return validateRemoteProjectionCacheV2(cache) ? cache : null
+  }
+
+  private persistProjectionCache(projection: RendererProjection | null = this.projection): void {
+    const save = this.tokenStore.saveProjectionCache
+    if (save === undefined || projection === null) return
+    const cache = this.projectionCache(projection)
+    if (cache === null) return
+    this.queuePersistence(() => save.call(this.tokenStore, cache))
+  }
+
+  private applyAuthority(authority: WireAuthority): void {
+    this.authority = clone(authority)
+    if (this.projection === null) return
+    this.projection = { ...this.projection, authority: clone(authority) }
+  }
+
+  private applyReadyState(
+    frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'ready' }>,
+    advanceCursor: boolean,
+  ): void {
+    this.timeZone = frame.timeZone
+    this.advanceWhileEmpty = frame.advanceWhileEmpty
+    this.gameTimeMs = frame.gameTimeMs
+    this.authority = clone(frame.authority)
+    if (advanceCursor) this.cursor = { revision: frame.revision, eventSeq: frame.eventSeq }
+    if (this.projection === null) return
+    const shared = this.projection.shared
+    this.projection = {
+      ...this.projection,
+      ...(advanceCursor ? { revision: frame.revision, eventSeq: frame.eventSeq } : {}),
+      gameTimeMs: frame.gameTimeMs,
+      timeZone: frame.timeZone,
+      advanceWhileEmpty: frame.advanceWhileEmpty,
+      authority: clone(frame.authority),
+      save: composeSaveWithOverlay(shared, this.deviceOverlay),
+      device: clone(this.deviceOverlay),
+    }
+  }
+
+  private sameAuthorityLineage(left: WireAuthority, right: WireAuthority): boolean {
+    return left.owner === right.owner
+      && left.authorityId === right.authorityId
+      && left.restoreGeneration === right.restoreGeneration
+      && left.epoch === right.epoch
   }
 
   private buildConfig(): RemoteSyncConfig {
@@ -872,12 +1025,13 @@ export class RemoteRepository {
   private acceptState(source: ProjectionStateSource): RendererProjection {
     const projection = this.materialize(source)
     this.projection = projection
-    this.authority = source.authority
     this.cursor = { revision: source.revision, eventSeq: source.eventSeq }
     this.gameTimeMs = source.gameTimeMs
     this.timeZone = source.timeZone
     this.advanceWhileEmpty = source.advanceWhileEmpty
+    this.authority = clone(source.authority)
     this.persistConfig()
+    this.persistProjectionCache(projection)
     return projection
   }
 
@@ -885,22 +1039,11 @@ export class RemoteRepository {
     this.snapshotSeen = true
     const kind = this.syncMode
     const recoveredAuthorityReset = this.authorityResetPending
-    const sameState = this.projection !== null
-      && frame.revision === this.cursor.revision
-      && frame.eventSeq === this.cursor.eventSeq
-    if (kind === 'initial' && sameState) {
-      this.authority = frame.authority
-      this.timeZone = frame.timeZone
-      this.advanceWhileEmpty = frame.advanceWhileEmpty
-      this.gameTimeMs = frame.gameTimeMs
-      this.authorityResetPending = false
-      if (recoveredAuthorityReset) this.notice = undefined
-      this.persistConfig()
-      this.emitStatus()
-      if (this.projectionRefreshPending) this.finishProjectionRefresh(false)
-      return
-    }
-    if (kind === 'initial' && this.projection !== null && frame.revision < this.cursor.revision) {
+    if (
+      kind === 'initial'
+      && this.projection !== null
+      && (frame.revision < this.cursor.revision || frame.eventSeq < this.cursor.eventSeq)
+    ) {
       this.requestResyncInternal(false)
       return
     }
@@ -914,83 +1057,208 @@ export class RemoteRepository {
     }
     if (kind !== 'initial' || recoveredAuthorityReset) this.notice = undefined
     this.syncMode = 'initial'
-    this.expectedSnapshot = false
     this.authorityResetPending = false
+    this.pendingResync = false
     this.emitStatus()
     if (this.projectionRefreshPending) this.finishProjectionRefresh(false)
   }
 
+  private rejectReplay(reason: string): void {
+    this.replayInvalid = true
+    this.replaySeen = false
+    this.replayEvents = []
+    this.lastError = 'server sent an invalid replay: ' + reason
+    this.requestResyncInternal(false)
+  }
+
   private handleReplay(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'replay' }>): void {
-    this.replaySeen = true
-    if (frame.fromEventSeq > this.cursor.eventSeq + 1) {
-      this.requestResyncInternal(false)
+    if (this.pendingResync) return
+    if (this.expectedReplay === false) {
+      this.rejectReplay('a replay was not expected for this delivery')
       return
     }
-    const novel = frame.events.filter(event => event.eventSeq > this.cursor.eventSeq)
-    this.replayEvents.push(...novel)
-    this.cursor = { revision: this.cursor.revision, eventSeq: Math.max(this.cursor.eventSeq, frame.toEventSeq) }
-    this.persistConfig()
+    if (this.replaySeen) {
+      this.rejectReplay('the replay frame was duplicated')
+      return
+    }
+    if (this.projection === null) {
+      this.rejectReplay('there is no validated cached projection to extend')
+      return
+    }
+    if (this.projection.revision !== this.cursor.revision || this.projection.eventSeq !== this.cursor.eventSeq) {
+      this.rejectReplay('the cached projection does not match the advertised cursor')
+      return
+    }
+    const expectedFrom = this.cursor.eventSeq + 1
+    if (frame.fromEventSeq !== expectedFrom || frame.toEventSeq < expectedFrom) {
+      this.rejectReplay('the replay bounds do not start immediately after the cached cursor')
+      return
+    }
+    const expectedCount = frame.toEventSeq - frame.fromEventSeq + 1
+    if (frame.events.length === 0 || frame.events.length !== expectedCount) {
+      this.rejectReplay('the replay range is empty or has a missing interior')
+      return
+    }
+    for (let index = 0; index < expectedCount; index += 1) {
+      if (frame.events[index].eventSeq !== frame.fromEventSeq + index) {
+        this.rejectReplay('the replay events are not exactly contiguous')
+        return
+      }
+    }
+    if (this.welcomeHeadEventSeq > 0 && frame.toEventSeq > this.welcomeHeadEventSeq) {
+      this.rejectReplay('the replay extends beyond the advertised head')
+      return
+    }
+    this.replaySeen = true
+    this.replayInvalid = false
+    this.replayFromEventSeq = frame.fromEventSeq
+    this.replayToEventSeq = frame.toEventSeq
+    this.replayEvents = clone(frame.events)
   }
 
   private handleReady(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'ready' }>): void {
     this.reconnectAttempt = 0
+    const previousAuthority = this.projection === null ? null : clone(this.projection.authority)
+    this.applyAuthority(frame.authority)
     this.timeZone = frame.timeZone
     this.advanceWhileEmpty = frame.advanceWhileEmpty
     this.gameTimeMs = frame.gameTimeMs
-    this.authority = frame.authority
-    if (
-      (this.expectedSnapshot || this.authorityResetPending)
-      && this.snapshotSeen === false
-      && frame.catchingUp === false
-    ) {
-      this.lastError = 'server sent ready without the required full snapshot'
-      this.requestResyncInternal(this.authorityResetPending)
+    if (frame.catchingUp) {
+      // A catch-up ready is a progress marker, not readiness. Require the
+      // final post-catch-up snapshot before this connection becomes writable.
+      this.catchingUpSeen = true
+      this.snapshotSeen = false
+      this.setState('catching_up')
       return
     }
+
+    const authority = frame.authority
+    if (this.catchingUpSeen && this.snapshotSeen === false && authority.state === 'active') {
+      this.lastError = 'server sent a final ready without the catch-up snapshot'
+      this.requestResyncInternal(false)
+      return
+    }
+    if (
+      (this.expectedSnapshot || this.authorityResetPending || this.pendingResync)
+      && this.snapshotSeen === false
+      && authority.state !== 'archived'
+    ) {
+      this.lastError = 'server sent ready without the required full snapshot'
+      this.requestResyncInternal(this.authorityResetPending || authority.state === 'reset')
+      return
+    }
+    if (authority.state === 'reset') {
+      this.requestResyncInternal(true)
+      return
+    }
+
     if (this.expectedReplay && this.snapshotSeen === false) {
       if (this.projection === null) {
         this.requestResyncInternal(false)
         return
       }
-      if (this.replaySeen) {
-        const shared = this.projection.shared
-        const updated: RendererProjection = {
-          ...this.projection,
-          revision: Math.max(this.projection.revision, frame.revision),
-          eventSeq: Math.max(this.projection.eventSeq, frame.eventSeq),
-          gameTimeMs: frame.gameTimeMs,
-          timeZone: frame.timeZone,
-          advanceWhileEmpty: frame.advanceWhileEmpty,
-          authority: frame.authority,
-          save: composeSaveWithOverlay(shared, this.deviceOverlay),
-          device: clone(this.deviceOverlay),
+      if (this.replayInvalid || this.replaySeen === false) {
+        this.requestResyncInternal(false)
+        return
+      }
+      const welcomeAuthority = this.welcomeAuthority
+      const authorityLineageChanged = welcomeAuthority === null
+        || !this.sameAuthorityLineage(this.projection.authority, welcomeAuthority)
+        || !this.sameAuthorityLineage(welcomeAuthority, authority)
+      const authorityStateChanged = welcomeAuthority === null
+        || this.projection.authority.state !== welcomeAuthority.state
+        || welcomeAuthority.state !== authority.state
+      const replayHeadMismatch = this.projection.revision !== this.welcomeHeadRevision
+        || this.replayFromEventSeq !== this.cursor.eventSeq + 1
+        || this.replayToEventSeq !== this.welcomeHeadEventSeq
+        || frame.revision !== this.welcomeHeadRevision
+        || frame.eventSeq !== this.welcomeHeadEventSeq
+      if (authorityLineageChanged || authorityStateChanged || replayHeadMismatch) {
+        this.requestResyncInternal(authorityLineageChanged)
+        return
+      }
+      this.applyReadyState(frame, true)
+      const updated = this.projection
+      const replayEvents = this.replayEvents
+      this.replayEvents = []
+      if (updated !== null) this.emitResync(updated, replayEvents)
+      this.finishReady()
+      return
+    }
+
+    if (this.welcomeDelivery === 'none') {
+      const welcomeAuthority = this.welcomeAuthority ?? authority
+      if (authority.state === 'active') {
+        const projection = this.projection
+        if (
+          projection === null
+          || projection.revision !== this.welcomeHeadRevision
+          || projection.eventSeq !== this.welcomeHeadEventSeq
+          || projection.authority.state !== 'active'
+          || welcomeAuthority.state !== 'active'
+          || !this.sameAuthorityLineage(projection.authority, welcomeAuthority)
+          || !this.sameAuthorityLineage(welcomeAuthority, authority)
+          || frame.revision !== this.welcomeHeadRevision
+          || frame.eventSeq !== this.welcomeHeadEventSeq
+        ) {
+          this.requestResyncInternal(false)
+          return
         }
-        this.projection = updated
-        this.cursor = { revision: updated.revision, eventSeq: updated.eventSeq }
-        this.authority = frame.authority
-        this.emitResync(updated, this.replayEvents)
-        this.replayEvents = []
-      } else {
+      }
+    }
+
+    if (authority.state === 'active') {
+      if (this.projection === null) {
+        this.requestResyncInternal(false)
+        return
+      }
+      if (frame.revision !== this.cursor.revision || frame.eventSeq !== this.cursor.eventSeq) {
         this.requestResyncInternal(false)
         return
       }
     }
+
+    const advanceCursor = this.projection !== null
+      && frame.revision === this.projection.revision
+      && frame.eventSeq === this.projection.eventSeq
+    this.applyReadyState(frame, advanceCursor)
+    const authorityChanged = previousAuthority !== null
+      && (previousAuthority.owner !== frame.authority.owner
+        || previousAuthority.authorityId !== frame.authority.authorityId
+        || previousAuthority.restoreGeneration !== frame.authority.restoreGeneration
+        || previousAuthority.epoch !== frame.authority.epoch
+        || previousAuthority.state !== frame.authority.state)
+    if (this.projection !== null && (this.welcomeDelivery === 'none' || authorityChanged)) {
+      this.emitResync(this.projection, [])
+    }
+    this.finishReady()
+  }
+
+  private finishReady(): void {
     this.expectedSnapshot = false
     this.expectedReplay = false
     this.pendingResync = false
-    this.setState('online')
-    this.resolveStartWaiters()
+    this.catchingUpSeen = false
+    this.snapshotSeen = false
+    this.replaySeen = false
+    this.replayInvalid = false
+    this.replayEvents = []
+    this.syncMode = 'initial'
     this.persistConfig()
+    this.persistProjectionCache()
     if (this.projectionRefreshPending) {
       this.finishProjectionRefresh(true)
     } else {
-      this.flushReconciliation()
+      this.markOnline()
     }
   }
 
   private handleProjection(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'projection' }>): void {
     if (this.pendingResync) return
     if (this.projection !== null && frame.revision === this.cursor.revision && frame.eventSeq === this.cursor.eventSeq) {
+      this.applyAuthority(frame.authority)
+      this.persistProjectionCache()
+      this.emitStatus()
       if (this.projectionRefreshPending) this.finishProjectionRefresh(true)
       return
     }
@@ -1009,7 +1277,7 @@ export class RemoteRepository {
 
   private projectionCursor(): ProjectionCursor | null {
     if (this.projection === null) return null
-    const authority = this.projection.authority
+    const authority = this.authority ?? this.projection.authority
     return {
       revision: this.projection.revision,
       eventSeq: this.projection.eventSeq,
@@ -1101,12 +1369,29 @@ export class RemoteRepository {
   private prepareAuthorityReset(authority?: WireAuthority): void {
     this.authorityResetPending = true
     this.notice = 'authority_reset_required'
-    if (authority !== undefined) this.authority = authority
+    this.authority = clone(authority ?? EMPTY_AUTHORITY)
     this.projection = null
     this.cursor = { revision: 0, eventSeq: 0 }
     this.replayEvents = []
+    this.replaySeen = false
+    this.replayInvalid = false
     this.pendingResync = false
+    this.expectedSnapshot = false
+    this.expectedReplay = false
+    this.queueProjectionCacheClear()
     this.setState('catching_up')
+  }
+
+  private discardProjectionForRevocation(): void {
+    this.projection = null
+    this.authority = clone(EMPTY_AUTHORITY)
+    this.cursor = { revision: 0, eventSeq: 0 }
+    this.replayEvents = []
+    this.replaySeen = false
+    this.replayInvalid = false
+    this.expectedSnapshot = false
+    this.expectedReplay = false
+    this.queueProjectionCacheClear()
   }
 
   private handleCommandResult(frame: WireCommandResult): void {
@@ -1283,10 +1568,15 @@ export class RemoteRepository {
     if (this.stopped || this.connection === null || this.pendingResync) return
     this.pendingResync = true
     this.syncMode = discardCachedAuthority ? 'authority_reset' : 'resync'
+    this.expectedSnapshot = true
+    this.expectedReplay = false
+    this.replaySeen = false
+    this.replayInvalid = false
+    this.replayEvents = []
     if (discardCachedAuthority) {
       this.projection = null
       this.cursor = { revision: 0, eventSeq: 0 }
-      this.replayEvents = []
+      this.queueProjectionCacheClear()
     }
     this.setState('catching_up')
     const frame: ResyncRequest = {
@@ -1372,6 +1662,7 @@ export class RemoteRepository {
       return
     }
     if (info.code === 4002 && reason === 'revoked') {
+      this.discardProjectionForRevocation()
       this.terminalFailure(
         closeReason.length > 0 ? closeReason : 'the server revoked this device session',
         'device_revoked',

@@ -1,10 +1,18 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { atomicWrite } from './atomic-write'
+import {
+  REMOTE_PROJECTION_CACHE_FORMAT,
+  REMOTE_PROJECTION_CACHE_SCHEMA_VERSION,
+  validateRemoteProjectionCacheV2,
+  type RemoteProjectionCacheV2,
+} from '../shared/sync/portable'
 
 /** File names are public so diagnostics and tests can locate the secret-free config. */
 export const REMOTE_TOKEN_FILE = 'remote-token.bin'
 export const REMOTE_SYNC_CONFIG_FILE = 'sync-config.json'
+/** Server mode keeps its read-only projection cache on the historic save path. */
+export const REMOTE_PROJECTION_CACHE_FILE = 'save.json'
 
 /**
  * Narrow structural view of Electron safeStorage. Injecting it keeps this module
@@ -29,6 +37,7 @@ export interface PairingStoreOptions {
   safeStorage: SafeStorageLike
   tokenPath?: string
   configPath?: string
+  projectionCachePath?: string
 }
 
 function requireNonEmpty(value: unknown, name: string): string {
@@ -63,6 +72,7 @@ function parseConfig(raw: unknown): PairingSyncConfig {
 export class PairingStore {
   private readonly tokenPath: string
   private readonly configPath: string
+  private readonly projectionCachePath: string
   private readonly safeStorage: SafeStorageLike
 
   constructor(options: PairingStoreOptions) {
@@ -75,6 +85,7 @@ export class PairingStore {
     this.safeStorage = options.safeStorage
     this.tokenPath = options.tokenPath ?? join(options.userDataPath, REMOTE_TOKEN_FILE)
     this.configPath = options.configPath ?? join(options.userDataPath, REMOTE_SYNC_CONFIG_FILE)
+    this.projectionCachePath = options.projectionCachePath ?? join(options.userDataPath, REMOTE_PROJECTION_CACHE_FILE)
   }
 
   get tokenFilePath(): string {
@@ -83,6 +94,10 @@ export class PairingStore {
 
   get configFilePath(): string {
     return this.configPath
+  }
+
+  get projectionCacheFilePath(): string {
+    return this.projectionCachePath
   }
 
   private requireEncryption(operation: string): void {
@@ -145,8 +160,43 @@ export class PairingStore {
     return parseConfig(raw)
   }
 
+  async saveProjectionCache(cache: RemoteProjectionCacheV2): Promise<void> {
+    if (validateRemoteProjectionCacheV2(cache) === false) {
+      throw new Error('remote projection cache is invalid')
+    }
+    if (cache.format !== REMOTE_PROJECTION_CACHE_FORMAT || cache.schemaVersion !== REMOTE_PROJECTION_CACHE_SCHEMA_VERSION) {
+      throw new Error('remote projection cache version is unsupported')
+    }
+    this.ensureParent(this.projectionCachePath)
+    atomicWrite(this.projectionCachePath, JSON.stringify(cache, null, 2))
+  }
+
+  async loadProjectionCache(): Promise<RemoteProjectionCacheV2 | null> {
+    if (existsSync(this.projectionCachePath) === false) return null
+    let raw: unknown
+    try {
+      raw = JSON.parse(readFileSync(this.projectionCachePath, 'utf8'))
+    } catch {
+      this.removeProjectionCache()
+      return null
+    }
+    if (validateRemoteProjectionCacheV2(raw) === false || raw.authority.state === 'reset') {
+      this.removeProjectionCache()
+      return null
+    }
+    return raw
+  }
+
+  async clearProjectionCache(): Promise<void> {
+    this.removeProjectionCache()
+  }
+
+  private removeProjectionCache(): void {
+    if (existsSync(this.projectionCachePath)) unlinkSync(this.projectionCachePath)
+  }
+
   async clear(): Promise<void> {
-    for (const file of [this.tokenPath, this.configPath]) {
+    for (const file of [this.tokenPath, this.configPath, this.projectionCachePath]) {
       if (existsSync(file) === false) continue
       unlinkSync(file)
     }

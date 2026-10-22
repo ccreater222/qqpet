@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,8 +23,10 @@ registerHooks({
 const {
   PROTOCOL_VERSION,
   SAVE_SCHEMA_VERSION,
+  REMOTE_PROJECTION_CACHE_FORMAT,
   parseClientMessage,
   parseServerMessage,
+  validateRemoteProjectionCacheV2,
 } = await import('../../src/shared/sync/index.ts')
 const { IPC } = await import('../../src/shared/ipc.ts')
 const {
@@ -67,6 +69,10 @@ const RESET_AUTHORITY = {
   restoreGeneration: 3,
   epoch: 9,
   state: 'active',
+}
+const ARCHIVED_AUTHORITY = {
+  ...AUTHORITY,
+  state: 'archived',
 }
 const RESET_STAMP = {
   owner: 'server',
@@ -201,8 +207,11 @@ async function until(predicate, label = 'condition') {
 class MemoryTokenStore {
   token = null
   config = null
+  projectionCache = null
   writes = []
   configWrites = []
+  cacheWrites = []
+  cacheClears = 0
 
   async loadToken() {
     return this.token
@@ -222,9 +231,25 @@ class MemoryTokenStore {
     this.config = clone(config)
   }
 
+  async loadProjectionCache() {
+    return this.projectionCache === null ? null : clone(this.projectionCache)
+  }
+
+  async saveProjectionCache(cache) {
+    assert.equal(validateRemoteProjectionCacheV2(cache), true)
+    this.cacheWrites.push(clone(cache))
+    this.projectionCache = clone(cache)
+  }
+
+  async clearProjectionCache() {
+    this.cacheClears += 1
+    this.projectionCache = null
+  }
+
   async clear() {
     this.token = null
     this.config = null
+    this.projectionCache = null
   }
 }
 
@@ -349,7 +374,10 @@ class FakeServer {
         ? []
         : [...this.projectionEvents.values()].filter(event => event.eventSeq > frame.lastEventSeq)
       if (this.replayDeliveryOnReconnect && missed.length > 0) {
-        connection.emit(welcomeFrame(deviceId, 'replay'))
+        const welcome = welcomeFrame(deviceId, 'replay')
+        welcome.headRevision = this.revision
+        welcome.headEventSeq = this.eventSeq
+        connection.emit(welcome)
         connection.emit({
           t: 'replay',
           v: PROTOCOL_VERSION,
@@ -558,6 +586,84 @@ test('hello/welcome handshake applies a snapshot and exposes the server reposito
   const command = connection.sent.find(frame => frame.t === 'command')
   assert.deepEqual(command.command, { type: 'pet.cheer', payload: {} })
   assert.equal(command.observedRevision >= 1, true)
+})
+
+test('welcome and catching-up ready gate start and commands until a final ready', async t => {
+  const server = new FakeServer()
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'hello') {
+      server.clients.add(connection)
+      const welcome = welcomeFrame(OWNER_DEVICE_ID, 'snapshot')
+      welcome.catchingUp = true
+      connection.emit(welcome)
+      connection.emit(server.snapshotFrame())
+      connection.emit(readyFrame(server.revision, server.eventSeq, server.authority, true))
+      return
+    }
+    server.handle(connection, frame)
+  })
+  const { repository } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  let settled = false
+  const starting = repository.start().then(value => {
+    settled = true
+    return value
+  })
+  await until(() => repository.getStatus().state === 'catching_up', 'catch-up welcome')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(settled, false, 'start must not resolve on a catching-up welcome/ready')
+  assert.deepEqual(repository.getProjection()?.shared, server.shared)
+  assert.equal(repository.getStatus().readOnly, true)
+  const blocked = await repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-catchup-gate' })
+  assert.equal(blocked.status, 'rejected')
+  assert.equal(blocked.error.code, 'server_catching_up')
+  const connection = transport.connections[0]
+  assert.equal(connection.sent.some(frame => frame.t === 'command'), false)
+
+  connection.emit(server.snapshotFrame())
+  connection.emit(readyFrame(server.revision, server.eventSeq, server.authority))
+  await starting
+  assert.equal(settled, true)
+  assert.equal(repository.getStatus().state, 'online')
+  assert.equal(repository.getStatus().readOnly, false)
+  assert.deepEqual(repository.getProjection().shared, server.shared)
+})
+
+test('welcome, ready and snapshot authority transitions are public and force read-only', async t => {
+  const server = new FakeServer()
+  const { repository, store } = await makeRepository(server)
+  t.after(() => repository.stop())
+  await repository.start()
+  const connection = [...server.clients][0]
+  const current = repository.getProjection()
+
+  const welcome = welcomeFrame(OWNER_DEVICE_ID, 'none')
+  welcome.authority = clone(ARCHIVED_AUTHORITY)
+  connection.emit(welcome)
+  await until(() => repository.getProjection()?.authority.state === 'archived', 'welcome authority propagation')
+  assert.equal(repository.getStatus().authority.state, 'archived')
+  assert.equal(repository.getStatus().readOnly, true)
+  const beforeReady = await repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-archived-before-ready' })
+  assert.equal(beforeReady.status, 'rejected')
+  assert.equal(beforeReady.error.code, 'offline')
+
+  connection.emit(readyFrame(current.revision, current.eventSeq, ARCHIVED_AUTHORITY))
+  await until(() => repository.getStatus().state === 'online', 'archived ready')
+  assert.equal(repository.getProjection().authority.state, 'archived')
+  assert.equal(repository.getStatus().authority.state, 'archived')
+  assert.equal(repository.getStatus().readOnly, true)
+  const blocked = await repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-archived-command' })
+  assert.equal(blocked.status, 'rejected')
+  assert.equal(blocked.error.code, 'authority_not_active')
+  assert.equal(connection.sent.some(frame => frame.t === 'command'), false)
+  await repository.flush()
+  assert.equal(store.projectionCache?.authority.state, 'archived')
+
+  connection.emit(snapshotFrame(server.shared, current.revision, current.eventSeq, ARCHIVED_AUTHORITY))
+  await until(() => repository.getProjection()?.authority.state === 'archived', 'snapshot authority propagation')
+  assert.equal(repository.getStatus().readOnly, true)
+  assert.equal(repository.getProjection().revision, current.revision)
+  assert.deepEqual(repository.getProjection().shared, server.shared)
 })
 
 test('two clients converge on one ordered projection after a feed command', async t => {
@@ -1163,7 +1269,162 @@ test('pairing exchange persists the issued token and never exposes secrets', asy
   assert.equal(logs.flat().join(' ').includes(ISSUED_TOKEN), false)
 })
 
-test('replay-only reconnect catches up cached projections without a full snapshot', async t => {
+test('accepted state is persisted as a validated v2 cache and restored before the handshake', async t => {
+  const server = new FakeServer()
+  const first = await makeRepository(server)
+  t.after(() => first.repository.stop())
+  await first.repository.start()
+  await until(() => first.store.cacheWrites.length > 0, 'projection cache write')
+  const cache = first.store.projectionCache
+  assert.equal(cache.format, REMOTE_PROJECTION_CACHE_FORMAT)
+  assert.equal(validateRemoteProjectionCacheV2(cache), true)
+  assert.equal(cache.petId, PET_ID)
+  assert.equal(cache.deviceId, OWNER_DEVICE_ID)
+  assert.equal(cache.revision, server.revision)
+  assert.equal(cache.eventSeq, server.eventSeq)
+  assert.deepEqual(cache.shared, server.shared)
+  assert.deepEqual(cache.authority, AUTHORITY)
+  await first.repository.stop()
+
+  const transport = new FakeTransport(() => {})
+  const restored = await makeRepository(server, {
+    store: first.store,
+    config: first.store.config,
+    transport,
+  })
+  t.after(() => restored.repository.stop())
+  const starting = restored.repository.start()
+  await until(
+    () => transport.connections.length > 0
+      && transport.connections[0].sent.some(frame => frame.t === 'hello'),
+    'restored hello',
+  )
+  const hello = transport.connections[0].sent.find(frame => frame.t === 'hello')
+  assert.equal(hello.lastRevision, server.revision)
+  assert.equal(hello.lastEventSeq, server.eventSeq)
+  assert.deepEqual(hello.cachedAuthority, {
+    authorityId: AUTHORITY.authorityId,
+    restoreGeneration: AUTHORITY.restoreGeneration,
+    epoch: AUTHORITY.epoch,
+  })
+  assert.deepEqual(restored.repository.getProjection().shared, server.shared)
+  assert.deepEqual(restored.repository.getProjection().authority, AUTHORITY)
+  assert.equal(restored.repository.getStatus().readOnly, true, 'a restored cache is not writable before ready')
+  assert.equal(restored.repository.getStatus().revision, server.revision)
+  await restored.repository.stop()
+  await starting
+})
+
+test('invalid projection caches are discarded and never advertised in hello', async t => {
+  const server = new FakeServer()
+  const transport = server.transport()
+  const store = new MemoryTokenStore()
+  store.projectionCache = {
+    format: REMOTE_PROJECTION_CACHE_FORMAT,
+    schemaVersion: 999,
+    petId: PET_ID,
+    deviceId: OWNER_DEVICE_ID,
+    revision: 99,
+    eventSeq: 99,
+  }
+  const { repository } = await makeRepository(server, { store, transport })
+  t.after(() => repository.stop())
+  await repository.start()
+  const hello = transport.connections[0].sent.find(frame => frame.t === 'hello')
+  assert.equal(hello.lastRevision, undefined)
+  assert.equal(hello.lastEventSeq, undefined)
+  assert.equal(hello.cachedAuthority, undefined)
+  assert.equal(store.projectionCache, null)
+  assert.equal(store.cacheClears > 0, true)
+  assert.deepEqual(repository.getProjection().shared, server.shared)
+  assert.equal(repository.getStatus().state, 'online')
+})
+
+test('a valid reset-lineage cache is discarded instead of advertised', async t => {
+  const server = new FakeServer()
+  const transport = server.transport()
+  const store = new MemoryTokenStore()
+  store.projectionCache = {
+    format: REMOTE_PROJECTION_CACHE_FORMAT,
+    schemaVersion: 1,
+    petId: PET_ID,
+    deviceId: OWNER_DEVICE_ID,
+    revision: 42,
+    eventSeq: 43,
+    gameTimeMs: GAME_TIME_MS,
+    timeZone: 'Asia/Shanghai',
+    advanceWhileEmpty: true,
+    authority: { ...AUTHORITY, state: 'reset' },
+    shared: clone(server.shared),
+    device: clone(fixtures.device),
+  }
+  const { repository } = await makeRepository(server, { store, transport })
+  t.after(() => repository.stop())
+  await repository.start()
+  const hello = transport.connections[0].sent.find(frame => frame.t === 'hello')
+  assert.equal(hello.lastRevision, undefined)
+  assert.equal(hello.lastEventSeq, undefined)
+  assert.equal(hello.cachedAuthority, undefined)
+  assert.equal(store.projectionCache, null)
+  assert.equal(repository.getStatus().revision, server.revision)
+  assert.deepEqual(repository.getProjection().shared, server.shared)
+})
+
+test('authority reset clears the projection cache until a fresh snapshot is accepted', async t => {
+  const server = new FakeServer()
+  let resyncFrame = null
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'resync') {
+      resyncFrame = frame
+      return
+    }
+    server.handle(connection, frame)
+  })
+  const { repository, store } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  await repository.start()
+  await until(() => store.cacheWrites.length > 0, 'initial cache write')
+  const connection = [...server.clients][0]
+  connection.emit({
+    t: 'authorityResetRequired',
+    code: 'authority_reset_required',
+    v: PROTOCOL_VERSION,
+    requestId: 'reset-' + PET_ID,
+    authority: clone(RESET_STAMP),
+    reason: 'cache_newer',
+    requireFullSnapshot: true,
+  })
+  await until(() => resyncFrame !== null, 'authority-reset resync')
+  assert.equal(resyncFrame.discardCachedAuthority, true)
+  await repository.flush()
+  assert.equal(store.projectionCache, null)
+  assert.equal(repository.getProjection(), null)
+  assert.equal(repository.getStatus().readOnly, true)
+  assert.equal(store.cacheClears > 0, true)
+})
+
+test('device revocation clears the public projection and persisted cache', async t => {
+  const server = new FakeServer()
+  const { repository, store } = await makeRepository(server)
+  t.after(() => repository.stop())
+  await repository.start()
+  await until(() => store.cacheWrites.length > 0, 'initial cache write')
+  const connection = [...server.clients][0]
+  connection.emit({
+    t: 'deviceRevoked',
+    v: PROTOCOL_VERSION,
+    deviceId: OWNER_DEVICE_ID,
+    revokedAtMs: GAME_TIME_MS,
+  })
+  await repository.flush()
+  assert.equal(store.projectionCache, null)
+  assert.equal(repository.getProjection(), null)
+  assert.equal(repository.getStatus().notice, 'device_revoked')
+  assert.equal(repository.getStatus().readOnly, true)
+  assert.equal(store.cacheClears > 0, true)
+})
+
+test('replay-only ready with a stale cached revision falls back to a full snapshot', async t => {
   const server = new FakeServer()
   const transport = server.transport()
   const { repository } = await makeRepository(server, { transport })
@@ -1179,11 +1440,121 @@ test('replay-only reconnect catches up cached projections without a full snapsho
   server.muteProjection = null
   server.replayDeliveryOnReconnect = true
   connection.close()
+  await until(() => resyncs.length > 0, 'full-snapshot recovery')
+  const recovered = resyncs.at(-1)
+  assert.equal(recovered.projection.revision, server.revision)
+  assert.equal(recovered.projection.eventSeq, server.eventSeq)
+  assert.deepEqual(recovered.projection.shared, server.shared)
+  assert.equal(recovered.events.length, 0, 'the stale replay was discarded in favor of the snapshot')
+  const latest = transport.connections.at(-1)
+  assert.equal(latest.sent.some(frame => frame.t === 'resync'), true)
+  assert.equal(repository.getProjection().authority.authorityId, AUTHORITY.authorityId)
+  assert.deepEqual(repository.getProjection().shared, server.shared)
+})
+
+test('valid replay-only reconnect applies contiguous events and preserves canonical shared state', async t => {
+  const server = new FakeServer()
+  const transport = server.transport()
+  const { repository } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  await repository.start()
+  const resyncs = []
+  repository.onResync((projection, events) => resyncs.push({ projection, events }))
+  const first = [...server.clients][0]
+  const eventTwo = {
+    eventSeq: 2,
+    revision: 1,
+    commandSeq: 1,
+    gameTimeMs: GAME_TIME_MS,
+    type: 'reward.granted',
+    payload: { amount: 1 },
+  }
+  first.emit({
+    t: 'projection',
+    v: PROTOCOL_VERSION,
+    revision: server.revision,
+    eventSeq: 2,
+    gameTimeMs: server.gameTimeMs(),
+    timeZone: server.timeZone,
+    advanceWhileEmpty: server.advanceWhileEmpty,
+    authority: clone(server.authority),
+    save: clone(server.shared),
+    events: [eventTwo],
+  })
+  await until(() => repository.getProjection()?.eventSeq === 2, 'cached event cursor')
+  await repository.flush()
+  server.eventSeq = 3
+  server.projectionEvents.set(3, {
+    ...clone(eventTwo),
+    eventSeq: 3,
+    commandSeq: 2,
+  })
+  server.clients.delete(first)
+  server.replayDeliveryOnReconnect = true
+  first.close()
   await until(() => resyncs.length > 0, 'replay resync delivery')
-  assert.equal(resyncs.at(-1).projection.revision, server.revision)
-  assert.equal(resyncs.at(-1).projection.eventSeq, server.eventSeq)
-  assert.equal(resyncs.at(-1).events.length, 1)
-  assert.equal(resyncs.at(-1).events[0].eventSeq, server.eventSeq)
+  const delivered = resyncs.at(-1)
+  assert.equal(delivered.projection.revision, server.revision)
+  assert.equal(delivered.projection.eventSeq, server.eventSeq)
+  assert.deepEqual(delivered.projection.shared, server.shared)
+  assert.deepEqual(repository.getProjection().shared, server.shared)
+  assert.equal(delivered.events.length, 1)
+  assert.equal(delivered.events[0].eventSeq, 3)
+  assert.equal(repository.getStatus().state, 'online')
+  assert.equal(repository.getStatus().readOnly, false)
+})
+
+test('replay validation rejects lower starts, empty ranges and missing interiors', async t => {
+  const scenarios = [
+    {
+      name: 'lower start',
+      frame: { fromEventSeq: 1, toEventSeq: 2, events: [{ eventSeq: 2, revision: 1, gameTimeMs: GAME_TIME_MS, type: 'reward.granted', payload: { amount: 1 } }] },
+    },
+    {
+      name: 'empty range',
+      frame: { fromEventSeq: 2, toEventSeq: 2, events: [] },
+    },
+    {
+      name: 'missing interior',
+      frame: {
+        fromEventSeq: 2,
+        toEventSeq: 4,
+        events: [
+          { eventSeq: 2, revision: 1, gameTimeMs: GAME_TIME_MS, type: 'reward.granted', payload: { amount: 1 } },
+          { eventSeq: 4, revision: 1, gameTimeMs: GAME_TIME_MS, type: 'reward.granted', payload: { amount: 1 } },
+        ],
+      },
+    },
+  ]
+  for (const scenario of scenarios) {
+    const server = new FakeServer()
+    const resyncs = []
+    const transport = new FakeTransport((connection, frame) => {
+      if (frame.t === 'resync') {
+        resyncs.push(frame)
+        return
+      }
+      server.handle(connection, frame)
+    })
+    const { repository } = await makeRepository(server, { transport })
+    await repository.start()
+    const connection = [...server.clients][0]
+    const welcome = welcomeFrame(OWNER_DEVICE_ID, 'replay')
+    welcome.headRevision = 1
+    welcome.headEventSeq = 4
+    connection.emit(welcome)
+    connection.emit({
+      t: 'replay',
+      v: PROTOCOL_VERSION,
+      ...scenario.frame,
+    })
+    await until(() => resyncs.length > 0, 'invalid replay resync for ' + scenario.name)
+    assert.equal(resyncs[0].lastRevision, 1, scenario.name)
+    assert.equal(resyncs[0].lastEventSeq, 1, scenario.name)
+    assert.equal(repository.getStatus().state, 'catching_up', scenario.name)
+    assert.equal(connection.sent.some(frame => frame.t === 'command'), false, scenario.name)
+    await repository.stop()
+  }
 })
 
 test('PairingStore encrypts the token with safeStorage and fails closed when unavailable', async () => {
@@ -1213,9 +1584,24 @@ test('PairingStore encrypts the token with safeStorage and fails closed when una
   assert.equal(configFile.includes(TOKEN), false)
   assert.equal(await pairing.loadToken(), TOKEN)
   assert.equal((await pairing.loadConfig()).lastRevision, 1)
+  const cache = clone(fixtures.remoteCache)
+  await pairing.saveProjectionCache(cache)
+  const cacheFile = join(dir, mod.REMOTE_PROJECTION_CACHE_FILE)
+  const cacheText = readFileSync(cacheFile, 'utf8')
+  assert.equal(cacheText.includes(TOKEN), false)
+  assert.deepEqual(await pairing.loadProjectionCache(), cache)
+  await assert.rejects(
+    pairing.saveProjectionCache({ ...cache, schemaVersion: 999 }),
+    /remote projection cache is invalid/,
+  )
+  writeFileSync(cacheFile, '{"format":"broken"}')
+  assert.equal(await pairing.loadProjectionCache(), null)
+  assert.equal(existsSync(cacheFile), false, 'a corrupt cache is discarded')
+  await pairing.saveProjectionCache(cache)
   await pairing.clear()
   assert.equal(await pairing.loadToken(), null)
   assert.equal(await pairing.loadConfig(), null)
+  assert.equal(await pairing.loadProjectionCache(), null)
   const unavailable = new mod.PairingStore({
     userDataPath: dir,
     safeStorage: { ...safeStorage, isEncryptionAvailable: () => false },
