@@ -11,6 +11,7 @@ import {
   type ErrorMessage,
   type OrderedEvent,
   type PortableBundleRequest,
+  type ReplayMessage,
   type ResyncRequest,
   type ServerToClient,
   type SnapshotMessage,
@@ -70,6 +71,11 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined
+}
+
+interface DeliveryPlan {
+  delivery: Welcome['delivery']
+  replay?: ReplayMessage
 }
 
 export class SessionService {
@@ -417,7 +423,7 @@ export class SessionService {
     connection.authenticated = true
     this.hub.add(connection)
 
-    const delivery = this.delivery(hello, snapshot.pet, authenticated.petId)
+    const plan = this.deliveryPlan(hello, snapshot.pet, authenticated.petId, snapshot.authority.state)
     const welcome: Welcome = {
       t: 'welcome',
       v: PROTOCOL_VERSION,
@@ -436,43 +442,60 @@ export class SessionService {
       headRevision: snapshot.pet.revision,
       headEventSeq: snapshot.pet.eventSeq,
       catchingUp: this.isCatchingUp(authenticated.petId),
-      delivery,
+      delivery: plan.delivery,
       ...(authenticated.issuedToken === undefined ? {} : { issuedToken: authenticated.issuedToken }),
     }
     this.send(socket, welcome)
-    if (delivery === 'replay' || delivery === 'replay+snapshot') {
-      this.send(socket, {
-        t: 'replay',
-        v: PROTOCOL_VERSION,
-        fromEventSeq: hello.lastEventSeq ?? 0,
-        toEventSeq: snapshot.pet.eventSeq,
-        events: this.replayEvents(authenticated.petId, hello.lastEventSeq ?? 0, snapshot.pet.eventSeq),
-      })
-    }
-    if (delivery === 'snapshot' || delivery === 'replay+snapshot') {
+    if (plan.replay !== undefined) this.send(socket, plan.replay)
+    if (plan.delivery === 'snapshot' || plan.delivery === 'replay+snapshot') {
       this.send(socket, this.snapshot(snapshot.pet, authenticated.petId, snapshot.engine.save))
     }
-    this.send(socket, {
-      t: 'ready',
-      v: PROTOCOL_VERSION,
-      revision: snapshot.pet.revision,
-      eventSeq: snapshot.pet.eventSeq,
-      gameTimeMs: snapshot.pet.gameTimeMs,
-      timeZone: snapshot.settings.timeZone,
-      advanceWhileEmpty: snapshot.settings.advanceWhileEmpty,
-      authority: this.hub.authority(authenticated.petId),
-      catchingUp: this.isCatchingUp(authenticated.petId),
-    })
+    this.sendReady(connection, snapshot)
   }
 
-  private delivery(hello: ClientHello, pet: PetRecord, petId: string): Welcome['delivery'] {
+  /**
+   * Only plan a replay when every event between the client cursor and the
+   * current head can be delivered in one contiguous, frame-sized replay.
+   * Otherwise the caller must send a full snapshot: ready must never advance a
+   * client past events that were left out of a truncated replay.
+   */
+  private deliveryPlan(
+    hello: ClientHello,
+    pet: PetRecord,
+    petId: string,
+    authorityState: 'active' | 'archived' | 'reset',
+  ): DeliveryPlan {
+    // Archived authority may expose authority status but never the save,
+    // events, or runtime internals. A reset authority may only recover via a
+    // full snapshot; it must not replay events from the previous lineage.
+    if (authorityState === 'archived') return { delivery: 'none' }
+    if (authorityState === 'reset') return { delivery: 'snapshot' }
     const revision = hello.lastRevision
-    const eventSeq = hello.lastEventSeq
-    if (revision === undefined || eventSeq === undefined) return 'snapshot'
-    if (revision === pet.revision && eventSeq === pet.eventSeq) return 'none'
-    const next = eventSeq >= pet.eventSeq ? undefined : this.store.getEvent(petId, eventSeq + 1)
-    if (next === undefined) return 'snapshot'
-    return revision === pet.revision ? 'replay' : 'replay+snapshot'
+    const fromEventSeq = hello.lastEventSeq
+    if (revision === undefined || fromEventSeq === undefined) return { delivery: 'snapshot' }
+    if (revision === pet.revision && fromEventSeq === pet.eventSeq) return { delivery: 'none' }
+    if (fromEventSeq >= pet.eventSeq) return { delivery: 'snapshot' }
+
+    const missingEvents = pet.eventSeq - fromEventSeq
+    if (missingEvents > this.config.maxReplayEvents) return { delivery: 'snapshot' }
+    const events = this.replayEvents(petId, fromEventSeq, pet.eventSeq)
+    if (events.length !== missingEvents) return { delivery: 'snapshot' }
+    for (let index = 0; index < events.length; index += 1) {
+      if (events[index].eventSeq !== fromEventSeq + index + 1) return { delivery: 'snapshot' }
+    }
+
+    const replay: ReplayMessage = {
+      t: 'replay',
+      v: PROTOCOL_VERSION,
+      fromEventSeq,
+      toEventSeq: pet.eventSeq,
+      events,
+    }
+    if (this.fitsFrame(replay) === false) return { delivery: 'snapshot' }
+    return {
+      delivery: revision === pet.revision ? 'replay' : 'replay+snapshot',
+      replay,
+    }
   }
 
   private replayEvents(petId: string, after: number, to: number): OrderedEvent[] {
@@ -509,9 +532,10 @@ export class SessionService {
     }
   }
 
-  private resync(connection: LiveConnection, _request: ResyncRequest): void {
-    const snapshot = this.store.loadCanonical(connection.petId)
-    this.hub.send(connection, this.snapshot(snapshot.pet, connection.petId, snapshot.engine.save))
+  private sendReady(
+    connection: LiveConnection,
+    snapshot: ReturnType<DatabaseStore['loadCanonical']>,
+  ): void {
     this.hub.send(connection, {
       t: 'ready',
       v: PROTOCOL_VERSION,
@@ -523,6 +547,18 @@ export class SessionService {
       authority: this.hub.authority(connection.petId),
       catchingUp: this.isCatchingUp(connection.petId),
     })
+  }
+
+  private resync(connection: LiveConnection, _request: ResyncRequest): void {
+    const snapshot = this.store.loadCanonical(connection.petId)
+    if (snapshot.authority.state === 'archived') {
+      // Archived resync is a status-only operation. Never use it to bypass the
+      // handshake projection gate.
+      this.sendReady(connection, snapshot)
+      return
+    }
+    this.hub.send(connection, this.snapshot(snapshot.pet, connection.petId, snapshot.engine.save))
+    this.sendReady(connection, snapshot)
   }
 
   private async command(socket: WebSocket, connection: LiveConnection, request: CommandRequest): Promise<void> {
@@ -570,18 +606,24 @@ export class SessionService {
       }
       if (committed.result.status === 'rejected' && committed.result.error?.refreshProjection === true) {
         const snapshot = this.store.loadCanonical(connection.petId)
-        this.hub.send(connection, {
-          t: 'projection',
-          v: PROTOCOL_VERSION,
-          revision: snapshot.pet.revision,
-          eventSeq: snapshot.pet.eventSeq,
-          gameTimeMs: snapshot.pet.gameTimeMs,
-          timeZone: snapshot.settings.timeZone,
-          advanceWhileEmpty: snapshot.settings.advanceWhileEmpty,
-          authority: this.hub.authority(connection.petId),
-          save: snapshot.engine.save,
-          events: [],
-        })
+        if (snapshot.authority.state === 'archived') {
+          // A rejected command while archived is authority status only. Sending
+          // a projection here would leak the save through the refresh path.
+          this.sendReady(connection, snapshot)
+        } else {
+          this.hub.send(connection, {
+            t: 'projection',
+            v: PROTOCOL_VERSION,
+            revision: snapshot.pet.revision,
+            eventSeq: snapshot.pet.eventSeq,
+            gameTimeMs: snapshot.pet.gameTimeMs,
+            timeZone: snapshot.settings.timeZone,
+            advanceWhileEmpty: snapshot.settings.advanceWhileEmpty,
+            authority: this.hub.authority(connection.petId),
+            save: snapshot.engine.save,
+            events: [],
+          })
+        }
       }
     } catch (error) {
       if (error instanceof AuthenticationError) {
@@ -655,6 +697,8 @@ export class SessionService {
     snapshot: ReturnType<DatabaseStore['loadCanonical']>,
   ): 'restore_rollback' | 'authority_mismatch' | 'cache_newer' | undefined {
     const cached = hello.cachedAuthority
+    // Archived authority is gated after authentication by deliveryPlan, which
+    // permits only status frames. Reset recovery still requires a full snapshot.
     if (cached === undefined || snapshot.authority.state === 'archived') return undefined
     if (cached.epoch > snapshot.authority.epoch) return 'cache_newer'
     if (cached.restoreGeneration !== snapshot.authority.restoreGeneration) return 'restore_rollback'
@@ -704,6 +748,10 @@ export class SessionService {
       return
     }
     socket.send(text)
+  }
+
+  private fitsFrame(message: ServerToClient): boolean {
+    return Buffer.byteLength(JSON.stringify(message)) <= this.config.maxFrameBytes
   }
 
   private close(socket: WebSocket, code: number, reason: string): void {

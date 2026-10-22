@@ -1492,7 +1492,7 @@ Metrics/logs:
 - Long-lived tokens are never in query strings, paths, or HTTP headers; they travel only in the WSS `hello` frame.
 - The protocol is command-oriented. There is no `SavePatch`, tick patch, RNG field, scheduled-job field, or reward amount supplied by a client.
 - `protocolVersion` is integer `1` for this spec. Unknown major versions are rejected; optional future fields may be ignored after a known major.
-- HTTP is only `/healthz`/`/readyz`; all pet data, commands, snapshots, events, and resync use WebSocket.
+- HTTP is only `/healthz`/`/readyz`; there is no unauthenticated `/status` endpoint. All pet-identifying status, settings, commands, snapshots, events, and resync use authenticated WebSocket frames.
 - `requestId` correlates request/response; `opId` is the durable idempotency key for a command.
 - Events and projection frames are ordered by monotonic `eventSeq` and `revision`. Clients stop on a gap and request resync.
 - A full `SharedSaveData` snapshot is the projection unit. Whole-projection broadcast is safe here because the server is the sole writer and the snapshot is authoritative. Device overlay is applied in main, never sent to other clients.

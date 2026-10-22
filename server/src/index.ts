@@ -223,32 +223,6 @@ export class SyncServer {
       this.json(response, 200, { ...this.health() })
       return
     }
-    if (request.url === '/status') {
-      const pets = this.store.listPets().map(pet => {
-        const settings = this.store.getSettings(pet.id)
-        const health = this.scheduler.health(pet.id)
-        return {
-          petId: pet.id,
-          revision: pet.revision,
-          eventSeq: pet.eventSeq,
-          gameTimeMs: pet.gameTimeMs,
-          timeZone: settings?.timeZone ?? '',
-          weatherLocation: settings?.weatherLocation ?? '',
-          advanceWhileEmpty: settings?.advanceWhileEmpty ?? false,
-          ready: health?.ready ?? false,
-          catchingUp: health?.catchingUp ?? false,
-          wallLagMs: health?.wallLagMs ?? 0,
-          nextTickAtMs: health?.nextTickAtMs ?? 0,
-          scheduledJobs: health?.scheduledJobs ?? 0,
-          nextScheduledJobAtMs: health?.nextScheduledJobAtMs ?? null,
-          activeClientCount: health?.activeClientCount ?? 0,
-          authorityState: health?.authorityState ?? 'reset',
-          authorityEpoch: health?.authorityEpoch ?? 0,
-        }
-      })
-      this.json(response, 200, { ok: true, pets })
-      return
-    }
     this.json(response, 404, { ok: false, error: 'not_found' })
   }
 

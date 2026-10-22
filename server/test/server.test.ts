@@ -318,6 +318,120 @@ test('reconnect gets retained replay and a snapshot, and resync sends a fresh sn
   await reconnecting.close()
 })
 
+test('reconnect falls back to a full snapshot when a complete replay exceeds maxReplayEvents', async t => {
+  const harness = await createHarness(t, { maxReplayEvents: 2 })
+  const owner = await pairOwner(harness)
+
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'overflow-adopt',
+    opId: 'overflow-adopt',
+    command: { type: 'pet.adopt', payload: { sex: 'GG' } },
+  })
+  const adopted = await owner.next('commandResult')
+  if (adopted.t !== 'commandResult') throw new Error('missing adopt result')
+  assert.equal(adopted.status, 'applied')
+  await owner.next('projection')
+
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'overflow-rename',
+    opId: 'overflow-rename',
+    command: { type: 'pet.rename', payload: { name: 'ReplayOverflow' } },
+  })
+  const renamed = await owner.next('commandResult')
+  if (renamed.t !== 'commandResult') throw new Error('missing rename result')
+  assert.equal(renamed.status, 'applied')
+  await owner.next('projection')
+  assert.ok(renamed.eventSeq > harness.config.maxReplayEvents)
+  await owner.close()
+
+  const reconnecting = await connect(harness, { kind: 'token', token: owner.token }, {
+    lastRevision: 0,
+    lastEventSeq: 0,
+  })
+  assert.equal(reconnecting.welcome.delivery, 'snapshot')
+  const snapshot = await reconnecting.next('snapshot')
+  if (snapshot.t !== 'snapshot') throw new Error('missing snapshot')
+  assert.equal(snapshot.eventSeq, renamed.eventSeq)
+  assert.equal((await reconnecting.next('ready')).t, 'ready')
+  assert.equal(reconnecting.messages.some(message => message.t === 'replay'), false)
+  await reconnecting.close()
+})
+
+test('reconnect falls back to a full snapshot when retained events have a sequence gap', async t => {
+  const harness = await createHarness(t)
+  const owner = await pairOwner(harness)
+  await owner.close()
+
+  const store = openDatabase(harness.dbPath)
+  const pet = store.getPet('default')
+  assert.ok(pet)
+  for (const eventSeq of [1, 3]) {
+    store.insertEvent('default', {
+      eventSeq,
+      revision: pet.revision + eventSeq,
+      commandSeq: null,
+      gameTimeMs: pet.gameTimeMs,
+      type: 'server.changed',
+      payload: { retained: eventSeq },
+      createdAtMs: Date.now(),
+    })
+  }
+  store.db.prepare('UPDATE pets SET revision = ?, event_seq = ? WHERE id = ?').run(pet.revision + 2, 3, 'default')
+  store.close()
+
+  const reconnecting = await connect(harness, { kind: 'token', token: owner.token }, {
+    lastRevision: pet.revision,
+    lastEventSeq: pet.eventSeq,
+  })
+  assert.equal(reconnecting.welcome.delivery, 'snapshot')
+  const snapshot = await reconnecting.next('snapshot')
+  if (snapshot.t !== 'snapshot') throw new Error('missing snapshot')
+  assert.equal(snapshot.eventSeq, 3)
+  assert.equal((await reconnecting.next('ready')).t, 'ready')
+  assert.equal(reconnecting.messages.some(message => message.t === 'replay'), false)
+  await reconnecting.close()
+})
+
+test('reconnect falls back to a full snapshot when a complete replay exceeds the frame budget', async t => {
+  const harness = await createHarness(t, { maxFrameBytes: 4096 })
+  const owner = await pairOwner(harness)
+  await owner.close()
+
+  const store = openDatabase(harness.dbPath)
+  const pet = store.getPet('default')
+  assert.ok(pet)
+  assert.equal(pet.eventSeq, 0)
+  const eventSeq = pet.eventSeq + 1
+  const revision = pet.revision + 1
+  store.insertEvent('default', {
+    eventSeq,
+    revision,
+    commandSeq: null,
+    gameTimeMs: pet.gameTimeMs,
+    type: 'server.changed',
+    payload: { change: 'oversized-replay', detail: 'x'.repeat(8192) },
+    createdAtMs: Date.now(),
+  })
+  store.db.prepare('UPDATE pets SET revision = ?, event_seq = ? WHERE id = ?').run(revision, eventSeq, 'default')
+  store.close()
+
+  const reconnecting = await connect(harness, { kind: 'token', token: owner.token }, {
+    lastRevision: pet.revision,
+    lastEventSeq: pet.eventSeq,
+  })
+  assert.equal(reconnecting.welcome.delivery, 'snapshot')
+  const snapshot = await reconnecting.next('snapshot')
+  if (snapshot.t !== 'snapshot') throw new Error('missing snapshot')
+  assert.equal(snapshot.eventSeq, eventSeq)
+  assert.equal((await reconnecting.next('ready')).t, 'ready')
+  assert.equal(reconnecting.messages.some(message => message.t === 'replay'), false)
+  await reconnecting.close()
+})
+
 test('owner revocation closes every live device socket with 4002 and rejects token reconnect', async t => {
   const harness = await createHarness(t)
   const owner = await pairOwner(harness)
@@ -641,7 +755,10 @@ test('archived authority rejects commands and reset authority demands a cache di
   assert.equal(rejected.status, 'rejected')
   assert.equal(rejected.error?.code, 'authority_not_active')
   assert.equal(rejected.error?.refreshProjection, true)
-  assert.equal((await owner.next('projection')).t, 'projection')
+  const archivedStatus = await owner.next('ready')
+  if (archivedStatus.t !== 'ready') throw new Error('missing archived status')
+  assert.equal(archivedStatus.authority.state, 'archived')
+  assert.equal(owner.messages.some(message => message.t === 'projection'), false)
   await owner.close()
 
   const store2 = openDatabase(harness.dbPath)
@@ -660,7 +777,91 @@ test('archived authority rejects commands and reset authority demands a cache di
   )
   const recovered = await connect(harness, { kind: 'token', token: owner.token })
   assert.equal(recovered.welcome.authority.state, 'reset')
+  assert.equal(recovered.welcome.delivery, 'snapshot')
+  const recoveredSnapshot = await recovered.next('snapshot')
+  if (recoveredSnapshot.t !== 'snapshot') throw new Error('missing reset recovery snapshot')
+  assert.equal(recoveredSnapshot.authority.state, 'reset')
+  assert.equal((await recovered.next('ready')).t, 'ready')
   await recovered.close()
+})
+
+test('archived sessions receive authority status only while owners retain detach bundle access', async t => {
+  const harness = await createHarness(t)
+  const owner = await pairOwner(harness)
+
+  const store = openDatabase(harness.dbPath)
+  const playerCode = store.issuePairingCode('default', 'player', 10 * 60_000).code
+  store.close()
+  const player = await connect(harness, { kind: 'pairing', code: playerCode, deviceLabel: 'Player phone' })
+  await player.next('ready')
+  await player.close()
+  await owner.close()
+
+  const archiveStore = openDatabase(harness.dbPath)
+  archiveStore.db.prepare("UPDATE pet_authority SET state = 'archived' WHERE pet_id = 'default'").run()
+  archiveStore.close()
+
+  const archivedOwner = await connect(harness, { kind: 'token', token: owner.token }, {
+    lastRevision: 0,
+    lastEventSeq: 0,
+  })
+  assert.equal(archivedOwner.welcome.delivery, 'none')
+  const ownerStatus = await archivedOwner.next('ready')
+  if (ownerStatus.t !== 'ready') throw new Error('missing owner status')
+  assert.equal(ownerStatus.authority.state, 'archived')
+  assert.equal(archivedOwner.messages.some(message => message.t === 'snapshot' || message.t === 'replay'), false)
+
+  archivedOwner.send({ t: 'exportBundle', v: PROTOCOL_VERSION, requestId: 'owner-archived-bundle' })
+  const bundle = await archivedOwner.next('portableBundle')
+  if (bundle.t !== 'portableBundle') throw new Error('missing owner detach bundle')
+  assert.equal(bundle.bundle.authority.owner, 'server')
+  assert.equal(archivedOwner.messages.some(message => message.t === 'snapshot' || message.t === 'projection' || message.t === 'replay'), false)
+
+  const archivedPlayer = await connect(harness, { kind: 'token', token: player.token }, {
+    lastRevision: 0,
+    lastEventSeq: 0,
+  })
+  assert.equal(archivedPlayer.welcome.delivery, 'none')
+  const playerStatus = await archivedPlayer.next('ready')
+  if (playerStatus.t !== 'ready') throw new Error('missing player status')
+  assert.equal(playerStatus.authority.state, 'archived')
+  assert.equal(archivedPlayer.messages.some(message => message.t === 'snapshot' || message.t === 'replay'), false)
+
+  archivedPlayer.send({ t: 'exportBundle', v: PROTOCOL_VERSION, requestId: 'player-archived-bundle' })
+  const deniedBundle = await archivedPlayer.next('error')
+  if (deniedBundle.t !== 'error') throw new Error('missing player bundle denial')
+  assert.equal(deniedBundle.code, 'authority_not_active')
+  assert.equal(archivedPlayer.messages.some(message => message.t === 'portableBundle'), false)
+
+  archivedPlayer.send({
+    t: 'resync',
+    v: PROTOCOL_VERSION,
+    requestId: 'player-archived-resync',
+    discardCachedAuthority: true,
+  })
+  const resyncStatus = await archivedPlayer.next('ready')
+  if (resyncStatus.t !== 'ready') throw new Error('missing resync status')
+  assert.equal(resyncStatus.authority.state, 'archived')
+  assert.equal(archivedPlayer.messages.some(message => message.t === 'snapshot' || message.t === 'replay'), false)
+
+  archivedPlayer.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'player-archived-rename',
+    opId: 'player-archived-rename',
+    command: { type: 'pet.rename', payload: { name: 'NotAllowed' } },
+  })
+  const rejected = await archivedPlayer.next('commandResult')
+  if (rejected.t !== 'commandResult') throw new Error('missing archived command result')
+  assert.equal(rejected.status, 'rejected')
+  assert.equal(rejected.error?.code, 'authority_not_active')
+  const commandStatus = await archivedPlayer.next('ready')
+  if (commandStatus.t !== 'ready') throw new Error('missing archived command status')
+  assert.equal(commandStatus.authority.state, 'archived')
+  assert.equal(archivedPlayer.messages.some(message => message.t === 'projection' || message.t === 'snapshot' || message.t === 'replay'), false)
+
+  await archivedOwner.close()
+  await archivedPlayer.close()
 })
 
 test('protocol version mismatch and unauthenticated sockets are closed with spec codes', async t => {
@@ -1008,7 +1209,7 @@ test('retention cannot delete stable rows referenced by a pending coverage opera
   store.close()
 })
 
-test('owner server settings commands persist and appear in status without secrets', async t => {
+test('owner server settings commands persist without unauthenticated HTTP exposure', async t => {
   const harness = await createHarness(t)
   const owner = await pairOwner(harness)
   for (const command of [
@@ -1037,10 +1238,10 @@ test('owner server settings commands persist and appear in status without secret
   store.close()
 
   const response = await fetch('http://127.0.0.1:' + harness.server.address().port + '/status')
-  const body = await response.json() as { pets: Array<Record<string, unknown>> }
-  assert.equal(body.pets[0].advanceWhileEmpty, false)
-  assert.equal(body.pets[0].weatherLocation, '上海')
-  assert.doesNotMatch(JSON.stringify(body), /token|hash|save_json|payload/i)
+  assert.equal(response.status, 404)
+  const body = await response.json() as Record<string, unknown>
+  assert.deepEqual(body, { ok: false, error: 'not_found' })
+  assert.doesNotMatch(JSON.stringify(body), /default|revision|eventSeq|gameTime|timeZone|weatherLocation/i)
 
   const store2 = openDatabase(harness.dbPath)
   const playerCode = store2.issuePairingCode('default', 'player', 10 * 60_000).code
@@ -1373,4 +1574,38 @@ test('database opens with WAL/FULL pragmas, migrates idempotently, and fails clo
   second.db.prepare("UPDATE pets SET engine_json = ? WHERE id = 'default'").run('{"bad":true}')
   assert.throws(() => second.loadCanonical('default'), /canonical engine state is corrupt/)
   second.close()
+})
+
+test('server startup fails closed before listening when any canonical pet is corrupt', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-c8-startup-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const dbPath = join(directory, 'startup.sqlite')
+  const config = createServerConfig({
+    bind: '127.0.0.1',
+    port: 0,
+    dbPath,
+    backupDir: join(directory, 'backups'),
+    adminSocket: join(directory, 'admin.sock'),
+    schedulerEnabled: false,
+  })
+  const seed = openDatabase(dbPath)
+  initializePet(seed, {
+    petId: 'healthy-pet',
+    timeZone: 'UTC',
+    weatherCity: '北京',
+    nowMs: Date.UTC(2026, 9, 20, 4, 0, 0),
+  })
+  initializePet(seed, {
+    petId: 'corrupt-pet',
+    timeZone: 'UTC',
+    weatherCity: '北京',
+    nowMs: Date.UTC(2026, 9, 20, 4, 0, 0),
+  })
+  seed.db.prepare("UPDATE pets SET engine_json = ? WHERE id = 'corrupt-pet'").run('{"bad":true}')
+  seed.close()
+
+  const server = new SyncServer(config, openDatabase(dbPath))
+  await assert.rejects(server.start(), /canonical engine state is corrupt/)
+  assert.throws(() => server.address(), /server has not started/)
+  await server.stop()
 })
