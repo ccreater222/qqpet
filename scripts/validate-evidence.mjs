@@ -42,6 +42,17 @@ async function main() {
   } catch (error) {
     throw new Error('could not read ' + reportPath + ': ' + (error instanceof Error ? error.message : String(error)))
   }
+  if (kind === 'e2e') {
+    // C12 acceptance requires provable real BrowserWindow/preload/renderer
+    // execution. The validator below fails closed when any flag/proof is absent;
+    // surface the evidence summary here so a passing run is auditable.
+    const evidence = report?.evidence ?? {}
+    process.stdout.write('[evidence] e2e rendererCoverage=' + String(evidence.rendererCoverage === true)
+      + ' guiCoverage=' + String(evidence.guiCoverage === true)
+      + ' browserWindows=' + String(evidence.rendererProof?.browserWindowCount ?? 'missing')
+      + ' rendererProcesses=' + String(evidence.rendererProof?.rendererProcessCount ?? 'missing')
+      + '\n')
+  }
   const validation = kind === 'e2e'
     ? validateE2EReport(report, options)
     : kind === 'docker'

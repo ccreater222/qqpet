@@ -61,12 +61,13 @@ jobs:
       - run: npm --prefix server test
 
   e2e:
-    name: Real server + two Electron process E2E
+    name: Real server + two Electron renderer E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       NODE_OPTIONS: --max-old-space-size=2048
       QQPET_E2E_ARTIFACTS: ${{ runner.temp }}/c12-e2e
+      LIBGL_ALWAYS_SOFTWARE: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -76,15 +77,20 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             server/package-lock.json
-      - name: Install Electron runtime dependencies
+      - name: Install Electron renderer runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends xvfb
+          sudo apt-get install --yes --no-install-recommends \
+            xvfb libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libxss1 \
+            libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libatspi2.0-0 libcups2 \
+            libsecret-1-0 libayatana-appindicator3-1
+          sudo apt-get install --yes --no-install-recommends libasound2t64 \
+            || sudo apt-get install --yes --no-install-recommends libasound2
       - run: npm ci --no-audit --no-fund
       - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
-      - name: Run real-server Electron E2E headlessly
+      - name: Run real two-renderer Electron E2E headlessly under xvfb
         run: xvfb-run -a npm run test:e2e
-      - name: Validate fresh, passing E2E evidence
+      - name: Validate fresh renderer-coverage E2E evidence
         run: node scripts/validate-evidence.mjs e2e "$QQPET_E2E_ARTIFACTS/c12-e2e-report.json"
       - name: Upload E2E evidence
         if: always()

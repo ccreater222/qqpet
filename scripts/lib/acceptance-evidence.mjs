@@ -8,7 +8,7 @@
  */
 import { mkdir, rm } from 'node:fs/promises'
 
-/** The current C12 E2E contains 15 substantive named scenarios. */
+/** The current C12 E2E contains at least 15 substantive named scenarios. */
 export const E2E_MIN_STEPS = 15
 export const EVIDENCE_MAX_AGE_MS = 30 * 60_000
 export const EVIDENCE_FUTURE_SKEW_MS = 2 * 60_000
@@ -16,6 +16,10 @@ export const REQUIRED_E2E_EVIDENCE_FLAGS = [
   'twoProcesses',
   'realStandaloneServer',
   'realWebSocket',
+  'realElectron',
+  'realRenderer',
+  'rendererCoverage',
+  'guiCoverage',
 ]
 export const REQUIRED_DOCKER_EVIDENCE_FLAGS = [
   'imageBuilt',
@@ -139,14 +143,53 @@ export function validateE2EReport(report, options = {}) {
     for (const flag of REQUIRED_E2E_EVIDENCE_FLAGS) {
       if (evidence[flag] !== true) errors.push('E2E evidence requires ' + flag + ' === true')
     }
-    // rendererCoverage is intentionally not required yet. If a future E2E adds
-    // renderer automation it must flip this flag to true; false is an honest
-    // declaration that GUI/renderer coverage is still absent and is not a pass.
-    if (Object.hasOwn(evidence, 'rendererCoverage') && evidence.rendererCoverage !== true) {
-      errors.push('E2E rendererCoverage is present but not true')
+    if (Number.isSafeInteger(evidence.stepCount) === false) {
+      errors.push('E2E evidence requires an integer stepCount')
+    } else if (evidence.stepCount < minSteps) {
+      errors.push('E2E evidence stepCount is ' + evidence.stepCount + '; minimum is ' + minSteps)
+    } else if (Array.isArray(parsed.steps) && evidence.stepCount !== parsed.steps.length) {
+      errors.push('E2E evidence stepCount ' + evidence.stepCount
+        + ' does not match the ' + parsed.steps.length + ' reported steps')
     }
-    if (evidence.guiCoverage === true) {
-      errors.push('E2E evidence claims GUI coverage; this gate only accepts tested rendererCoverage === true')
+
+    const rendererProof = objectValue(evidence.rendererProof)
+    if (rendererProof === null) {
+      errors.push('E2E evidence requires a rendererProof object')
+    } else {
+      if (Number.isSafeInteger(rendererProof.browserWindowCount) === false
+        || rendererProof.browserWindowCount < 2) {
+        errors.push('E2E rendererProof must record at least two real BrowserWindows')
+      }
+      if (Number.isSafeInteger(rendererProof.rendererProcessCount) === false
+        || rendererProof.rendererProcessCount < 2) {
+        errors.push('E2E rendererProof must record at least two renderer processes')
+      }
+      for (const flag of [
+        'electronMainPidsDistinct',
+        'preloadApiExposed',
+        'contextIsolation',
+        'sandboxedPreload',
+        'nodeIntegrationDisabled',
+        'rendererDocumentLoaded',
+        'guiElementPresent',
+      ]) {
+        if (rendererProof[flag] !== true) {
+          errors.push('E2E rendererProof requires ' + flag + ' === true')
+        }
+      }
+    }
+
+    const websocket = objectValue(evidence.websocket)
+    if (websocket === null) {
+      errors.push('E2E evidence requires a websocket object')
+    } else {
+      if (typeof websocket.serverUrl !== 'string' || /^wss?:\/\//.test(websocket.serverUrl) === false) {
+        errors.push('E2E websocket evidence must record a ws:// or wss:// serverUrl')
+      }
+      if (Number.isSafeInteger(websocket.activeClientCountAtConvergence) === false
+        || websocket.activeClientCountAtConvergence < 2) {
+        errors.push('E2E websocket evidence must record at least two converged clients')
+      }
     }
   }
   return validationResult(errors)

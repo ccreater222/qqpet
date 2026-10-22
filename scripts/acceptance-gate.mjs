@@ -214,9 +214,9 @@ async function main() {
     ? 'clean'
     : 'dirty (evidence reflects the checked-out working tree, not a tagged release)'))
   lines.push('- Runtime: Node `' + process.version + '`, `' + process.platform + '/' + process.arch + '`')
-  lines.push('- GUI coverage: **not claimed**. The E2E launches two real Electron main processes'
-    + ' and the production RemoteRepository/WebSocket transport without a BrowserWindow.'
-    + ' Renderer/preload/visual GUI automation is a documented residual gap.')
+  lines.push('- Renderer/GUI coverage: **required and asserted**. The E2E launches two real'
+    + ' Electron applications and drives window.qqpet from real BrowserWindow/preload'
+    + ' renderers; Linux CI runs it under xvfb.')
   lines.push('')
   lines.push('## Commands and results')
   lines.push('')
@@ -279,7 +279,14 @@ async function main() {
     lines.push('- Two Electron processes: `' + String(e2eReport.evidence?.twoProcesses === true) + '`')
     lines.push('- Real standalone server: `' + String(e2eReport.evidence?.realStandaloneServer === true) + '`')
     lines.push('- Real WebSocket: `' + String(e2eReport.evidence?.realWebSocket === true) + '`')
+    lines.push('- Real Electron applications: `' + String(e2eReport.evidence?.realElectron === true) + '`')
+    lines.push('- Real renderer/preload execution: `' + String(e2eReport.evidence?.realRenderer === true) + '`')
+    lines.push('- Renderer coverage: `' + String(e2eReport.evidence?.rendererCoverage === true) + '`')
     lines.push('- GUI coverage: `' + String(e2eReport.evidence?.guiCoverage === true) + '`')
+    lines.push('- Browser windows / renderer processes: `'
+      + String(e2eReport.evidence?.rendererProof?.browserWindowCount ?? 'missing') + '` / `'
+      + String(e2eReport.evidence?.rendererProof?.rendererProcessCount ?? 'missing') + '`')
+    lines.push('- Evidence step count: `' + String(e2eReport.evidence?.stepCount ?? 'missing') + '`')
     lines.push('')
     lines.push(markdownRow(['Scenario', 'Status', 'Duration']))
     lines.push(markdownRow(['---', '---', '---:']))
@@ -292,14 +299,16 @@ async function main() {
     }
     const detailByStep = new Map((e2eReport.steps ?? []).map(step => [step.name, step.detail]))
     const selected = [
-      'first-run adopt on empty server and two-client convergence',
-      'feed on instance A updates inventory/task and reaches instance B within 3s',
-      'lost command result reconciles via commandStatus after reconnect without resend',
-      'revision gap triggers resync and full snapshot convergence',
-      'device revoke closes the player Electron connection and preserves owner projection',
-      'authority detach and resume recover to a full authoritative snapshot',
-      'server restart catch-up preserves state and advances game time',
-      'authority_reset_required after operator restore recovers to a full snapshot',
+      'pair owner via real renderer window.qqpet.storage API',
+      'switch owner renderer to server mode with use-server source',
+      'pair player via real renderer storage API and switch to server mode',
+      'initial two-renderer projection convergence over real WebSocket',
+      'canonical feed from owner renderer reaches player renderer within 3s',
+      'duplicate opId through renderer is idempotent',
+      'dropped projection frame triggers renderer revision-gap resync',
+      'owner detach then resume restores authority and both renderer projections converge',
+      'device revoke disconnects player renderer and forces read-only',
+      'real BrowserWindow/preload/renderer proof and evidence hygiene',
     ]
     lines.push('')
     lines.push('### Selected hash/revision evidence')

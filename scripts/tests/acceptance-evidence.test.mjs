@@ -36,7 +36,26 @@ function e2eReport() {
       twoProcesses: true,
       realStandaloneServer: true,
       realWebSocket: true,
-      guiCoverage: false,
+      realElectron: true,
+      realRenderer: true,
+      rendererCoverage: true,
+      guiCoverage: true,
+      stepCount: 15,
+      rendererProof: {
+        electronMainPidsDistinct: true,
+        browserWindowCount: 2,
+        rendererProcessCount: 2,
+        preloadApiExposed: true,
+        contextIsolation: true,
+        sandboxedPreload: true,
+        nodeIntegrationDisabled: true,
+        rendererDocumentLoaded: true,
+        guiElementPresent: true,
+      },
+      websocket: {
+        serverUrl: 'ws://127.0.0.1:1234/v1/sync',
+        activeClientCountAtConvergence: 2,
+      },
     },
   }
 }
@@ -123,16 +142,51 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
       delete report.evidence.realWebSocket
       return report
     }, /realWebSocket/],
-    ['unproven renderer coverage claim', () => {
+    ['missing real Electron evidence', () => {
       const report = e2eReport()
-      report.evidence.guiCoverage = true
+      delete report.evidence.realElectron
       return report
-    }, /claims GUI coverage/],
-    ['rendererCoverage present but false', () => {
+    }, /realElectron/],
+    ['missing real renderer evidence', () => {
+      const report = e2eReport()
+      report.evidence.realRenderer = false
+      return report
+    }, /realRenderer/],
+    ['unproven renderer coverage claim', () => {
       const report = e2eReport()
       report.evidence.rendererCoverage = false
       return report
     }, /rendererCoverage/],
+    ['unproven GUI coverage claim', () => {
+      const report = e2eReport()
+      report.evidence.guiCoverage = false
+      return report
+    }, /guiCoverage/],
+    ['missing BrowserWindow/preload proof', () => {
+      const report = e2eReport()
+      delete report.evidence.rendererProof
+      return report
+    }, /rendererProof object/],
+    ['only one BrowserWindow', () => {
+      const report = e2eReport()
+      report.evidence.rendererProof.browserWindowCount = 1
+      return report
+    }, /two real BrowserWindows/],
+    ['missing preload API proof', () => {
+      const report = e2eReport()
+      report.evidence.rendererProof.preloadApiExposed = false
+      return report
+    }, /preloadApiExposed/],
+    ['stepCount mismatch', () => {
+      const report = e2eReport()
+      report.evidence.stepCount = 14
+      return report
+    }, /stepCount/],
+    ['websocket proof below two clients', () => {
+      const report = e2eReport()
+      report.evidence.websocket.activeClientCountAtConvergence = 1
+      return report
+    }, /two converged clients/],
   ]
   for (const [name, build, pattern] of cases) {
     const result = validateE2EReport(build(), options)
