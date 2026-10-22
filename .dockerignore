@@ -12,3 +12,9 @@ harmony
 ios
 *.log
 .DS_Store
+server/.env
+server/.env.*
+server/deploy
+server/data
+server/*.sqlite
+server/*.sqlite-*
