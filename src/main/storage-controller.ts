@@ -8,6 +8,8 @@ import { assertTimeZone } from '../shared/pet-runtime/time'
 import type { CommandKey, CommandResult, DeviceInfo, PetCommand } from '../shared/sync/protocol'
 import type { PortablePetBundleV1 } from '../shared/sync/portable'
 import { migratePortablePetBundle } from '../shared/sync/portable'
+import { commandResultData, commandResultError } from '../shared/sync/command-result'
+import { planPortableImportPlan, type PortableImportCurrentAuthority } from '../shared/sync/portable-import-plan'
 import type { DeviceLocalOverlay } from '../shared/sync/data-boundary'
 import type { RendererProjection, RendererRepositoryStatus, RendererRuntimeInfo } from '../shared/renderer-api'
 import {
@@ -91,6 +93,8 @@ export interface StorageRemoteAuthority {
   requestResync(): void
   loadLocalSettings(): Promise<DeviceLocalOverlay>
   updateLocalSettings(value: unknown): Promise<DeviceLocalOverlay>
+  /** True when startup restored the persisted RemoteProjectionCacheV2 overlay. */
+  hasProjectionCache?(): boolean
   onProjection(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): () => void
   onResync(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): () => void
   onCommandResult(listener: (result: CommandResult) => void): () => void
@@ -102,6 +106,8 @@ export interface StorageRemoteFactoryOptions {
   appVersion: string
   tokenStore: RemoteTokenStore
   pair?: { code: string; deviceLabel: string }
+  /** Device-local presentation/settings seeded into the remote projection cache. */
+  deviceOverlay?: DeviceLocalOverlay
 }
 
 export interface StorageWindowLike {
@@ -315,6 +321,12 @@ export class DesktopStorageController {
         await this.local.loadFenced()
         this.activeMode = 'server'
         this.local.setSendEnabled(false)
+        // A restored RemoteProjectionCacheV2 already holds the newest device-local
+        // values; the archived local document may be older after a server-mode
+        // restart. Seed only when there is no cache to protect.
+        if (this.remote !== null && this.remote.hasProjectionCache?.() !== true) {
+          await this.seedRemoteOverlay(this.remote, true)
+        }
       } else {
         // Requested server mode without a token: local remains the writer until pairing and explicit choice.
         this.activeMode = 'local'
@@ -402,6 +414,7 @@ export class DesktopStorageController {
       }
     }
     this.requireRemoteReady()
+    if (this.remote !== null) await this.seedRemoteOverlay(this.remote)
     const source = parsed.initialSource ?? this.inferInitialSource()
     if (source === 'upload-local') {
       const outcome = await this.uploadLocalToServer({
@@ -430,11 +443,13 @@ export class DesktopStorageController {
     const pairing = validatePairInput(input)
     await this.stopRemote()
     const tokenStore = this.createTokenStore()
+    const localOverlay = this.localOverlayForRemote()
     const remote = this.createRemote({
       serverUrl: pairing.serverUrl,
       appVersion: this.appVersion,
       tokenStore,
       pair: { code: pairing.code, deviceLabel: pairing.deviceLabel },
+      ...(localOverlay === null ? {} : { deviceOverlay: localOverlay }),
     })
     try {
       await remote.start()
@@ -449,6 +464,7 @@ export class DesktopStorageController {
     this.deviceLabel = pairing.deviceLabel
     this.remoteConfig = await this.loadRemoteConfig(tokenStore)
     this.bindRemote(remote)
+    await this.seedRemoteOverlay(remote)
     this.persistConfig()
     this.emitStatus()
     return this.status()
@@ -478,8 +494,9 @@ export class DesktopStorageController {
     if (role !== 'owner') return { ...empty, error: 'unauthorized: only an owner device can list devices' }
     try {
       const result = await this.remote.command({ type: 'device.list', payload: {} })
-      if (result.status === 'rejected') return { ...empty, error: result.error.message }
-      const devices = (result.result as { devices?: DeviceInfo[] } | undefined)?.devices ?? []
+      const error = commandResultError(result)
+      if (error !== null) return { ...empty, error: error.message }
+      const devices = (commandResultData(result) as { devices?: DeviceInfo[] } | undefined)?.devices ?? []
       const view: StorageDeviceListView = {
         devices: [...devices].sort((a, b) => a.createdAtMs - b.createdAtMs || a.deviceId.localeCompare(b.deviceId)),
         owner: true,
@@ -497,7 +514,8 @@ export class DesktopStorageController {
     if (this.remote === null) throw new Error('offline: pair a server first')
     if (this.remote.getStatus().role !== 'owner') throw new Error('unauthorized: only an owner device can revoke devices')
     const result = await this.remote.command({ type: 'device.revoke', payload: { deviceId } })
-    if (result.status === 'rejected') throw new Error(result.error.code + ': ' + result.error.message)
+    const error = commandResultError(result)
+    if (error !== null) throw new Error(error.code + ': ' + error.message)
     return this.listDevices()
   }
 
@@ -516,7 +534,8 @@ export class DesktopStorageController {
     if (typeof timeZone !== 'string' || timeZone.length === 0) throw new Error('invalid_payload: timeZone is required')
     assertTimeZone(timeZone)
     const result = await this.commandAuthority({ type: 'server.setTimeZone', payload: { timeZone } })
-    if (result.status === 'rejected') throw new Error(result.error.code + ': ' + result.error.message)
+    const error = commandResultError(result)
+    if (error !== null) throw new Error(error.code + ': ' + error.message)
     this.emitStatus()
     return this.status()
   }
@@ -525,7 +544,8 @@ export class DesktopStorageController {
     if (typeof city !== 'string') throw new Error('invalid_payload: city must be a string')
     const next = city.trim()
     const result = await this.commandAuthority({ type: 'server.setWeatherCity', payload: { city: next } })
-    if (result.status === 'rejected') throw new Error(result.error.code + ': ' + result.error.message)
+    const error = commandResultError(result)
+    if (error !== null) throw new Error(error.code + ': ' + error.message)
     this.lastWeatherCity = next
     this.emitStatus()
     return this.status()
@@ -583,13 +603,41 @@ export class DesktopStorageController {
         restoreGenerationReset,
       }
     }
+    const current = this.localPortableImportAuthority(bundle.originLocalDeviceId)
+    if (current === null) {
+      return { ...base, status: 'rejected', errorCode: 'authority_not_active', message: 'local authority is not loaded', restoreGenerationReset }
+    }
+    const allowClamp = record.allowClamp === true
+    const rebindLocalSessions = record.rebindLocalSessions === true
+    if (record.expectedEpoch !== undefined
+      && (typeof record.expectedEpoch !== 'number' || Number.isSafeInteger(record.expectedEpoch) === false)) {
+      return { ...base, status: 'invalid', errorCode: 'invalid_payload', message: 'expectedEpoch must be a safe integer', restoreGenerationReset }
+    }
+    const planned = planPortableImportPlan({
+      bundle,
+      current,
+      wallNowMs: this.now(),
+      allowClamp,
+      rebindLocalSessions,
+      destinationLocalDeviceId: current.localDeviceId,
+      ...(record.expectedEpoch === undefined ? {} : { expectedEpoch: record.expectedEpoch as number }),
+    })
+    if (planned.ok === false) {
+      return { ...base, status: 'rejected', errorCode: planned.code, message: planned.message, restoreGenerationReset }
+    }
+    const plan = planned.plan
+    const plannedBundle: PortablePetBundleV1 = {
+      ...bundle,
+      engine: plan.engine,
+      shared: plan.engine.save,
+    }
     let backupPath: string | undefined
     try {
       backupPath = this.local.createBackup('import') ?? undefined
     } catch (error) {
       return { ...base, status: 'rejected', errorCode: 'backup_failed', message: 'backup before overwrite failed: ' + messageOf(error), restoreGenerationReset }
     }
-    const projection = await this.local.importPortableBundle(bundle)
+    const projection = await this.local.importPortableBundle(plannedBundle)
     if (projection === null) {
       return {
         ...base,
@@ -611,9 +659,12 @@ export class DesktopStorageController {
       ...(backupPath === undefined ? {} : { backupPath }),
       restoreGenerationReset,
       restoreGenerationBefore: before,
-      restoreGenerationAfter: bundle.authority.restoreGeneration,
-      ...(bundle.engine.importClamped ? { importClamped: true, clockSkippedMs: bundle.engine.clockSkippedMs } : {}),
-      ...(projection === null ? {} : {}),
+      restoreGenerationAfter: plan.restoreGeneration,
+      ...(plan.importClamped ? { importClamped: true, clockSkippedMs: plan.clockSkippedMs } : {}),
+      effectiveAnchorWallMs: plan.effectiveAnchorWallMs,
+      rebindRequested: rebindLocalSessions,
+      cancelledSessionKinds: plan.cancelledSessionKinds,
+      nextEpoch: plan.nextEpoch,
     }
   }
 
@@ -655,14 +706,15 @@ export class DesktopStorageController {
         this.emitStatus()
         return this.status()
       }
-      if (result.status === 'rejected') {
+      const resultError = commandResultError(result)
+      if (resultError !== null) {
         await this.local.rollbackDetach()
         this.pendingUpload = null
         this.handoffValue = {
           direction: 'local_to_server',
           state: 'rolled_back',
-          reason: result.error.code,
-          message: '服务器拒绝导入，本机已恢复活动权威：' + result.error.message,
+          reason: resultError.code,
+          message: '服务器拒绝导入，本机已恢复活动权威：' + resultError.message,
           atWallMs: this.now(),
         }
         this.mapModeLocal()
@@ -771,7 +823,8 @@ export class DesktopStorageController {
     await this.whenReady()
     if (this.activeMode === 'server' && this.remote !== null) {
       const result = await this.remote.command({ type: 'pet.reset', payload: {} })
-      if (result.status === 'rejected') throw new Error(result.error.code + ': ' + result.error.message)
+      const error = commandResultError(result)
+      if (error !== null) throw new Error(error.code + ': ' + error.message)
       return
     }
     if (this.local.reset === undefined) throw new Error('local reset is unavailable')
@@ -818,6 +871,46 @@ export class DesktopStorageController {
     }
   }
 
+  private localOverlayForRemote(): DeviceLocalOverlay | null {
+    try {
+      return clone(this.local.loadLocalSettings())
+    } catch {
+      return null
+    }
+  }
+
+  private overlayPatch(overlay: DeviceLocalOverlay): {
+    petInfo: DeviceLocalOverlay['petInfo']
+    settings: DeviceLocalOverlay['settings']
+    presentation?: NonNullable<DeviceLocalOverlay['presentation']>
+  } {
+    return {
+      petInfo: clone(overlay.petInfo),
+      settings: clone(overlay.settings),
+      ...(overlay.presentation === undefined ? {} : { presentation: clone(overlay.presentation) }),
+    }
+  }
+
+  /** Device-local values ride only through the RemoteProjectionCacheV2, never a canonical command. */
+  private async seedRemoteOverlay(remote: StorageRemoteAuthority, flush = false): Promise<void> {
+    const overlay = this.localOverlayForRemote()
+    if (overlay === null) return
+    try {
+      await remote.updateLocalSettings(this.overlayPatch(overlay))
+      if (flush) await remote.flush()
+    } catch {
+      // Overlay persistence is defense-in-depth; it must never block authority pairing.
+    }
+  }
+
+  private async mergeRemoteOverlayIntoLocal(overlay: DeviceLocalOverlay): Promise<void> {
+    try {
+      await this.local.updateLocalSettings(this.overlayPatch(overlay))
+    } catch {
+      // The imported canonical authority remains valid even if a device-only merge fails.
+    }
+  }
+
   private async connectStoredRemote(): Promise<boolean> {
     const tokenStore = this.createTokenStore()
     let token: string | null = null
@@ -833,11 +926,23 @@ export class DesktopStorageController {
       this.serverUrl = serverUrl
       return false
     }
+    try {
+      assertRemoteServerUrl(serverUrl)
+    } catch {
+      // An unsafe persisted endpoint is treated as unpaired; never hand it to a transport.
+      return false
+    }
     this.pairedFlag = true
     this.tokenStore = tokenStore
     this.remoteConfig = config
     this.serverUrl = serverUrl
-    const remote = this.createRemote({ serverUrl, appVersion: this.appVersion, tokenStore })
+    const localOverlay = this.localOverlayForRemote()
+    const remote = this.createRemote({
+      serverUrl,
+      appVersion: this.appVersion,
+      tokenStore,
+      ...(localOverlay === null ? {} : { deviceOverlay: localOverlay }),
+    })
     try {
       await remote.start()
     } catch {
@@ -959,21 +1064,22 @@ export class DesktopStorageController {
   }
 
   private async applyUploadResult(result: CommandResult, _bundle: PortablePetBundleV1, requestedRebind: boolean): Promise<UploadOutcome> {
-    if (result.status === 'rejected') {
+    const resultError = commandResultError(result)
+    if (resultError !== null) {
       this.pendingUpload = null
       await this.local.rollbackDetach()
       this.handoffValue = {
         direction: 'local_to_server',
         state: 'rolled_back',
-        reason: result.error.code,
-        message: '服务器拒绝导入（' + result.error.code + '），本机已恢复活动权威。',
+        reason: resultError.code,
+        message: '服务器拒绝导入（' + resultError.code + '），本机已恢复活动权威。',
         atWallMs: this.now(),
       }
       this.mapModeLocal()
       this.persistConfig()
       return 'rolled_back'
     }
-    const data = recordOf(result.result)
+    const data = recordOf(commandResultData(result))
     this.pendingUpload = null
     this.handoffValue = {
       direction: 'local_to_server',
@@ -1020,6 +1126,43 @@ export class DesktopStorageController {
     this.handoffValue = { ...this.handoffValue, rebindReported: true, cancelledSessionKinds: merged }
   }
 
+  private localPortableImportAuthority(fallbackLocalDeviceId?: string): (PortableImportCurrentAuthority & { localDeviceId: string }) | null {
+    const projection = this.local.getProjection()
+    if (projection === null) return null
+    const status = this.local.getStatus()
+    const authority = projection.authority as unknown as {
+      owner: 'local' | 'server'
+      authorityId?: string
+      restoreGeneration?: number
+      epoch?: number
+      state?: 'active' | 'archived' | 'reset'
+      stamp?: {
+        owner: 'local' | 'server'
+        authorityId: string
+        restoreGeneration: number
+        epoch: number
+      }
+    }
+    const stamp = authority.stamp ?? authority
+    if (stamp.authorityId === undefined
+      || stamp.restoreGeneration === undefined
+      || stamp.epoch === undefined) return null
+    const statusState = status.authorityState
+    const state = statusState ?? (authority.state === 'active' ? 'active' : 'archived')
+    const localDeviceId = status.localDeviceId ?? projection.device?.localDeviceId ?? fallbackLocalDeviceId
+    if (localDeviceId === undefined || localDeviceId.length === 0) return null
+    return {
+      owner: stamp.owner,
+      authorityId: stamp.authorityId,
+      restoreGeneration: stamp.restoreGeneration,
+      epoch: stamp.epoch,
+      state,
+      revision: projection.revision,
+      eventSeq: projection.eventSeq,
+      localDeviceId,
+    }
+  }
+
   private importReportFromResult(
     result: CommandResult,
     bundle: PortablePetBundleV1,
@@ -1027,10 +1170,11 @@ export class DesktopStorageController {
     restoreGenerationReset: boolean,
     mode: StorageMode,
   ): StorageImportReport {
-    if (result.status === 'rejected') {
-      return { status: 'rejected', mode, errorCode: result.error.code, message: result.error.message, restoreGenerationReset }
+    const error = commandResultError(result)
+    if (error !== null) {
+      return { status: 'rejected', mode, errorCode: error.code, message: error.message, restoreGenerationReset }
     }
-    const data = recordOf(result.result)
+    const data = recordOf(commandResultData(result))
     return {
       status: 'applied',
       mode,
@@ -1066,6 +1210,8 @@ export class DesktopStorageController {
     if (remote.getStatus().role !== 'owner') {
       throw new Error('unauthorized: only an owner device can switch the pet back to local mode')
     }
+    let remoteOverlay: DeviceLocalOverlay | null = null
+    try { remoteOverlay = await remote.loadLocalSettings() } catch { /* best effort */ }
     let result: CommandResult
     try {
       result = await remote.command({ type: 'admin.exportForDetach', payload: {} })
@@ -1080,13 +1226,14 @@ export class DesktopStorageController {
       this.emitStatus()
       return this.status()
     }
-    if (result.status === 'rejected') {
+    const detachError = commandResultError(result)
+    if (detachError !== null) {
       this.handoffValue = {
         direction: 'server_to_local',
         state: 'failed',
-        reason: result.error.code,
+        reason: detachError.code,
         retryable: true,
-        message: '服务器拒绝分离：' + result.error.message,
+        message: '服务器拒绝分离：' + detachError.message,
         atWallMs: this.now(),
       }
       this.emitStatus()
@@ -1094,7 +1241,7 @@ export class DesktopStorageController {
     }
     let bundle: PortablePetBundleV1
     try {
-      bundle = migratePortablePetBundle(recordOf(result.result).bundle)
+      bundle = migratePortablePetBundle(recordOf(commandResultData(result)).bundle)
     } catch (error) {
       this.handoffValue = {
         direction: 'server_to_local',
@@ -1122,6 +1269,7 @@ export class DesktopStorageController {
       this.pendingServerBundle = null
       this.mode = 'local'
       this.mapModeLocal()
+      if (remoteOverlay !== null) await this.mergeRemoteOverlayIntoLocal(remoteOverlay)
     } else {
       // Keep the requested mode on server so a restart never starts the stale local authority;
       // the server stays archived and the local projection stays read-only for a retry.
@@ -1136,6 +1284,46 @@ export class DesktopStorageController {
   }
 
   private async importDetachedBundle(bundle: PortablePetBundleV1): Promise<boolean> {
+    const current = this.localPortableImportAuthority(bundle.originLocalDeviceId)
+    if (current === null) {
+      this.handoffValue = {
+        direction: 'server_to_local',
+        state: 'frozen',
+        retryable: true,
+        reason: 'authority_not_active',
+        message: '本机权威尚未加载，保持只读；服务器保持归档。',
+        atWallMs: this.now(),
+      }
+      return false
+    }
+    const planned = planPortableImportPlan({
+      bundle,
+      current,
+      wallNowMs: this.now(),
+      allowClamp: false,
+      rebindLocalSessions: true,
+      destinationLocalDeviceId: current.localDeviceId,
+      exactHandoff: true,
+      allowServerOwner: true,
+      adoptIncomingAuthority: current.state === 'archived',
+    })
+    if (planned.ok === false) {
+      this.handoffValue = {
+        direction: 'server_to_local',
+        state: 'frozen',
+        retryable: true,
+        reason: planned.code,
+        message: '服务器分离包校验失败，本机保持只读：' + planned.message,
+        atWallMs: this.now(),
+      }
+      return false
+    }
+    const plan = planned.plan
+    const plannedBundle: PortablePetBundleV1 = {
+      ...bundle,
+      engine: plan.engine,
+      shared: plan.engine.save,
+    }
     try {
       this.local.createBackup('import')
     } catch (error) {
@@ -1148,7 +1336,7 @@ export class DesktopStorageController {
       }
       return false
     }
-    const projection = await this.local.importPortableBundle(bundle, {
+    const projection = await this.local.importPortableBundle(plannedBundle, {
       expectedAuthorityId: bundle.authority.authorityId,
       expectedRestoreGeneration: bundle.authority.restoreGeneration,
       expectedEpoch: bundle.authority.epoch,
@@ -1169,9 +1357,13 @@ export class DesktopStorageController {
     this.handoffValue = {
       direction: 'server_to_local',
       state: 'applied',
-      nextEpoch: this.local.getStatus().authority.epoch,
-      restoreGenerationBefore: bundle.authority.restoreGeneration,
-      restoreGenerationAfter: bundle.authority.restoreGeneration,
+      nextEpoch: plan.nextEpoch,
+      restoreGenerationBefore: current.restoreGeneration,
+      restoreGenerationAfter: plan.restoreGeneration,
+      requestedRebind: true,
+      rebindReported: true,
+      cancelledSessionKinds: plan.cancelledSessionKinds,
+      ...(plan.importClamped ? { importClamped: true, clockSkippedMs: plan.clockSkippedMs } : {}),
       message: '服务器已归档，本机已接管权威。',
       atWallMs: this.now(),
     }

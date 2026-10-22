@@ -1,6 +1,7 @@
 export * from './schema'
 export * from './data-boundary'
 export * from './protocol'
+export * from './command-result'
 export * from './command-validation'
 export * from './protocol-validation'
 export * from './session-projection'

@@ -39,6 +39,10 @@ const {
   LOCAL_DEVICE_ID,
   GAME_TIME_MS,
 } = await import('./sync-fixtures.mjs')
+const {
+  dayKeyAt,
+  nextDailyBoundaryMs,
+} = await import('../../src/shared/pet-runtime/index.ts')
 
 const fixtures = createSyncFixtures()
 const ACTIVATION_ENV = { QQPET_LOCAL_REPOSITORY_V2: '1', QQPET_LOCAL_V2_ACTIVE: '1' }
@@ -55,7 +59,7 @@ function memoryTokenStore() {
   return {
     token: 'token-c11',
     config: {
-      serverUrl: 'ws://server.test/v1/sync',
+      serverUrl: 'wss://server.test/v1/sync',
       petId: 'pet-c11',
       deviceId: 'device-c11',
       lastRevision: 3,
@@ -97,6 +101,7 @@ class FakeLocalAuthority {
     this.commands = []
     this.commandResults = []
     this.failImport = options.failImport === true
+    this.deviceOverlay = clone(options.deviceOverlay ?? fixtures.device)
     const authority = {
       owner: 'local',
       authorityId: fixtures.authority.authorityId,
@@ -218,8 +223,19 @@ class FakeLocalAuthority {
   setSendEnabled(enabled) { this.calls.push('setSendEnabled:' + String(enabled)); this.sendEnabled = enabled }
   info() { return { localRepositoryV2: true, serverMode: false } }
   requestResync() { this.calls.push('requestResync') }
-  loadLocalSettings() { return clone(fixtures.device) }
-  async updateLocalSettings() { return clone(fixtures.device) }
+  loadLocalSettings() { return clone(this.deviceOverlay) }
+  async updateLocalSettings(value) {
+    this.calls.push('updateLocalSettings')
+    this.deviceOverlay = {
+      ...this.deviceOverlay,
+      petInfo: { ...this.deviceOverlay.petInfo, ...(value.petInfo ?? {}) },
+      settings: { ...this.deviceOverlay.settings, ...(value.settings ?? {}) },
+      ...(value.presentation === undefined
+        ? {}
+        : { presentation: { ...(this.deviceOverlay.presentation ?? {}), ...value.presentation } }),
+    }
+    return clone(this.deviceOverlay)
+  }
 }
 
 class FakeRemoteAuthority {
@@ -229,6 +245,8 @@ class FakeRemoteAuthority {
     this.commands = []
     this.commandResults = []
     this.role = options.role ?? 'owner'
+    this.deviceOverlay = clone(options.deviceOverlay ?? fixtures.device)
+    this.projectionCacheRestored = options.hasProjectionCache === true
     this.projection = {
       save: clone(fixtures.save),
       shared: clone(fixtures.shared),
@@ -285,8 +303,20 @@ class FakeRemoteAuthority {
 
   async exportBundle() { this.calls.push('exportBundle'); return serverBundle() }
   requestResync() { this.calls.push('requestResync') }
-  async loadLocalSettings() { return clone(fixtures.device) }
-  async updateLocalSettings() { return clone(fixtures.device) }
+  hasProjectionCache() { return this.projectionCacheRestored }
+  async loadLocalSettings() { return clone(this.deviceOverlay) }
+  async updateLocalSettings(value) {
+    this.calls.push('updateLocalSettings')
+    this.deviceOverlay = {
+      ...this.deviceOverlay,
+      petInfo: { ...this.deviceOverlay.petInfo, ...(value.petInfo ?? {}) },
+      settings: { ...this.deviceOverlay.settings, ...(value.settings ?? {}) },
+      ...(value.presentation === undefined
+        ? {}
+        : { presentation: { ...(this.deviceOverlay.presentation ?? {}), ...value.presentation } }),
+    }
+    return clone(this.deviceOverlay)
+  }
   onProjection(listener) { this.projectionListener = listener; return () => {} }
   onResync(listener) { this.resyncListener = listener; return () => {} }
   onCommandResult(listener) { this.commandResultListener = listener; return () => {} }
@@ -303,7 +333,11 @@ function makeController(options = {}) {
     userDataPath: dir,
     appVersion: '0.1.0-test',
     local,
-    createRemote: (remoteOptions) => { created.push(remoteOptions); return remote },
+    createRemote: (remoteOptions) => {
+      created.push(remoteOptions)
+      if (remoteOptions.deviceOverlay !== undefined) remote.deviceOverlay = clone(remoteOptions.deviceOverlay)
+      return remote
+    },
     createTokenStore: () => store,
     nowMs: () => GAME_TIME_MS,
     platform: options.platform ?? 'linux',
@@ -333,6 +367,32 @@ function rejected(commandType, code, message) {
     revision: 3,
     eventSeq: 4,
     error: { code, message, refreshProjection: true },
+  }
+}
+
+function duplicateRejected(commandType, code, message) {
+  return {
+    status: 'duplicate',
+    commandType,
+    opId: 'op-result',
+    commandSeq: 0,
+    revision: 3,
+    eventSeq: 4,
+    original: 'rejected',
+    error: { code, message, refreshProjection: true },
+  }
+}
+
+function duplicateApplied(commandType, result) {
+  return {
+    status: 'duplicate',
+    commandType,
+    opId: 'op-result',
+    commandSeq: 1,
+    revision: 4,
+    eventSeq: 5,
+    original: 'applied',
+    ...(result === undefined ? {} : { result }),
   }
 }
 
@@ -400,6 +460,28 @@ test('an uncertain upload stays frozen, then the same opId reconciles and rolls 
   assert.ok(harness.local.calls.includes('rollbackDetach'))
 })
 
+test('a lost-upload retry that finds a stored rejection stays rejected and unfreezes local', async () => {
+  const harness = makeController()
+  harness.remote.command = async function command(command, options = {}) {
+    this.commands.push({ type: command.type, payload: clone(command.payload), options: clone(options) })
+    if (this.commandResults.length > 0) return this.commandResults.shift()
+    throw new Error('offline: result unknown')
+  }
+  await harness.controller.setMode({ mode: 'server', initialSource: 'upload-local' })
+  assert.equal(harness.controller.status().handoff.state, 'frozen')
+  const opId = harness.remote.commands[0].options.opId
+  harness.remote.commandResults.push(duplicateRejected('admin.importPortableBundle', 'authority_fork_risk', 'stale bundle'))
+  await harness.controller.retryHandoff()
+  assert.equal(harness.remote.commands[1].options.opId, opId)
+  const status = harness.controller.status()
+  assert.equal(status.mode, 'local')
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.handoff.state, 'rolled_back')
+  assert.equal(status.handoff.reason, 'authority_fork_risk')
+  assert.equal(status.readOnly, false)
+  assert.ok(harness.local.calls.includes('rollbackDetach'))
+})
+
 test('server to local detach validates the exact stamp before local import and lets local tick', async () => {
   const harness = makeController()
   harness.remote.commandResults.push(applied('admin.importPortableBundle', {}))
@@ -439,6 +521,37 @@ test('a failed server to local import leaves local read-only with a retryable fr
   assert.equal(status.handoff.state, 'frozen')
   assert.equal(status.handoff.retryable, true)
   assert.equal(status.handoff.reason, 'local_import_failed')
+})
+
+test('device-local zoom, display and AI credentials survive local to server to local', async () => {
+  const harness = makeController()
+  harness.local.deviceOverlay.settings.zoom = 1.75
+  harness.local.deviceOverlay.settings.petDisplayId = 2
+  harness.local.deviceOverlay.settings.aiKey = 'sk-local-overlay'
+  harness.local.deviceOverlay.petInfo.lastX = 123
+
+  harness.remote.commandResults.push(applied('admin.importPortableBundle', {}))
+  await harness.controller.setMode({ mode: 'server', initialSource: 'upload-local' })
+  assert.equal(harness.created.length, 1)
+  assert.equal(harness.created[0].deviceOverlay.settings.zoom, 1.75)
+  assert.equal(harness.created[0].deviceOverlay.settings.petDisplayId, 2)
+  assert.equal(harness.created[0].deviceOverlay.settings.aiKey, 'sk-local-overlay')
+  assert.equal(harness.remote.deviceOverlay.settings.zoom, 1.75)
+  assert.ok(harness.remote.calls.includes('updateLocalSettings'))
+
+  await harness.controller.updateLocalSettings({
+    settings: { zoom: 2.25, petDisplayId: 3, aiKey: 'sk-server-overlay' },
+    petInfo: { lastX: 456 },
+  })
+  const bundle = serverBundle()
+  harness.remote.commandResults.push(applied('admin.exportForDetach', { authority: bundle.authority, bundle }))
+  await harness.controller.setMode({ mode: 'local' })
+  assert.equal(harness.controller.status().mode, 'local')
+  assert.equal(harness.local.deviceOverlay.settings.zoom, 2.25)
+  assert.equal(harness.local.deviceOverlay.settings.petDisplayId, 3)
+  assert.equal(harness.local.deviceOverlay.settings.aiKey, 'sk-server-overlay')
+  assert.equal(harness.local.deviceOverlay.petInfo.lastX, 456)
+  assert.ok(harness.local.calls.includes('updateLocalSettings'))
 })
 
 function adaptLocal(repo) {
@@ -506,7 +619,7 @@ function realLocalController(dir) {
     local: adaptLocal(repo),
     createRemote: () => { throw new Error('remote factory is not used in local import tests') },
     createTokenStore: () => store,
-    nowMs: () => GAME_TIME_MS,
+    nowMs: () => Date.now(),
     platform: 'linux',
     env: {},
   })
@@ -540,6 +653,91 @@ test('local portable import backs up the v2 document before overwriting it', asy
   assert.equal(existsSync(join(dir, 'save.v2.json.bak')), true)
   assert.equal(controller.status().migration.state, 'fresh')
   await repo.stop()
+})
+
+test('local portable import rejects stale authority epochs before backup or mutation', async () => {
+  const harness = makeController()
+  const stale = clone(fixtures.bundle)
+  stale.authority.epoch = 0
+  const report = await harness.controller.importBundle({ json: JSON.stringify(stale) })
+  assert.equal(report.status, 'rejected')
+  assert.equal(report.errorCode, 'authority_fork_risk')
+  assert.equal(harness.local.calls.includes('createBackup:import'), false)
+  assert.equal(harness.local.calls.includes('importPortableBundle'), false)
+
+  const wrongLineage = clone(fixtures.bundle)
+  wrongLineage.authority.authorityId = 'authority-foreign-0001'
+  const lineageReport = await harness.controller.importBundle({ json: JSON.stringify(wrongLineage) })
+  assert.equal(lineageReport.status, 'rejected')
+  assert.equal(lineageReport.errorCode, 'authority_fork_risk')
+  assert.equal(harness.local.calls.includes('importPortableBundle'), false)
+})
+
+test('local portable import rejects a seven-day-old anchor and reports explicit clamp shifts', async () => {
+  const day = 24 * 60 * 60_000
+  const harness = makeController()
+  const bundle = clone(fixtures.bundle)
+  bundle.engine.lastSchedulerWallMs = GAME_TIME_MS - 7 * day
+  bundle.engine.gameSessions[0] = { ...bundle.engine.gameSessions[0], actorDeviceId: 'foreign-device' }
+  const json = JSON.stringify(bundle)
+
+  const rejected = await harness.controller.importBundle({ json })
+  assert.equal(rejected.status, 'rejected')
+  assert.equal(rejected.errorCode, 'anchor_out_of_bounds')
+  assert.equal(harness.local.calls.includes('createBackup:import'), false)
+  assert.equal(harness.local.calls.includes('importPortableBundle'), false)
+
+  const skippedMs = 5 * day
+  const effectiveAnchorWallMs = GAME_TIME_MS - 48 * 60 * 60_000
+  const applied = await harness.controller.importBundle({ json, allowClamp: true, rebindLocalSessions: true })
+  assert.equal(applied.status, 'applied')
+  assert.equal(applied.importClamped, true)
+  assert.equal(applied.clockSkippedMs, skippedMs)
+  assert.equal(applied.effectiveAnchorWallMs, effectiveAnchorWallMs)
+  assert.equal(applied.rebindRequested, true)
+  assert.equal(applied.cancelledSessionKinds.includes('game'), true)
+  assert.equal(applied.nextEpoch, 2)
+
+  const planned = harness.local.lastImport.bundle
+  assert.equal(planned.engine.lastSchedulerWallMs, effectiveAnchorWallMs)
+  assert.equal(planned.engine.importClamped, true)
+  assert.equal(planned.engine.clockSkippedMs, skippedMs)
+  assert.equal(planned.engine.gameTimeMs, fixtures.engine.gameTimeMs + skippedMs)
+  assert.equal(planned.engine.scheduledJobs[0].dueAtGameMs, fixtures.engine.scheduledJobs[0].dueAtGameMs + skippedMs)
+  assert.equal(planned.engine.scheduledJobs[0].status, 'pending')
+  assert.equal(planned.engine.gameSessions.find(session => session.sessionToken === 'exam-token-0001').expiresAtGameMs, fixtures.examSession.expiresAtGameMs + skippedMs)
+  assert.equal(planned.engine.lastProcessedDayBoundaryKey, dayKeyAt(planned.engine.gameTimeMs, planned.engine.timeZone))
+  assert.equal(planned.engine.nextDailyBoundaryMs, nextDailyBoundaryMs(planned.engine.gameTimeMs, planned.engine.timeZone))
+  const foreign = planned.engine.gameSessions.find(session => session.sessionToken === 'game-token-0001')
+  assert.equal(foreign.status, 'abandoned')
+  assert.equal(foreign.cancelReason, 'actor_rebind_failed')
+})
+
+test('local portable import rebinds source-actor sessions when explicitly allowed and cancels them otherwise', async () => {
+  const run = async (rebindLocalSessions) => {
+    const harness = makeController()
+    const bundle = clone(fixtures.bundle)
+    bundle.originLocalDeviceId = 'source-local-device'
+    bundle.engine.gameSessions[0] = { ...bundle.engine.gameSessions[0], actorDeviceId: 'source-local-device' }
+    const report = await harness.controller.importBundle({
+      json: JSON.stringify(bundle),
+      rebindLocalSessions,
+    })
+    assert.equal(report.status, 'applied')
+    return { report, imported: harness.local.lastImport.bundle }
+  }
+
+  const rebound = await run(true)
+  const reboundSession = rebound.imported.engine.gameSessions.find(session => session.sessionToken === 'game-token-0001')
+  assert.equal(reboundSession.actorDeviceId, LOCAL_DEVICE_ID)
+  assert.equal(reboundSession.status, 'active')
+  assert.equal(rebound.report.cancelledSessionKinds.includes('game'), false)
+
+  const cancelled = await run(false)
+  const cancelledSession = cancelled.imported.engine.gameSessions.find(session => session.sessionToken === 'game-token-0001')
+  assert.equal(cancelledSession.status, 'abandoned')
+  assert.equal(cancelledSession.cancelReason, 'actor_rebind_failed')
+  assert.equal(cancelled.report.cancelledSessionKinds.includes('game'), true)
 })
 
 function statusView(overrides = {}) {
@@ -636,6 +834,27 @@ test('pairing IPC requires wss except explicit loopback and validates setMode se
   )
   assert.equal(insecure.created.length, 0)
 
+  for (const serverUrl of [
+    'wss://user:pass@pet.example/v1/sync',
+    'ws://user:pass@127.0.0.1:8080/v1/sync',
+    'wss://token@pet.example/v1/sync',
+  ]) {
+    await assert.rejects(
+      insecure.controller.pair({ serverUrl, code: 'pair-code', deviceLabel: 'Desktop' }),
+      /credentials/i,
+    )
+    await assert.rejects(
+      insecure.controller.setMode({
+        mode: 'server',
+        serverUrl,
+        pairingCode: 'pair-code',
+        deviceLabel: 'Desktop',
+      }),
+      /credentials/i,
+    )
+  }
+  assert.equal(insecure.created.length, 0)
+
   for (const serverUrl of ['wss://pet.example/v1/sync', 'ws://127.0.0.1:8080/v1/sync', 'ws://[::1]:8080/v1/sync']) {
     const harness = makeController()
     await harness.controller.pair({ serverUrl, code: 'pair-code', deviceLabel: 'Desktop' })
@@ -643,6 +862,47 @@ test('pairing IPC requires wss except explicit loopback and validates setMode se
     assert.equal(harness.created[0].serverUrl, serverUrl)
     await harness.controller.unpair()
   }
+})
+
+test('server-mode startup keeps the newer projection-cache overlay instead of stale archived local values', async () => {
+  const local = new FakeLocalAuthority()
+  local.deviceOverlay.settings.zoom = 1.25
+  local.loadLocalSettings = () => { throw new Error('local runtime is not loaded yet') }
+  const remote = new FakeRemoteAuthority({ hasProjectionCache: true })
+  remote.deviceOverlay.settings.zoom = 2.5
+  remote.deviceOverlay.settings.petDisplayId = 3
+  remote.deviceOverlay.settings.aiKey = 'sk-cache-new'
+  const harness = makeController({ local, remote })
+  harness.store.token = 'stored-token'
+  writeFileSync(join(harness.dir, 'storage-config.json'), JSON.stringify({
+    format: 'qqpet-storage-config',
+    schemaVersion: 1,
+    mode: 'server',
+    serverUrl: 'wss://server.test/v1/sync',
+    deviceLabel: 'Desktop',
+  }))
+  const status = await harness.controller.initialize()
+  assert.equal(status.activeMode, 'server')
+  assert.equal(harness.remote.deviceOverlay.settings.zoom, 2.5)
+  assert.equal(harness.remote.deviceOverlay.settings.aiKey, 'sk-cache-new')
+  assert.equal(harness.remote.calls.includes('updateLocalSettings'), false)
+})
+
+test('startup never dials an unsafe persisted ws endpoint', async () => {
+  const harness = makeController()
+  harness.store.token = 'stored-token'
+  writeFileSync(join(harness.dir, 'storage-config.json'), JSON.stringify({
+    format: 'qqpet-storage-config',
+    schemaVersion: 1,
+    mode: 'server',
+    serverUrl: 'ws://pet.example/v1/sync',
+    deviceLabel: 'Desktop',
+  }))
+  const status = await harness.controller.initialize()
+  assert.equal(harness.created.length, 0)
+  assert.equal(status.mode, 'server')
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.paired, false)
 })
 
 test('desktop exposes server mode by default while android/ios remain hidden and local-only', () => {
@@ -676,6 +936,43 @@ test('owner device list/revoke stays routed and players are rejected', async () 
   const playerView = await playerHarness.controller.listDevices()
   assert.equal(playerView.canRevoke, false)
   assert.equal(playerView.error.includes('unauthorized'), true)
+})
+
+test('duplicate rejected device, setting and import results take the stored error path', async () => {
+  const harness = makeController()
+  await harness.controller.setMode({ mode: 'server', initialSource: 'use-server' })
+
+  harness.remote.commandResults.push(duplicateRejected('device.list', 'unauthorized', 'revoked device'))
+  const devices = await harness.controller.listDevices()
+  assert.equal(devices.error, 'revoked device')
+  assert.equal(devices.devices.length, 0)
+
+  harness.remote.commandResults.push(duplicateRejected('device.revoke', 'unauthorized', 'not an owner'))
+  await assert.rejects(harness.controller.revokeDevice(playerDevice.deviceId), /unauthorized: not an owner/)
+
+  harness.remote.commandResults.push(duplicateRejected('server.setTimeZone', 'invalid_payload', 'bad zone'))
+  await assert.rejects(harness.controller.setTimeZone('Asia/Tokyo'), /invalid_payload: bad zone/)
+
+  harness.remote.commandResults.push(duplicateRejected('server.setWeatherCity', 'invalid_payload', 'bad city'))
+  await assert.rejects(harness.controller.setWeatherCity('北京'), /invalid_payload: bad city/)
+
+  harness.remote.commandResults.push(duplicateRejected('admin.importPortableBundle', 'authority_fork_risk', 'stored fork'))
+  const rejectedImport = await harness.controller.importBundle({ json: JSON.stringify(fixtures.bundle) })
+  assert.equal(rejectedImport.status, 'rejected')
+  assert.equal(rejectedImport.errorCode, 'authority_fork_risk')
+  assert.equal(rejectedImport.message, 'stored fork')
+
+  harness.remote.commandResults.push(duplicateApplied('admin.importPortableBundle', {
+    imported: true,
+    epoch: 12,
+    effectiveAnchorWallMs: GAME_TIME_MS,
+    clockSkippedMs: 0,
+    importClamped: true,
+  }))
+  const appliedImport = await harness.controller.importBundle({ json: JSON.stringify(fixtures.bundle) })
+  assert.equal(appliedImport.status, 'applied')
+  assert.equal(appliedImport.nextEpoch, 12)
+  assert.equal(appliedImport.importClamped, true)
 })
 
 test('timezone, weather city and advance policy route through the active command surface', async () => {

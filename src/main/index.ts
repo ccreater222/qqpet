@@ -81,7 +81,11 @@ app.whenReady().then(async () => {
       appVersion: app.getVersion(),
       local: rendererRuntime,
       createRemote: (options: StorageRemoteFactoryOptions) => new RemoteRepository({
-        ...options,
+        serverUrl: options.serverUrl,
+        appVersion: options.appVersion,
+        tokenStore: options.tokenStore,
+        ...(options.pair === undefined ? {} : { pair: options.pair }),
+        ...(options.deviceOverlay === undefined ? {} : { deviceOverlay: options.deviceOverlay }),
         transport: createWebSocketTransport(),
       }),
       createTokenStore: () => new PairingStore({ userDataPath, safeStorage }),

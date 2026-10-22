@@ -550,6 +550,7 @@ async function makeRepository(server, overrides = {}) {
     randomUUID: overrides.randomUUID ?? (() => 'request-' + String(++id).padStart(4, '0')),
     exportRequestTimeoutMs: overrides.exportRequestTimeoutMs ?? 1_000,
     ...(overrides.pair === undefined ? {} : { pair: overrides.pair }),
+    ...(overrides.deviceOverlay === undefined ? {} : { deviceOverlay: overrides.deviceOverlay }),
   })
   return { repository, store, sleeps, mod }
 }
@@ -1126,6 +1127,8 @@ test('remote endpoint validation requires wss for non-loopback hosts at every bo
     'ws://localhost.evil.example/v1/sync',
     'ws://127.0.0.1.evil.example/v1/sync',
     'https://pet.example/v1/sync',
+    'wss://user:pass@pet.example/v1/sync',
+    'ws://user:pass@127.0.0.1:8080/v1/sync',
     'not a url',
   ]
   for (const url of insecure) {
@@ -1311,8 +1314,36 @@ test('accepted state is persisted as a validated v2 cache and restored before th
   assert.deepEqual(restored.repository.getProjection().authority, AUTHORITY)
   assert.equal(restored.repository.getStatus().readOnly, true, 'a restored cache is not writable before ready')
   assert.equal(restored.repository.getStatus().revision, server.revision)
+  assert.equal(restored.repository.hasProjectionCache(), true)
   await restored.repository.stop()
   await starting
+})
+
+test('a seeded device-local overlay is persisted in the v2 projection cache', async t => {
+  const server = new FakeServer()
+  const seed = clone(fixtures.device)
+  seed.settings.zoom = 1.75
+  seed.settings.petDisplayId = 2
+  seed.settings.aiKey = 'sk-seeded-overlay'
+  seed.petInfo.lastX = 123
+  const { repository, store } = await makeRepository(server, { deviceOverlay: seed })
+  t.after(() => repository.stop())
+  await repository.start()
+  await until(() => store.cacheWrites.length > 0, 'initial cache write')
+  assert.equal(store.projectionCache.device.settings.zoom, 1.75)
+  assert.equal(store.projectionCache.device.settings.petDisplayId, 2)
+  assert.equal(store.projectionCache.device.settings.aiKey, 'sk-seeded-overlay')
+  assert.equal(store.projectionCache.device.petInfo.lastX, 123)
+
+  await repository.updateLocalSettings({
+    settings: { zoom: 2.25, petDisplayId: 3, aiKey: 'sk-updated-overlay' },
+    petInfo: { lastX: 456 },
+  })
+  await repository.flush()
+  assert.equal(store.projectionCache.device.settings.zoom, 2.25)
+  assert.equal(store.projectionCache.device.settings.petDisplayId, 3)
+  assert.equal(store.projectionCache.device.settings.aiKey, 'sk-updated-overlay')
+  assert.equal(store.projectionCache.device.petInfo.lastX, 456)
 })
 
 test('invalid projection caches are discarded and never advertised in hello', async t => {
@@ -1400,6 +1431,7 @@ test('authority reset clears the projection cache until a fresh snapshot is acce
   assert.equal(store.projectionCache, null)
   assert.equal(repository.getProjection(), null)
   assert.equal(repository.getStatus().readOnly, true)
+  assert.equal(repository.hasProjectionCache(), false)
   assert.equal(store.cacheClears > 0, true)
 })
 

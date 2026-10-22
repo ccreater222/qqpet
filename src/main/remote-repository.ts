@@ -13,6 +13,7 @@ import {
 } from '../shared/sync/data-boundary'
 import { isOwnerCommand, parsePetCommand } from '../shared/sync/command-validation'
 import { parseClientMessage, parseServerMessage } from '../shared/sync/protocol-validation'
+import { commandResultError } from '../shared/sync/command-result'
 import {
   COMMAND_ERROR_CODES,
   PROTOCOL_VERSION,
@@ -229,6 +230,7 @@ export class RemoteRepository {
   private readonly exportRequestTimeoutMs: number
 
   private deviceOverlay: DeviceLocalOverlay
+  private readonly seededDeviceOverlay: DeviceLocalOverlay | null
   private config: RemoteSyncConfig | null = null
   private token: string | null = null
   private loaded = false
@@ -259,6 +261,7 @@ export class RemoteRepository {
   private authorityResetPending = false
   private reconciledOnConnection = false
   private readonly pendingExports = new Map<string, PendingExport>()
+  private restoredProjectionCache = false
 
   private syncMode: 'initial' | 'resync' | 'authority_reset' = 'initial'
   private expectedSnapshot = false
@@ -305,7 +308,10 @@ export class RemoteRepository {
     }))
     this.newUuid = options.randomUUID ?? nodeRandomUUID
     this.exportRequestTimeoutMs = options.exportRequestTimeoutMs ?? REMOTE_EXPORT_TIMEOUT_MS
-    this.deviceOverlay = options.deviceOverlay ?? toDeviceLocalOverlay(startSave(null), 'remote-device')
+    this.deviceOverlay = options.deviceOverlay === undefined
+      ? toDeviceLocalOverlay(startSave(null), 'remote-device')
+      : clone(options.deviceOverlay)
+    this.seededDeviceOverlay = options.deviceOverlay === undefined ? null : clone(options.deviceOverlay)
   }
 
   get roleValue(): DeviceRole {
@@ -367,6 +373,10 @@ export class RemoteRepository {
     return clone(this.deviceOverlay)
   }
 
+  hasProjectionCache(): boolean {
+    return this.restoredProjectionCache
+  }
+
   async loadLocalSettings(): Promise<DeviceLocalOverlay> {
     if (this.loaded === false) await this.start()
     return clone(this.deviceOverlay)
@@ -383,6 +393,7 @@ export class RemoteRepository {
         device: clone(this.deviceOverlay),
       }
       this.persistProjectionCache()
+      await this.persistence.catch(() => {})
     }
     return clone(this.deviceOverlay)
   }
@@ -508,7 +519,8 @@ export class RemoteRepository {
 
   async setAdvanceWhileEmpty(enabled: boolean): Promise<void> {
     const result = await this.command({ type: 'server.setAdvanceWhileEmpty', payload: { enabled } })
-    if (result.status === 'rejected') throw new Error(result.error.message)
+    const error = commandResultError(result)
+    if (error !== null) throw new Error(error.code + ': ' + error.message)
   }
 
   async exportBundle(): Promise<PortablePetBundleV1> {
@@ -863,6 +875,7 @@ export class RemoteRepository {
   }
 
   private async loadProjectionCache(config: RemoteSyncConfig | null): Promise<void> {
+    this.restoredProjectionCache = false
     const load = this.tokenStore.loadProjectionCache
     if (load === undefined) return
     let raw: unknown
@@ -883,7 +896,18 @@ export class RemoteRepository {
       return
     }
     const cache = raw
-    this.deviceOverlay = clone(cache.device)
+    this.deviceOverlay = this.seededDeviceOverlay === null
+      ? clone(cache.device)
+      : {
+          ...mergeDeviceLocalOverlay(cache.device, {
+            petInfo: clone(this.seededDeviceOverlay.petInfo),
+            settings: clone(this.seededDeviceOverlay.settings),
+            ...(this.seededDeviceOverlay.presentation === undefined
+              ? {}
+              : { presentation: clone(this.seededDeviceOverlay.presentation) }),
+          }),
+          localDeviceId: this.seededDeviceOverlay.localDeviceId,
+        }
     this.projection = this.materialize({
       revision: cache.revision,
       eventSeq: cache.eventSeq,
@@ -898,9 +922,11 @@ export class RemoteRepository {
     this.gameTimeMs = cache.gameTimeMs
     this.timeZone = cache.timeZone
     this.advanceWhileEmpty = cache.advanceWhileEmpty
+    this.restoredProjectionCache = true
   }
 
   private async discardProjectionCacheFile(): Promise<void> {
+    this.restoredProjectionCache = false
     const clear = this.tokenStore.clearProjectionCache
     if (clear === undefined) return
     try {
@@ -911,6 +937,7 @@ export class RemoteRepository {
   }
 
   private queueProjectionCacheClear(): void {
+    this.restoredProjectionCache = false
     const clear = this.tokenStore.clearProjectionCache
     if (clear === undefined) return
     this.queuePersistence(() => clear.call(this.tokenStore))
