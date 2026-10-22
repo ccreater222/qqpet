@@ -21,10 +21,19 @@ export interface SchedulerPetHealth {
   scheduledJobs: number
   nextScheduledJobAtMs: number | null
   activeClientCount: number
+  activeSessionCount: number
   authorityState: 'active' | 'archived' | 'reset'
   authorityEpoch: number
+  authorityId: string
+  restoreGeneration: number
   revision: number
+  commandSeq: number
+  eventSeq: number
+  commandLogSize: number
+  eventLogSize: number
   lastSchedulerWallMs: number
+  lastRunAtMs: number | null
+  stuck: boolean
   openCoverageIntervals: number
   lastCoverageHeartbeatMs: number | null
 }
@@ -52,6 +61,9 @@ export class SchedulerService {
   private readonly catchingUp = new Set<string>()
   /** Failed catch-up target; the pet stays not-ready until its anchor reaches it. */
   private readonly catchUpFailures = new Map<string, number>()
+  private started = false
+  private startedAtMs: number | null = null
+  private lastRunAtMs: number | null = null
 
   constructor(
     private readonly config: ServerConfig,
@@ -66,7 +78,10 @@ export class SchedulerService {
   }
 
   start(): void {
-    if (this.config.schedulerEnabled === false || this.stopped || this.timer !== undefined) return
+    if (this.stopped || this.timer !== undefined) return
+    this.started = true
+    this.startedAtMs ??= this.now()
+    if (this.config.schedulerEnabled === false) return
     this.timer = setInterval(() => {
       void this.runOnce()
     }, this.config.schedulerPollMs)
@@ -95,7 +110,26 @@ export class SchedulerService {
     if (this.stopped) return false
     if (this.isCatchUpBlocked(petId)) return false
     const authority = this.store.getAuthority(petId)
-    return authority?.state === 'active'
+    return authority?.state === 'active' && this.isStuck(petId) === false
+  }
+
+  private isStuck(petId: string): boolean {
+    if (this.config.schedulerEnabled === false || this.started === false || this.stopped) return false
+    if (this.catchingUp.has(petId) || this.catchUpFailures.has(petId)) return false
+    const now = this.now()
+    const passReference = this.lastRunAtMs ?? this.startedAtMs
+    const passStaleAfterMs = Math.max(this.config.schedulerPollMs * 5, 30_000)
+    if (passReference !== null && now - passReference > passStaleAfterMs) return true
+    const pet = this.store.getPet(petId)
+    const authority = this.store.getAuthority(petId)
+    const settings = this.store.getSettings(petId)
+    if (pet === undefined || authority === undefined || authority.state !== 'active') return false
+    // A live or advance-while-empty pet should advance at least one tick while
+    // the scheduler remains healthy. A frozen zero-client pet legitimately
+    // leaves its anchor behind until the next connection.
+    const shouldAdvance = settings?.advanceWhileEmpty === true || this.hub.count(petId) > 0
+    const anchorStaleAfterMs = Math.max(GAME_TICK_MS * 2, this.config.schedulerPollMs * 5)
+    return shouldAdvance && now - pet.lastSchedulerWallMs > anchorStaleAfterMs
   }
 
   private clearCatchUpFailureIfReached(petId: string, anchorMs: number): void {
@@ -117,6 +151,7 @@ export class SchedulerService {
   }
 
   private async runPass(): Promise<void> {
+    this.lastRunAtMs = this.now()
     for (const pet of this.store.listPets()) {
       if (this.stopped) return
       try {
@@ -315,6 +350,7 @@ export class SchedulerService {
       if (nextScheduledJobAtMs === null || job.dueAtGameMs < nextScheduledJobAtMs) nextScheduledJobAtMs = job.dueAtGameMs
     }
     const now = this.now()
+    const stuck = this.isStuck(petId)
     const coverage = this.store.listSessionCoverage(petId)
     let openCoverageIntervals = 0
     let lastCoverageHeartbeatMs: number | null = null
@@ -334,10 +370,19 @@ export class SchedulerService {
       scheduledJobs: pending.length,
       nextScheduledJobAtMs,
       activeClientCount: this.hub.count(petId),
+      activeSessionCount: this.hub.count(petId),
       authorityState: authority.state,
       authorityEpoch: authority.epoch,
+      authorityId: authority.authorityId,
+      restoreGeneration: authority.restoreGeneration,
       revision: pet.revision,
+      commandSeq: pet.commandSeq,
+      eventSeq: pet.eventSeq,
+      commandLogSize: this.store.countCommands(petId),
+      eventLogSize: this.store.countEvents(petId),
       lastSchedulerWallMs: pet.lastSchedulerWallMs,
+      lastRunAtMs: this.lastRunAtMs,
+      stuck,
       openCoverageIntervals,
       lastCoverageHeartbeatMs,
     }

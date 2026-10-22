@@ -54,6 +54,16 @@ function isSafeNonNegative(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0
 }
 
+function hasCanonicalDailyBoundaryMetadata(engine: EngineState): boolean {
+  try {
+    return engine.lastProcessedDayBoundaryKey === dayKeyAt(engine.gameTimeMs, engine.timeZone)
+      && engine.nextDailyBoundaryMs === nextDailyBoundaryMs(engine.gameTimeMs, engine.timeZone)
+      && engine.nextDailyBoundaryMs > engine.gameTimeMs
+  } catch {
+    return false
+  }
+}
+
 /**
  * Deterministically plans a portable import: authority fencing, anchor
  * realignment, deadline shifting, actor rebind and source coverage closure.
@@ -112,6 +122,9 @@ export function planPortableImport(options: ImportPlanOptions): ImportPlanResult
   }
   const importedAnchor = engine.lastSchedulerWallMs
   if (isSafeNonNegative(importedAnchor) === false) return fail('invalid_payload', 'imported scheduler anchor is invalid')
+  if (hasCanonicalDailyBoundaryMetadata(engine) === false) {
+    return fail('invalid_payload', 'imported daily-boundary metadata is invalid')
+  }
 
   const pastBound = wallNowMs - MAX_IMPORT_ANCHOR_PAST_MS
   const futureBound = wallNowMs + MAX_IMPORT_FUTURE_SKEW_MS
@@ -147,6 +160,7 @@ export function planPortableImport(options: ImportPlanOptions): ImportPlanResult
     }
     engine.lastProcessedDayBoundaryKey = dayKeyAt(engine.gameTimeMs, engine.timeZone)
     engine.nextDailyBoundaryMs = nextDailyBoundaryMs(engine.gameTimeMs, engine.timeZone)
+    engine.save.nowTimeLine = Math.floor(engine.gameTimeMs / 1000)
     engine.importClamped = true
     engine.clockSkippedMs = clockSkippedMs
   } else if (importedAnchor > wallNowMs) {
@@ -214,28 +228,63 @@ export function materializeImportedCoverage(engine: EngineState, wallNowMs: numb
   }
   const operation = engine.coverageReopen
   if (operation !== undefined) {
+    // A known suspend is an explicit persisted boundary, not a crash-repair
+    // heartbeat grace estimate. Reusing suspendedAt prevents a stale heartbeat
+    // from shortening a stable suspend interval on import.
     const suspendedAt = operation.state === 'suspended' ? operation.suspendedAtWallMs : undefined
+    const knownSuspend = operation.state === 'suspended'
     for (const survivor of operation.survivors) {
-      if (survivor.eligible === false || survivor.activeEndWallMs !== undefined) continue
+      const coverageId = stableCoverageId(operation.operationId, survivor)
+      const existing = rows.get(coverageId)
+      const existingEndWallMs = existing?.disconnectedAtWallMs
+      const existingCloseReason = existing?.closeReason
+      if (survivor.eligible === false) continue
+      if (survivor.activeEndWallMs !== undefined) {
+        // A terminal survivor's own active end is authoritative. Keep the
+        // persisted row (including its close reason) if one already exists.
+        const endWallMs = Math.max(operation.commitWallMs, survivor.activeEndWallMs)
+        const closeReason = existingCloseReason ?? survivor.activeEndProvenance ?? 'suspend'
+        rows.set(coverageId, {
+          coverageId,
+          deviceId: existing?.deviceId ?? survivorDeviceId(survivor),
+          connectedAtWallMs: existing?.connectedAtWallMs ?? operation.commitWallMs,
+          disconnectedAtWallMs: existingEndWallMs ?? endWallMs,
+          lastHeartbeatWallMs: Math.max(
+            existing?.lastHeartbeatWallMs ?? operation.commitWallMs,
+            survivor.lastHeartbeatWallMs,
+            existingEndWallMs ?? endWallMs,
+          ),
+          closeReason,
+        })
+        continue
+      }
       const heartbeatBound = Math.max(
         operation.commitWallMs,
         Math.min(wallNowMs, survivor.lastHeartbeatWallMs + COVERAGE_CRASH_GRACE_MS),
       )
-      const boundary = suspendedAt === undefined ? heartbeatBound : Math.min(suspendedAt, heartbeatBound)
+      const boundary = suspendedAt ?? heartbeatBound
       const result = finalizeSurvivor(survivor, {
         commitWallMs: operation.commitWallMs,
         eventBoundaryMs: boundary,
-        eventReason: suspendedAt === undefined ? 'import_replaced' : 'suspend',
+        eventReason: knownSuspend ? 'suspend' : 'import_replaced',
         terminal: true,
         ...(suspendedAt === undefined ? {} : { suspendedAtMs: suspendedAt }),
+        ...(existingCloseReason === undefined ? {} : { existingCloseReason }),
+        ...(existingEndWallMs === undefined ? {} : { existingEndWallMs }),
       })
-      rows.set(stableCoverageId(operation.operationId, survivor), {
-        coverageId: stableCoverageId(operation.operationId, survivor),
-        deviceId: survivorDeviceId(survivor),
-        connectedAtWallMs: operation.commitWallMs,
-        disconnectedAtWallMs: result.endWallMs,
-        lastHeartbeatWallMs: Math.max(operation.commitWallMs, survivor.lastHeartbeatWallMs),
-        closeReason: result.provenance,
+      if (result.materialize === false && existing === undefined) continue
+      const endWallMs = existingEndWallMs ?? result.endWallMs
+      rows.set(coverageId, {
+        coverageId,
+        deviceId: existing?.deviceId ?? survivorDeviceId(survivor),
+        connectedAtWallMs: existing?.connectedAtWallMs ?? operation.commitWallMs,
+        disconnectedAtWallMs: endWallMs,
+        lastHeartbeatWallMs: Math.max(
+          existing?.lastHeartbeatWallMs ?? operation.commitWallMs,
+          survivor.lastHeartbeatWallMs,
+          endWallMs,
+        ),
+        closeReason: existingCloseReason ?? result.provenance,
       })
     }
   }

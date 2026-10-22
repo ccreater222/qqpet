@@ -9,10 +9,11 @@ import {
   type PortablePetBundleV1,
   type ServerToClient,
 } from '../../src/shared/sync/index.js'
-import { createHeadlessRuntime, dailyBoundaryMs, dayKeyAt, type EngineState } from '../../src/shared/pet-runtime/index.js'
+import { createHeadlessRuntime, dailyBoundaryMs, dayKeyAt, nextDailyBoundaryMs, type EngineState } from '../../src/shared/pet-runtime/index.js'
 import { createServerConfig, type ServerConfig, type ServerConfigInput } from '../src/config.js'
 import { initializePet, openDatabase, type CanonicalPetSnapshot } from '../src/db.js'
 import { SyncServer } from '../src/index.js'
+import { materializeImportedCoverage } from '../src/portable-import.js'
 
 interface Clock {
   now(): number
@@ -497,6 +498,16 @@ test('failed catch-up stays not-ready and fences commands until a retry reaches 
   const failedHttpHealth = await fetch('http://127.0.0.1:' + h.server.address().port + '/health')
     .then(response => response.json()) as Record<string, unknown>
   assert.equal(failedHttpHealth.ready, false)
+  assert.equal(failedHttpHealth.lastErrorEvent, 'scheduler.tick_failed')
+  assert.match(String(failedHttpHealth.lastError), /forced daily-boundary catch-up failure/)
+  assert.equal(failedHttpHealth.dbWritable, true)
+  assert.equal(failedHttpHealth.quickCheck, 'ok')
+  const failedHealthz = await fetch('http://127.0.0.1:' + h.server.address().port + '/healthz')
+  assert.equal(failedHealthz.status, 200)
+  assert.equal((await failedHealthz.json() as Record<string, unknown>).ok, true)
+  const failedReadyz = await fetch('http://127.0.0.1:' + h.server.address().port + '/readyz')
+  assert.equal(failedReadyz.status, 503)
+  assert.equal((await failedReadyz.json() as Record<string, unknown>).ready, false)
 
   const rejected = await sendCommand(owner, 'command-during-failed-catchup', {
     type: 'pet.rename',
@@ -516,6 +527,9 @@ test('failed catch-up stays not-ready and fences commands until a retry reaches 
   const recoveredHttpHealth = await fetch('http://127.0.0.1:' + h.server.address().port + '/health')
     .then(response => response.json()) as Record<string, unknown>
   assert.equal(recoveredHttpHealth.ready, true)
+  const recoveredReadyz = await fetch('http://127.0.0.1:' + h.server.address().port + '/readyz')
+  assert.equal(recoveredReadyz.status, 200)
+  assert.equal((await recoveredReadyz.json() as Record<string, unknown>).ready, true)
 
   const after = canonical(h)
   assert.equal(after.pet.lastSchedulerWallMs, clock.now())
@@ -529,6 +543,21 @@ test('failed catch-up stays not-ready and fences commands until a retry reaches 
   assert.equal(accepted.status, 'applied')
   assert.equal(canonical(h).engine.save.petInfo.name, 'AfterRetry')
   await owner.close()
+})
+
+test('readiness detects a stalled scheduler pass', async t => {
+  const clock = makeClock(Date.now())
+  const h = await createHarness(t, clock, {
+    advanceWhileEmpty: true,
+    schedulerEnabled: true,
+    schedulerPollMs: 1000,
+  })
+  adoptDirect(h)
+  clock.advance(31_000)
+  const health = h.server.health()
+  assert.equal(health.ready, false)
+  assert.equal(health.petHealth[0]?.stuck, true)
+  assert.equal(health.scheduler[0]?.stuck, true)
 })
 
 test('scheduled work rewards are ordered and committed exactly once across a restart', async t => {
@@ -651,7 +680,111 @@ test('portable import rejects out-of-bounds anchors by default and explicit clam
   if (reopened === undefined) throw new Error('missing reopened coverage')
   assert.equal(reopened.disconnectedAtWallMs, undefined)
   assert.equal(reopened.connectedAtWallMs, Number(operation.commit_wall_ms))
+  assert.equal(imported.engine.save.nowTimeLine, Math.floor(imported.pet.gameTimeMs / 1000))
+  assert.equal(imported.engine.lastProcessedDayBoundaryKey, dayKeyAt(imported.pet.gameTimeMs, imported.engine.timeZone))
+  assert.equal(imported.engine.nextDailyBoundaryMs, nextDailyBoundaryMs(imported.pet.gameTimeMs, imported.engine.timeZone))
   await owner.close()
+})
+
+test('portable import rejects invalid daily-boundary metadata before commit', async t => {
+  const clock = makeClock(Date.now())
+  const h = await createHarness(t, clock, { advanceWhileEmpty: true })
+  adoptDirect(h)
+  const owner = await pairOwner(h)
+  const before = canonical(h)
+
+  const invalidNext = buildLocalBundle(h, {
+    mutateEngine: engine => {
+      engine.nextDailyBoundaryMs = 0
+    },
+  })
+  const rejectedNext = await sendCommand(owner, 'import-invalid-next-boundary', {
+    type: 'admin.importPortableBundle',
+    payload: { bundle: invalidNext },
+  })
+  assert.equal(rejectedNext.status, 'rejected')
+  assert.equal(rejectedNext.error?.code, 'invalid_payload')
+  assert.match(rejectedNext.error?.message ?? '', /daily-boundary metadata/)
+
+  const invalidLast = buildLocalBundle(h, {
+    mutateEngine: engine => {
+      engine.lastProcessedDayBoundaryKey = '1999-01-01'
+    },
+  })
+  const rejectedLast = await sendCommand(owner, 'import-invalid-last-boundary', {
+    type: 'admin.importPortableBundle',
+    payload: { bundle: invalidLast },
+  })
+  assert.equal(rejectedLast.status, 'rejected')
+  assert.equal(rejectedLast.error?.code, 'invalid_payload')
+  assert.match(rejectedLast.error?.message ?? '', /daily-boundary metadata/)
+
+  const after = canonical(h)
+  assert.equal(after.authority.epoch, before.authority.epoch)
+  assert.equal(after.pet.gameTimeMs, before.pet.gameTimeMs)
+  assert.equal(after.engine.save.nowTimeLine, before.engine.save.nowTimeLine)
+  await owner.close()
+})
+
+test('materializeImportedCoverage preserves stable suspend rows without extending or rewriting them', async t => {
+  const clock = makeClock(Date.now())
+  const h = await createHarness(t, clock, { advanceWhileEmpty: true })
+  const engine = canonical(h).engine
+  const commitWallMs = engine.gameTimeMs
+  const suspendedAtWallMs = commitWallMs + 60_000
+  const firstSurvivor = {
+    kind: 'server_connection' as const,
+    connectionId: 'suspend-current',
+    deviceId: 'device-current',
+    lastHeartbeatWallMs: commitWallMs,
+    eligible: true,
+  }
+  const secondSurvivor = {
+    kind: 'server_connection' as const,
+    connectionId: 'suspend-earlier',
+    deviceId: 'device-earlier',
+    lastHeartbeatWallMs: commitWallMs,
+    eligible: true,
+  }
+  engine.sessionCoverage = [
+    {
+      coverageId: 'op-suspend:suspend-current',
+      deviceId: 'device-current',
+      connectedAtWallMs: commitWallMs,
+      disconnectedAtWallMs: suspendedAtWallMs,
+      lastHeartbeatWallMs: suspendedAtWallMs,
+      closeReason: 'suspend',
+    },
+    {
+      coverageId: 'op-suspend:suspend-earlier',
+      deviceId: 'device-earlier',
+      connectedAtWallMs: commitWallMs,
+      disconnectedAtWallMs: commitWallMs + 20_000,
+      lastHeartbeatWallMs: commitWallMs + 20_000,
+      closeReason: 'suspend',
+    },
+  ]
+  engine.coverageReopen = {
+    operationId: 'op-suspend',
+    commitWallMs,
+    survivors: [firstSurvivor, secondSurvivor],
+    state: 'suspended',
+    suspendedAtWallMs,
+  }
+
+  const rows = materializeImportedCoverage(engine, commitWallMs + 3_600_000)
+  const byId = new Map(rows.map(row => [row.coverageId, row]))
+  const current = byId.get('op-suspend:suspend-current')
+  const earlier = byId.get('op-suspend:suspend-earlier')
+  assert.ok(current)
+  assert.ok(earlier)
+  if (current === undefined || earlier === undefined) throw new Error('missing materialized suspend rows')
+  assert.equal(current.disconnectedAtWallMs, suspendedAtWallMs)
+  assert.equal(current.lastHeartbeatWallMs, suspendedAtWallMs)
+  assert.equal(current.closeReason, 'suspend')
+  assert.equal(earlier.disconnectedAtWallMs, commitWallMs + 20_000)
+  assert.equal(earlier.lastHeartbeatWallMs, commitWallMs + 20_000)
+  assert.equal(earlier.closeReason, 'suspend')
 })
 
 test('portable import adopts an independent local authority into an unclaimed server pet', async t => {
@@ -827,21 +960,40 @@ test('future-skewed imports use wall now without backfill and beyond-window impo
   await restartedServer.stop()
 })
 
-test('exportForDetach archives authority and resumeServer enforces epoch fencing and reopens coverage', async t => {
+test('exportForDetach clears archived sockets and resumeServer enforces epoch fencing and reopens coverage', async t => {
   const clock = makeClock(Date.now())
   const h = await createHarness(t, clock, { advanceWhileEmpty: true })
   adoptDirect(h)
   const owner = await pairOwner(h)
   const before = canonical(h)
+  const ownerClosed = new Promise<{ code: number; reason: string }>((resolve, reject) => {
+    owner.ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() }))
+    owner.ws.once('error', reject)
+  })
   const exported = await sendCommand(owner, 'detach', { type: 'admin.exportForDetach', payload: {} })
   assert.equal(exported.status, 'applied')
   const detached = exported.result as { authority: { epoch: number; handoffId: string }; bundle: PortablePetBundleV1 }
+  const archivedStatus = await owner.next('ready')
+  if (archivedStatus.t !== 'ready') throw new Error('missing archived status')
+  assert.equal(archivedStatus.authority.state, 'archived')
+  const ownerClose = await ownerClosed
+  assert.equal(ownerClose.code, 1000)
+  assert.equal(ownerClose.reason, 'authority_archived')
+  await waitFor(() => h.server.scheduler.health('default')?.activeClientCount === 0)
   const archived = canonical(h)
   assert.equal(archived.authority.state, 'archived')
   assert.equal(archived.authority.epoch, before.authority.epoch)
   assert.equal(archived.authority.handoffEpoch, before.authority.epoch + 1)
+  assert.equal(h.server.scheduler.health('default')?.activeClientCount, 0)
+  assert.equal(h.server.scheduler.isReady('default'), false)
+  assert.equal(h.server.store.listSessionCoverage('default').some(interval => interval.disconnectedAtWallMs === undefined), false)
 
-  const resent = await sendCommand(owner, 'detach-resend', { type: 'admin.exportForDetach', payload: {} })
+  const archivedOwner = await connect(h, { kind: 'token', token: owner.token })
+  const reconnectStatus = await archivedOwner.next('ready')
+  if (reconnectStatus.t !== 'ready') throw new Error('missing archived reconnect status')
+  assert.equal(reconnectStatus.authority.state, 'archived')
+
+  const resent = await sendCommand(archivedOwner, 'detach-resend', { type: 'admin.exportForDetach', payload: {} })
   assert.equal(resent.status, 'applied')
   const resentResult = resent.result as { authority: { epoch: number; handoffId: string }; bundle: PortablePetBundleV1 }
   assert.equal(resentResult.authority.epoch, detached.authority.epoch)
@@ -851,7 +1003,7 @@ test('exportForDetach archives authority and resumeServer enforces epoch fencing
   assert.equal(afterResend.authority.epoch, detached.authority.epoch)
   assert.equal(afterResend.engine.gameTimeMs, archived.engine.gameTimeMs)
 
-  const denied = await sendCommand(owner, 'archived-rename', { type: 'pet.rename', payload: { name: 'ArchivedShouldNotApply' } })
+  const denied = await sendCommand(archivedOwner, 'archived-rename', { type: 'pet.rename', payload: { name: 'ArchivedShouldNotApply' } })
   assert.equal(denied.status, 'rejected')
   assert.equal(denied.error?.code, 'authority_not_active')
 
@@ -860,7 +1012,7 @@ test('exportForDetach archives authority and resumeServer enforces epoch fencing
     authority: { ...detached.bundle.authority, owner: 'local' as const, epoch: detached.authority.epoch, handoffId: 'stale-handoff' },
     originLocalDeviceId: 'local-device-1',
   }
-  const stale = await sendCommand(owner, 'resume-stale', { type: 'admin.resumeServer', payload: { expectedEpoch: staleBundle.authority.epoch, bundle: staleBundle } })
+  const stale = await sendCommand(archivedOwner, 'resume-stale', { type: 'admin.resumeServer', payload: { expectedEpoch: staleBundle.authority.epoch, bundle: staleBundle } })
   assert.equal(stale.status, 'rejected')
   assert.equal(stale.error?.code, 'authority_fork_risk')
 
@@ -869,11 +1021,11 @@ test('exportForDetach archives authority and resumeServer enforces epoch fencing
     authority: { ...detached.bundle.authority, owner: 'local' as const, epoch: detached.authority.epoch + 1, handoffId: 'local-handoff-next' },
     originLocalDeviceId: 'local-device-1',
   }
-  const wrongEpoch = await sendCommand(owner, 'resume-wrong-epoch', { type: 'admin.resumeServer', payload: { expectedEpoch: detached.authority.epoch + 5, bundle: validBundle } })
+  const wrongEpoch = await sendCommand(archivedOwner, 'resume-wrong-epoch', { type: 'admin.resumeServer', payload: { expectedEpoch: detached.authority.epoch + 5, bundle: validBundle } })
   assert.equal(wrongEpoch.status, 'rejected')
   assert.equal(wrongEpoch.error?.code, 'authority_fork_risk')
 
-  const resumed = await sendCommand(owner, 'resume-valid', { type: 'admin.resumeServer', payload: { expectedEpoch: validBundle.authority.epoch, bundle: validBundle } })
+  const resumed = await sendCommand(archivedOwner, 'resume-valid', { type: 'admin.resumeServer', payload: { expectedEpoch: validBundle.authority.epoch, bundle: validBundle } })
   assert.equal(resumed.status, 'applied')
   const active = canonical(h)
   assert.equal(active.authority.state, 'active')
@@ -884,11 +1036,11 @@ test('exportForDetach archives authority and resumeServer enforces epoch fencing
   assert.ok(operation)
   if (operation === undefined) throw new Error('missing coverage operation')
   assert.equal(operation.state, 'completed')
-  const reopened = h.server.store.listSessionCoverage('default').find(interval => interval.coverageId === operation.operation_id + ':' + owner.welcome.connectionId)
+  const reopened = h.server.store.listSessionCoverage('default').find(interval => interval.coverageId === operation.operation_id + ':' + archivedOwner.welcome.connectionId)
   assert.ok(reopened)
   if (reopened === undefined) throw new Error('missing reopened coverage')
   assert.equal(reopened.disconnectedAtWallMs, undefined)
-  await owner.close()
+  await archivedOwner.close()
 })
 
 test('SQLite backup restores the committed anchor and deterministic catch-up continues identically', async t => {

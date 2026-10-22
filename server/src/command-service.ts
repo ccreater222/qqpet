@@ -39,6 +39,8 @@ export interface CommandCommit {
     pet: PetRecord
     events: OrderedEvent[]
   }
+  /** True when this command transitioned an active authority to archived. */
+  authorityArchived?: boolean
   /** Present when a pet.reset committed a pending close-and-reopen coverage operation. */
   coverageReopen?: {
     operationId: string
@@ -475,6 +477,7 @@ export class CommandService {
       this.metrics.increment('commands.by_type.admin.exportForDetach.applied')
       this.metrics.increment('authority.archived')
       return {
+        authorityArchived: true,
         result: {
           t: 'commandResult',
           v: PROTOCOL_VERSION,

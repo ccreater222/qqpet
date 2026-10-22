@@ -6,7 +6,7 @@ import { WebSocketServer } from 'ws'
 import { createServerConfig, type ServerConfig } from './config'
 import { AuthService } from './auth'
 import { CommandService } from './command-service'
-import { DatabaseStore, openDatabase } from './db'
+import { DatabaseStore, openDatabase, type DatabaseOperationalHealth } from './db'
 import { createLogger, type Logger } from './logging'
 import { MetricsRegistry } from './metrics'
 import { RuntimeHost } from './runtime-host'
@@ -18,6 +18,16 @@ export interface ServerAddress {
   port: number
 }
 
+export type PetOperationalHealth = SchedulerPetHealth & {
+  canonicalOk: boolean
+  canonicalError: string | null
+  dbWritable: boolean
+  quickCheck: string
+  lastError: string | null
+  lastErrorAtMs: number | null
+  lastErrorEvent: string | null
+}
+
 export interface ServerHealth {
   ok: boolean
   service: 'qqpet-server'
@@ -27,9 +37,13 @@ export interface ServerHealth {
   foreignKeys: number
   busyTimeoutMs: number
   pets: number
+  petHealth: PetOperationalHealth[]
   connections: number
   revision: number
+  commandSeq: number
   eventSeq: number
+  commandLogSize: number
+  eventLogSize: number
   gameTimeMs: number
   catchingUp: boolean
   wallLagMs: number
@@ -38,8 +52,20 @@ export interface ServerHealth {
   activeClientCount: number
   authorityState: 'active' | 'archived' | 'reset'
   authorityEpoch: number
+  authorityId: string
+  restoreGeneration: number
   advanceWhileEmpty: boolean
   timeZone: string
+  dbWritable: boolean
+  quickCheck: string
+  database: DatabaseOperationalHealth
+  lastError: string | null
+  lastErrorAtMs: number | null
+  lastErrorEvent: string | null
+  authMetrics: Record<string, number>
+  rateMetrics: Record<string, number>
+  rateLimitMetrics: Record<string, number>
+  backupMetrics: Record<string, number>
   metrics: Record<string, number>
   scheduler: SchedulerPetHealth[]
 }
@@ -57,6 +83,7 @@ export class SyncServer {
   readonly scheduler: SchedulerService
   private readonly now: () => number
   private started = false
+  private lastError: { atMs: number; event: string; message: string } | null = null
 
   constructor(
     readonly config: ServerConfig,
@@ -65,11 +92,24 @@ export class SyncServer {
   ) {
     const now = options.now ?? Date.now
     this.now = now
-    this.logger = createLogger(config)
+    const baseLogger = createLogger(config)
+    this.logger = {
+      debug: baseLogger.debug,
+      info: baseLogger.info,
+      warn: baseLogger.warn,
+      error: (event, fields) => {
+        const raw = fields?.error
+        const message = raw instanceof Error
+          ? raw.message
+          : typeof raw === 'string' ? raw : 'internal_error'
+        this.lastError = { atMs: this.now(), event, message }
+        baseLogger.error(event, fields)
+      },
+    }
     this.metrics = new MetricsRegistry()
-    const auth = new AuthService(store, now)
+    const auth = new AuthService(store, now, this.metrics)
     const commands = new CommandService(store, auth, new RuntimeHost(), this.logger, this.metrics, now)
-    this.sessions = new SessionService(config, store, auth, commands, this.logger, now)
+    this.sessions = new SessionService(config, store, auth, commands, this.logger, this.metrics, now)
     this.scheduler = new SchedulerService(config, store, commands, this.sessions.hub, this.logger, this.metrics, now)
     commands.setCatchingUpGate(petId => this.scheduler.isCatchUpBlocked(petId))
     this.sessions.setCatchingUpSource(petId => this.scheduler.isCatchUpBlocked(petId))
@@ -170,30 +210,129 @@ export class SyncServer {
   }
 
   health(): ServerHealth {
-    const journal = this.store.db.prepare('PRAGMA journal_mode').get() as Record<string, unknown>
-    const synchronous = this.store.db.prepare('PRAGMA synchronous').get() as Record<string, unknown>
-    const foreignKeys = this.store.db.prepare('PRAGMA foreign_keys').get() as Record<string, unknown>
-    const busyTimeout = this.store.db.prepare('PRAGMA busy_timeout').get() as Record<string, unknown>
-    const pets = this.store.listPets()
+    let database: DatabaseOperationalHealth
+    try {
+      database = this.store.operationalHealth()
+    } catch (error) {
+      database = {
+        writable: false,
+        quickCheck: 'error',
+        error: error instanceof Error ? error.message : 'database health check failed',
+      }
+    }
+
+    let journalMode = 'unknown'
+    let synchronous = 'unknown'
+    let foreignKeys = 0
+    let busyTimeoutMs = 0
+    try {
+      const journal = this.store.db.prepare('PRAGMA journal_mode').get() as Record<string, unknown>
+      const sync = this.store.db.prepare('PRAGMA synchronous').get() as Record<string, unknown>
+      const fk = this.store.db.prepare('PRAGMA foreign_keys').get() as Record<string, unknown>
+      const busyTimeout = this.store.db.prepare('PRAGMA busy_timeout').get() as Record<string, unknown>
+      journalMode = String(Object.values(journal)[0] ?? '').toLowerCase()
+      synchronous = Number(Object.values(sync)[0]) === 2 ? 'full' : String(Object.values(sync)[0])
+      foreignKeys = Number(Object.values(fk)[0] ?? 0)
+      busyTimeoutMs = Number(Object.values(busyTimeout)[0] ?? 0)
+    } catch (error) {
+      database.error ??= error instanceof Error ? error.message : 'database pragma read failed'
+      database.writable = false
+    }
+
+    let pets: ReturnType<DatabaseStore['listPets']> = []
+    let listError: string | null = null
+    try {
+      pets = this.store.listPets()
+    } catch (error) {
+      listError = error instanceof Error ? error.message : 'database pet listing failed'
+    }
+
+    let schedulerHealth: SchedulerPetHealth[] = []
+    let schedulerError: string | null = null
+    try {
+      schedulerHealth = this.scheduler.healthAll()
+    } catch (error) {
+      schedulerError = error instanceof Error ? error.message : 'scheduler health failed'
+    }
+
+    let firstCanonicalError: string | null = null
+    const petHealth: PetOperationalHealth[] = schedulerHealth.map(value => {
+      let canonicalOk = true
+      let canonicalError: string | null = null
+      try {
+        this.store.loadCanonical(value.petId)
+      } catch (error) {
+        canonicalOk = false
+        canonicalError = error instanceof Error ? error.message : 'canonical state is corrupt'
+        firstCanonicalError ??= canonicalError
+      }
+      const lastError = canonicalError ?? this.lastError?.message ?? database.error
+      return {
+        ...value,
+        canonicalOk,
+        canonicalError,
+        dbWritable: database.writable,
+        quickCheck: database.quickCheck,
+        lastError,
+        lastErrorAtMs: canonicalError !== null
+          ? this.now()
+          : this.lastError?.atMs ?? (lastError === null ? null : this.now()),
+        lastErrorEvent: canonicalError !== null
+          ? 'canonical.health_failed'
+          : this.lastError?.event ?? (lastError === null ? null : 'database.health_failed'),
+      }
+    })
+
     const first = pets[0]
-    const schedulerHealth = this.scheduler.healthAll()
-    const firstHealth = schedulerHealth[0]
-    const catchingUp = schedulerHealth.some(value => value.catchingUp)
-    const schedulerReady = schedulerHealth.every(value => value.ready)
-    const authority = first === undefined ? undefined : this.store.getAuthority(first.id)
-    const settings = first === undefined ? undefined : this.store.getSettings(first.id)
+    const firstHealth = petHealth[0]
+    const catchingUp = petHealth.some(value => value.catchingUp)
+    const allPetsReady = pets.length > 0
+      && schedulerHealth.length === pets.length
+      && petHealth.length === pets.length
+      && petHealth.every(value => value.ready && value.stuck === false && value.canonicalOk)
+    let authority: ReturnType<DatabaseStore['getAuthority']>
+    let settings: ReturnType<DatabaseStore['getSettings']>
+    try {
+      authority = first === undefined ? undefined : this.store.getAuthority(first.id)
+      settings = first === undefined ? undefined : this.store.getSettings(first.id)
+    } catch (error) {
+      firstCanonicalError ??= error instanceof Error ? error.message : 'canonical settings read failed'
+      authority = undefined
+      settings = undefined
+    }
+
+    const metrics = this.metrics.snapshot()
+    const metricGroup = (prefix: string): Record<string, number> => Object.fromEntries(
+      Object.entries(metrics).filter(([key]) => key.startsWith(prefix)),
+    )
+    const databaseReady = database.writable && database.quickCheck === 'ok'
+    const derivedError = listError ?? schedulerError ?? firstCanonicalError ?? database.error
+    const lastError = this.lastError?.message ?? derivedError
+    const lastErrorAtMs = this.lastError?.atMs ?? (lastError === null ? null : this.now())
+    const lastErrorEvent = this.lastError?.event ?? (
+      listError !== null ? 'database.list_pets_failed'
+        : schedulerError !== null ? 'scheduler.health_failed'
+          : firstCanonicalError !== null ? 'canonical.health_failed'
+            : database.error !== null ? 'database.health_failed'
+              : null
+    )
+
     return {
       ok: true,
       service: 'qqpet-server',
-      ready: this.started && schedulerReady && catchingUp === false && authority?.state === 'active',
-      journalMode: String(Object.values(journal)[0] ?? '').toLowerCase(),
-      synchronous: Number(Object.values(synchronous)[0]) === 2 ? 'full' : String(Object.values(synchronous)[0]),
-      foreignKeys: Number(Object.values(foreignKeys)[0] ?? 0),
-      busyTimeoutMs: Number(Object.values(busyTimeout)[0] ?? 0),
+      ready: this.started && databaseReady && allPetsReady && catchingUp === false && authority?.state === 'active',
+      journalMode,
+      synchronous,
+      foreignKeys,
+      busyTimeoutMs,
       pets: pets.length,
+      petHealth,
       connections: first === undefined ? 0 : this.sessions.hub.count(first.id),
       revision: first?.revision ?? 0,
+      commandSeq: first?.commandSeq ?? 0,
       eventSeq: first?.eventSeq ?? 0,
+      commandLogSize: petHealth.reduce((sum, value) => sum + value.commandLogSize, 0),
+      eventLogSize: petHealth.reduce((sum, value) => sum + value.eventLogSize, 0),
       gameTimeMs: first?.gameTimeMs ?? 0,
       catchingUp,
       wallLagMs: firstHealth?.wallLagMs ?? 0,
@@ -202,16 +341,35 @@ export class SyncServer {
       activeClientCount: firstHealth?.activeClientCount ?? 0,
       authorityState: authority?.state ?? 'reset',
       authorityEpoch: authority?.epoch ?? 0,
+      authorityId: authority?.authorityId ?? '',
+      restoreGeneration: authority?.restoreGeneration ?? 0,
       advanceWhileEmpty: settings?.advanceWhileEmpty ?? false,
       timeZone: settings?.timeZone ?? '',
-      metrics: this.metrics.snapshot(),
+      dbWritable: database.writable,
+      quickCheck: database.quickCheck,
+      database,
+      lastError,
+      lastErrorAtMs,
+      lastErrorEvent,
+      authMetrics: metricGroup('auth.'),
+      rateMetrics: metricGroup('rate_limits.'),
+      rateLimitMetrics: metricGroup('rate_limits.'),
+      backupMetrics: metricGroup('backup.'),
+      metrics,
       scheduler: schedulerHealth,
     }
   }
 
   async backup(path: string): Promise<void> {
-    await mkdir(dirname(path), { recursive: true })
-    await this.store.backup(path)
+    try {
+      await mkdir(dirname(path), { recursive: true })
+      await this.store.backup(path)
+      this.metrics.increment('backup.success')
+    } catch (error) {
+      this.metrics.increment('backup.failure')
+      this.logger.error('backup.failed', { error })
+      throw error
+    }
   }
 
   private async handleHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -220,8 +378,19 @@ export class SyncServer {
       response.end()
       return
     }
-    if (request.url === '/health' || request.url === '/healthz' || request.url === '/readyz') {
+    if (request.url === '/health') {
       this.json(response, 200, { ...this.health() })
+      return
+    }
+    if (request.url === '/healthz') {
+      // Liveness must stay 200 while the process can serve HTTP. Readiness is
+      // reported separately by /readyz and in the body's ready field.
+      this.json(response, 200, { ...this.health(), ok: true })
+      return
+    }
+    if (request.url === '/readyz') {
+      const health = this.health()
+      this.json(response, health.ready ? 200 : 503, { ...health, ok: health.ready })
       return
     }
     this.json(response, 404, { ok: false, error: 'not_found' })

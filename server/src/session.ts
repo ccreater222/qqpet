@@ -26,6 +26,7 @@ import type { ServerConfig } from './config'
 import type { DatabaseStore, PetRecord } from './db'
 import { SocketHub, type LiveConnection } from './hub'
 import type { Logger } from './logging'
+import { MetricsRegistry } from './metrics'
 
 const CLOSE_AUTH_FAILED = 4000
 const CLOSE_PROTOCOL_MISMATCH = 4001
@@ -94,6 +95,7 @@ export class SessionService {
     private readonly auth: AuthService,
     private readonly commands: CommandService,
     private readonly logger: Logger,
+    private readonly metrics: MetricsRegistry = new MetricsRegistry(),
     private readonly now: () => number = Date.now,
   ) {
     this.hub = new SocketHub(store, logger, now, config.maxFrameBytes)
@@ -266,6 +268,8 @@ export class SessionService {
         at,
       )
       if (preAuthRate.take(at) === false) {
+        this.metrics.increment('rate_limits.hits')
+        this.metrics.increment('rate_limits.pre_auth')
         this.close(socket, CLOSE_RATE_LIMITED, 'rate_limited')
         return
       }
@@ -317,6 +321,8 @@ export class SessionService {
     }
     if (validated.value.t === 'resync') {
       if (this.takeExpensiveRate(connection) === false) {
+        this.metrics.increment('rate_limits.hits')
+        this.metrics.increment('rate_limits.expensive')
         this.close(socket, CLOSE_RATE_LIMITED, 'rate_limited')
         return
       }
@@ -325,6 +331,8 @@ export class SessionService {
     }
     if (validated.value.t === 'exportBundle') {
       if (this.takeExpensiveRate(connection) === false) {
+        this.metrics.increment('rate_limits.hits')
+        this.metrics.increment('rate_limits.expensive')
         this.close(socket, CLOSE_RATE_LIMITED, 'rate_limited')
         return
       }
@@ -345,6 +353,8 @@ export class SessionService {
         at,
       )
       if (commandRate.take(at) === false) {
+        this.metrics.increment('rate_limits.hits')
+        this.metrics.increment('rate_limits.commands')
         this.close(socket, CLOSE_RATE_LIMITED, 'rate_limited')
         return
       }
@@ -422,6 +432,7 @@ export class SessionService {
     connection.coverageId = coverageId
     connection.authenticated = true
     this.hub.add(connection)
+    this.metrics.increment('sessions.connected')
 
     const plan = this.deliveryPlan(hello, snapshot.pet, authenticated.petId, snapshot.authority.state)
     const welcome: Welcome = {
@@ -596,6 +607,16 @@ export class SessionService {
         }
       }
       this.hub.send(connection, committed.result)
+      if (committed.authorityArchived === true) {
+        // Deliver the detach result first, then give every live client an
+        // explicit archived authority status before clearing the socket hub.
+        const snapshot = this.store.loadCanonical(connection.petId)
+        for (const candidate of this.hub.listConnections(connection.petId)) {
+          if (candidate.authenticated) this.sendReady(candidate, snapshot)
+        }
+        this.hub.closePet(connection.petId)
+        return
+      }
       if (request.command.type === 'device.revoke' && committed.result.status === 'applied') {
         const target = request.command.payload.deviceId
         const revokedAt = (committed.result.result as { revokedAtMs?: number } | undefined)?.revokedAtMs ?? this.now()
@@ -646,8 +667,12 @@ export class SessionService {
       )
       await mkdir(dirname(path), { recursive: true })
       await this.store.backup(path)
+      this.metrics.increment('backup.success')
+      this.metrics.increment('backup.pre_import.success')
     } catch (error) {
       this.logger.error('import.backup_failed', { petId, error })
+      this.metrics.increment('backup.failure')
+      this.metrics.increment('backup.pre_import.failure')
       throw error instanceof Error ? error : new Error('pre-import backup failed')
     }
   }

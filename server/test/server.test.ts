@@ -8,7 +8,7 @@ import test from 'node:test'
 import WebSocket from 'ws'
 import { PROTOCOL_VERSION, type ServerToClient } from '../../src/shared/sync/index.js'
 import { createServerConfig, type ServerConfig, type ServerConfigInput } from '../src/config.js'
-import { initializePet, openDatabase } from '../src/db.js'
+import { initializePet, openDatabase, openDatabaseReadOnly } from '../src/db.js'
 import { SyncServer } from '../src/index.js'
 import { finalizeSurvivor } from '../src/coverage.js'
 import type { CoverageSurvivor } from '../../src/shared/pet-runtime/index.js'
@@ -599,14 +599,52 @@ test('transaction rollback leaves canonical revision and command sequence unchan
   store.close()
 })
 
-test('health exposes non-secret settings and database durability', async t => {
+test('health and readiness expose database, log, authority, error and metric operability fields', async t => {
   const harness = await createHarness(t)
+  const owner = await pairOwner(harness)
+  owner.send({
+    t: 'command',
+    v: PROTOCOL_VERSION,
+    requestId: 'health-adopt',
+    opId: 'health-adopt',
+    command: { type: 'pet.adopt', payload: { sex: 'GG' } },
+  })
+  const adopted = await owner.next('commandResult')
+  if (adopted.t !== 'commandResult') throw new Error('missing health adopt result')
+  assert.equal(adopted.status, 'applied')
+  await owner.close()
+
+  const backupPath = join(harness.directory, 'backup.sqlite')
+  await harness.server.backup(backupPath)
+  assert.ok((await readFile(backupPath)).byteLength > 0)
+
   const response = await fetch('http://127.0.0.1:' + harness.server.address().port + '/health')
   assert.equal(response.status, 200)
-  const body = await response.json() as Record<string, unknown>
+  const body = await response.json() as Record<string, any>
   assert.equal(body.ok, true)
   assert.equal(body.journalMode, 'wal')
   assert.equal(body.synchronous, 'full')
+  assert.equal(body.dbWritable, true)
+  assert.equal(body.quickCheck, 'ok')
+  assert.deepEqual(body.database, { writable: true, quickCheck: 'ok', error: null })
+  assert.equal(body.commandSeq, adopted.commandSeq)
+  assert.equal(body.commandLogSize, 1)
+  assert.ok(body.eventLogSize >= adopted.eventSeq)
+  assert.equal(body.pets, 1)
+  assert.equal(Array.isArray(body.petHealth), true)
+  assert.equal(body.petHealth.length, 1)
+  assert.equal(body.petHealth[0].commandSeq, adopted.commandSeq)
+  assert.equal(body.petHealth[0].eventSeq, adopted.eventSeq)
+  assert.equal(body.petHealth[0].authorityId, harness.server.store.getAuthority('default')?.authorityId)
+  assert.equal(body.petHealth[0].restoreGeneration, harness.server.store.getAuthority('default')?.restoreGeneration)
+  assert.equal(body.petHealth[0].commandLogSize, 1)
+  assert.ok(body.petHealth[0].eventLogSize >= adopted.eventSeq)
+  assert.equal(body.petHealth[0].canonicalOk, true)
+  assert.equal(body.petHealth[0].stuck, false)
+  assert.ok((body.authMetrics['auth.success'] ?? 0) >= 1)
+  assert.equal(body.backupMetrics['backup.success'], 1)
+  assert.equal(typeof body.rateMetrics, 'object')
+  assert.equal(body.lastError, null)
   const text = JSON.stringify(body)
   assert.doesNotMatch(text, /pairingCode|token|save_json|payload/i)
   for (const path of ['/healthz', '/readyz']) {
@@ -614,10 +652,78 @@ test('health exposes non-secret settings and database durability', async t => {
     assert.equal(ready.status, 200)
     const readyBody = await ready.json() as Record<string, unknown>
     assert.equal(readyBody.ok, true)
+    assert.equal(readyBody.ready, true)
   }
-  const backupPath = join(harness.directory, 'backup.sqlite')
-  await harness.server.backup(backupPath)
-  assert.ok((await readFile(backupPath)).byteLength > 0)
+
+  const corruptStore = openDatabase(harness.dbPath)
+  corruptStore.db.prepare("UPDATE pets SET engine_json = '{}' WHERE id = 'default'").run()
+  corruptStore.close()
+
+  const liveness = await fetch('http://127.0.0.1:' + harness.server.address().port + '/healthz')
+  assert.equal(liveness.status, 200)
+  const livenessBody = await liveness.json() as Record<string, unknown>
+  assert.equal(livenessBody.ok, true)
+  assert.equal(livenessBody.ready, false)
+  const readiness = await fetch('http://127.0.0.1:' + harness.server.address().port + '/readyz')
+  assert.equal(readiness.status, 503)
+  const readinessBody = await readiness.json() as Record<string, unknown>
+  assert.equal(readinessBody.ok, false)
+  assert.equal(readinessBody.ready, false)
+  assert.equal(readinessBody.lastErrorEvent, 'canonical.health_failed')
+  assert.match(String(readinessBody.lastError), /canonical engine state is corrupt/)
+})
+
+test('readiness reports a read-only database as not writable', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-readonly-health-'))
+  const dbPath = join(directory, 'qqpet.sqlite')
+  const config = createServerConfig({
+    bind: '127.0.0.1',
+    port: 0,
+    dbPath,
+    backupDir: join(directory, 'backups'),
+    adminSocket: join(directory, 'admin.sock'),
+    schedulerEnabled: false,
+  })
+  const writable = openDatabase(dbPath)
+  initializePet(writable, {
+    petId: 'default',
+    timeZone: 'UTC',
+    nowMs: Date.now(),
+  })
+  writable.close()
+  const readOnly = openDatabaseReadOnly(dbPath)
+  const server = new SyncServer(config, readOnly)
+  try {
+    const health = server.health()
+    assert.equal(health.dbWritable, false)
+    assert.equal(health.quickCheck, 'ok')
+    assert.equal(health.database.writable, false)
+    assert.match(health.database.error ?? '', /readonly|read-only/i)
+    assert.equal(health.ready, false)
+    assert.equal(health.petHealth[0]?.dbWritable, false)
+  } finally {
+    await server.stop()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('readyz reports archived authority as unavailable while healthz stays live', async t => {
+  const harness = await createHarness(t)
+  const store = openDatabase(harness.dbPath)
+  store.db.prepare("UPDATE pet_authority SET state = 'archived' WHERE pet_id = 'default'").run()
+  store.close()
+
+  const healthz = await fetch('http://127.0.0.1:' + harness.server.address().port + '/healthz')
+  assert.equal(healthz.status, 200)
+  const liveBody = await healthz.json() as Record<string, unknown>
+  assert.equal(liveBody.ok, true)
+  assert.equal(liveBody.ready, false)
+  const readyz = await fetch('http://127.0.0.1:' + harness.server.address().port + '/readyz')
+  assert.equal(readyz.status, 503)
+  const readyBody = await readyz.json() as Record<string, unknown>
+  assert.equal(readyBody.ok, false)
+  assert.equal(readyBody.ready, false)
+  assert.equal(readyBody.authorityState, 'archived')
 })
 
 const serverRoot = fileURLToPath(new URL('../../..', import.meta.url))
@@ -1659,6 +1765,9 @@ test('command rate limiting closes with 4003 after the burst is exhausted', asyn
   const close = await closed
   assert.equal(close.code, 4003)
   assert.equal(close.reason, 'rate_limited')
+  const metrics = harness.server.metrics.snapshot()
+  assert.ok((metrics['rate_limits.hits'] ?? 0) >= 1)
+  assert.ok((metrics['rate_limits.commands'] ?? 0) >= 1)
 })
 
 test('command rate budget is shared by every socket for one device', async t => {
@@ -1715,6 +1824,9 @@ test('resync and export share an expensive-frame budget across device sockets', 
   const exportClose = await secondClosed
   assert.equal(exportClose.code, 4003)
   assert.equal(exportClose.reason, 'rate_limited')
+  const metrics = harness.server.metrics.snapshot()
+  assert.ok((metrics['rate_limits.hits'] ?? 0) >= 2)
+  assert.ok((metrics['rate_limits.expensive'] ?? 0) >= 2)
 })
 
 test('unauthenticated frame flood is rate limited across sockets', async t => {
@@ -1727,6 +1839,7 @@ test('unauthenticated frame flood is rate limited across sockets', async t => {
   const results = await Promise.all(closes)
   assert.equal(results.filter(result => result.code === 4003).length, 1)
   assert.equal(results.filter(result => result.code === 4004).length, 10)
+  assert.ok((harness.server.metrics.snapshot()['rate_limits.pre_auth'] ?? 0) >= 1)
 })
 
 test('rejected pairing does not burn the one-shot code or orphan a device', async t => {

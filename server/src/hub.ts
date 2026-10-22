@@ -122,6 +122,16 @@ export class SocketHub {
     }
   }
 
+  /** Clear a pet's live registry and close every attached socket after a handoff. */
+  closePet(petId: string, closeReason = 'authority_archived'): number {
+    const connections = [...(this.pets.get(petId) ?? [])]
+    for (const connection of connections) {
+      this.remove(connection, 'socket_closed')
+      connection.socket.close(1000, closeReason)
+    }
+    return connections.length
+  }
+
   closeAll(reason: 'shutdown' | 'socket_closed' = 'shutdown'): void {
     for (const set of this.pets.values()) {
       for (const connection of [...set]) {

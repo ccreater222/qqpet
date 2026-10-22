@@ -242,6 +242,12 @@ export interface EventRecord {
   createdAtMs: number
 }
 
+export interface DatabaseOperationalHealth {
+  writable: boolean
+  quickCheck: string
+  error: string | null
+}
+
 export interface CoverageOperationRecord {
   petId: string
   operationId: string
@@ -401,6 +407,62 @@ export class DatabaseStore {
       if (table === 'journal_mode' || table === 'synchronous' || table === 'foreign_keys' || table === 'busy_timeout') continue
       if (!tables.has(table)) throw new Error('missing required table: ' + table)
     }
+  }
+
+  /**
+   * Non-destructive liveness probe used by health/readiness. quick_check
+   * verifies page integrity; a rolled-back no-op UPDATE verifies the connection
+   * can still acquire a write transaction without changing canonical state.
+   */
+  operationalHealth(): DatabaseOperationalHealth {
+    if (this.closed) return { writable: false, quickCheck: 'closed', error: 'database is closed' }
+    let quickCheck = 'unknown'
+    let writable = false
+    let errorMessage: string | null = null
+    try {
+      const quick = this.db.prepare('PRAGMA quick_check').get() as Record<string, unknown> | undefined
+      const values = quick === undefined ? [] : Object.values(quick).map(value => String(value).toLowerCase())
+      quickCheck = values.length === 1 ? values[0] : (values.join(', ') || 'unknown')
+      if (values.length === 0 || values.some(value => value !== 'ok')) {
+        errorMessage = 'sqlite quick_check failed: ' + quickCheck
+      }
+    } catch (error) {
+      quickCheck = 'error'
+      errorMessage = error instanceof Error ? error.message : 'sqlite quick_check failed'
+    }
+    if (quickCheck === 'ok') {
+      let transactionOpen = false
+      try {
+        this.db.exec('BEGIN IMMEDIATE')
+        transactionOpen = true
+        // Write the same value so a read-only or full/failed volume is caught;
+        // rollback guarantees the probe is not observable in canonical state.
+        this.db.prepare('UPDATE schema_migrations SET applied_at_ms = applied_at_ms WHERE version = ?').run(SCHEMA_VERSION)
+        this.db.exec('ROLLBACK')
+        transactionOpen = false
+        writable = true
+      } catch (error) {
+        if (transactionOpen) {
+          try {
+            this.db.exec('ROLLBACK')
+          } catch {
+            // Preserve the probe error.
+          }
+        }
+        errorMessage ??= error instanceof Error ? error.message : 'database write probe failed'
+      }
+    }
+    return { writable, quickCheck, error: errorMessage }
+  }
+
+  countCommands(petId: string): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM commands WHERE pet_id = ?').get(petId) as { count?: unknown } | undefined
+    return Number(row?.count ?? 0)
+  }
+
+  countEvents(petId: string): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM events WHERE pet_id = ?').get(petId) as { count?: unknown } | undefined
+    return Number(row?.count ?? 0)
   }
 
   transaction<T>(operation: () => T): T {
