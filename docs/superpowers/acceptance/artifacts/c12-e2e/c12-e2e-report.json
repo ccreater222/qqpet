@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "startedAt": "2026-10-22T23:19:07.369Z",
-  "codeRevision": "90f410f0758a0e5b5ce4b6e792e3696210548d2a",
+  "startedAt": "2026-10-22T23:24:02.584Z",
+  "codeRevision": "2ede2d84f6767fba69b03b8c4d13b70aab070ebd",
   "platform": "darwin",
   "arch": "arm64",
   "node": "v22.19.0",
@@ -9,7 +9,7 @@
     {
       "name": "compile compiled desktop app and standalone server",
       "status": "pass",
-      "durationMs": 1408,
+      "durationMs": 1418,
       "detail": {
         "desktopEntry": "out/main/index.js",
         "serverEntry": "server/dist/server/src/index.js"
@@ -18,11 +18,11 @@
     {
       "name": "initialize temporary SQLite WAL database and mint owner/player pairing codes",
       "status": "pass",
-      "durationMs": 139,
+      "durationMs": 137,
       "detail": {
         "temporarySqlite": true,
         "journalMode": "wal",
-        "authorityIdHash": "ee0a1dc4f521fed3cf3ce708dec12683c28cde92ed8dd3ab2781703217eb430d",
+        "authorityIdHash": "66c4a24b3c0301dc10b3253bf8477786c58a28e2ac69fcad1245d5c89b02a0b4",
         "duplicatePairingCodes": false
       }
     },
@@ -31,7 +31,7 @@
       "status": "pass",
       "durationMs": 114,
       "detail": {
-        "pid": 57044,
+        "pid": 70912,
         "ready": true,
         "journalMode": "wal",
         "synchronous": "full",
@@ -42,9 +42,9 @@
     {
       "name": "launch owner Electron app with real BrowserWindow and preload renderer",
       "status": "pass",
-      "durationMs": 655,
+      "durationMs": 643,
       "detail": {
-        "mainPid": 57048,
+        "mainPid": 70917,
         "rendererUrl": "app://bundle/index.html",
         "userDataIsolated": true,
         "storageApi": "window.qqpet.storage"
@@ -53,9 +53,9 @@
     {
       "name": "launch player Electron app with distinct userData and real BrowserWindow",
       "status": "pass",
-      "durationMs": 365,
+      "durationMs": 343,
       "detail": {
-        "mainPid": 57073,
+        "mainPid": 70950,
         "distinctMainProcesses": true,
         "distinctUserData": true,
         "rendererUrl": "app://bundle/index.html"
@@ -64,18 +64,18 @@
     {
       "name": "pair owner via real renderer window.qqpet.storage API",
       "status": "pass",
-      "durationMs": 77,
+      "durationMs": 119,
       "detail": {
         "role": "owner",
         "paired": true,
-        "deviceIdHash": "fa6916d2ae3d89a82f60cabeef9a5eeed309a84e8b4c6104e59b3ae0b09cbda6",
+        "deviceIdHash": "76e9cc56c2d56bbc03af1177f723bad2025c6079badba8f60f76a4abeadb8bb3",
         "pairingInputSource": "window.qqpet.storage.pair"
       }
     },
     {
       "name": "switch owner renderer to server mode with use-server source",
       "status": "pass",
-      "durationMs": 7,
+      "durationMs": 9,
       "detail": {
         "initialSource": "use-server",
         "requestedMode": "server",
@@ -88,58 +88,58 @@
     {
       "name": "pair player via real renderer storage API and switch to server mode",
       "status": "pass",
-      "durationMs": 141,
+      "durationMs": 172,
       "detail": {
         "role": "player",
         "initialSource": "use-server",
         "requestedMode": "server",
         "activeMode": "server",
-        "deviceIdHash": "d8460b7f026c7d0d607dd427afa4e44587cb7b24f05e6b892ebc5d5aeb0da368",
+        "deviceIdHash": "e63b0a71dcfc11f58f58128b7acac1874fec5b8b2c057d533fb63f249beeb4e2",
         "pairingAndModeSource": "window.qqpet.storage"
       }
     },
     {
       "name": "initial two-renderer projection convergence over real WebSocket",
       "status": "pass",
-      "durationMs": 19,
+      "durationMs": 191,
       "detail": {
         "revision": 0,
         "eventSeq": 0,
         "projectionHash": "cc82c3fb95be5a1e4e61cb6a0514d62dc70c0363c7e9e1fc046b401d8ea55d26",
         "activeClientCount": 2,
-        "websocketUrl": "ws://127.0.0.1:50367/v1/sync"
+        "websocketUrl": "ws://127.0.0.1:52141/v1/sync"
       }
     },
     {
       "name": "adopt pet from owner renderer and converge player renderer",
       "status": "pass",
-      "durationMs": 217,
+      "durationMs": 65,
       "detail": {
         "revision": 1,
         "eventSeq": 2,
-        "projectionHash": "dce8fcd679083e2f39838ccbea98e9c2409e575a41f017dfb213d0ae3e2c2af1",
+        "projectionHash": "d6427c1a4d794ce50ba8d07920cd4726be5b47cf96940985b4d5aba9e80ace74",
         "adoptedName": "宠宝~"
       }
     },
     {
       "name": "buy food from owner renderer and converge player renderer",
       "status": "pass",
-      "durationMs": 66,
+      "durationMs": 77,
       "detail": {
         "revision": 2,
         "foodCount": 5,
-        "projectionHash": "b5507ed1c18948a528cbedfed8a5325498d59fb6e92482aa7871d573946e4f3f"
+        "projectionHash": "e351de4058e953b0956ce31f2e92e3468b493d319d27689ccc2e838de65aaa27"
       }
     },
     {
       "name": "canonical feed from owner renderer reaches player renderer within 3s",
       "status": "pass",
-      "durationMs": 159,
+      "durationMs": 167,
       "detail": {
         "revision": 3,
         "eventSeq": 6,
-        "projectionHash": "ee009e779e9f2fa058af0be9da2f99f02b63255364f230e8299828330a981895",
-        "playLatencyMs": 72,
+        "projectionHash": "167b0adf5d621c69fcfe2bae25f8d0a6c4afc03f2fe5da048f90c0367dc070b8",
+        "playLatencyMs": 82,
         "eatTaskBefore": 0,
         "eatTaskAfter": 1,
         "foodBefore": 5,
@@ -157,14 +157,14 @@
         "duplicateOriginal": "applied",
         "revision": 4,
         "commandSeq": 4,
-        "projectionHash": "cf66523112b4d6ea5a2129bd0c73adf38effa8ba81d25cf2a908f1574d30b05d",
+        "projectionHash": "5f894e875d70c5487275230fd713f27f6cf97a510e48cebad4f2e261e07c4e95",
         "foodCountUnchanged": true
       }
     },
     {
       "name": "dropped projection frame triggers renderer revision-gap resync",
       "status": "pass",
-      "durationMs": 167,
+      "durationMs": 169,
       "detail": {
         "droppedProjections": 1,
         "sentResyncs": 1,
@@ -172,14 +172,14 @@
         "secondCommandRevision": 6,
         "recoveredRevision": 6,
         "recoveredEventSeq": 9,
-        "projectionHash": "b069cd6c5a64bd1cb4bb31fa9dbfd684ac8d3e7fc497f6ea257e847427a027fd",
+        "projectionHash": "4e0613a07f32a0b67191896dbe18815fa8adc2ac35db76a019c54eec225e5a64",
         "resyncRecovered": true
       }
     },
     {
       "name": "owner detach then resume restores authority and both renderer projections converge",
       "status": "pass",
-      "durationMs": 1088,
+      "durationMs": 1167,
       "detail": {
         "archivedEpoch": 0,
         "resumedEpoch": 2,
@@ -189,15 +189,15 @@
         "playerProjectionConverged": true,
         "convergedRevision": 7,
         "convergedEventSeq": 9,
-        "projectionHash": "b069cd6c5a64bd1cb4bb31fa9dbfd684ac8d3e7fc497f6ea257e847427a027fd"
+        "projectionHash": "4e0613a07f32a0b67191896dbe18815fa8adc2ac35db76a019c54eec225e5a64"
       }
     },
     {
       "name": "device revoke disconnects player renderer and forces read-only",
       "status": "pass",
-      "durationMs": 132,
+      "durationMs": 136,
       "detail": {
-        "revokedDeviceIdHash": "d8460b7f026c7d0d607dd427afa4e44587cb7b24f05e6b892ebc5d5aeb0da368",
+        "revokedDeviceIdHash": "e63b0a71dcfc11f58f58128b7acac1874fec5b8b2c057d533fb63f249beeb4e2",
         "playerNotice": "device_revoked",
         "playerConnection": "error",
         "playerReadOnly": true,
@@ -212,7 +212,7 @@
     {
       "name": "real BrowserWindow/preload/renderer proof and evidence hygiene",
       "status": "pass",
-      "durationMs": 28,
+      "durationMs": 27,
       "detail": {
         "electronMainPidsDistinct": true,
         "browserWindowCount": 2,
@@ -240,7 +240,7 @@
     {
       "name": "clean teardown of both Electron apps and standalone server",
       "status": "pass",
-      "durationMs": 371,
+      "durationMs": 370,
       "detail": {
         "ownerExited": true,
         "playerExited": true,
@@ -262,8 +262,8 @@
     "realRenderer": true,
     "rendererCoverage": true,
     "guiCoverage": true,
-    "ownerPid": 57048,
-    "playerPid": 57073,
+    "ownerPid": 70917,
+    "playerPid": 70950,
     "rendererProof": {
       "electronMainPidsDistinct": true,
       "browserWindowCount": 2,
@@ -283,7 +283,7 @@
       "electronVersion": "44.6.0"
     },
     "websocket": {
-      "serverUrl": "ws://127.0.0.1:50367/v1/sync",
+      "serverUrl": "ws://127.0.0.1:52141/v1/sync",
       "activeClientCountAtConvergence": 2
     },
     "scenarios": {
@@ -306,6 +306,6 @@
     "Renderer automation drives the production contextBridge API inside real BrowserWindows; it does not perform pixel/OCR visual assertions or click through every UI pane.",
     "Linux CI runs Electron under xvfb, so GPU compositing and platform-specific window-manager behavior are not asserted."
   ],
-  "finishedAt": "2026-10-22T23:19:12.859Z",
+  "finishedAt": "2026-10-22T23:24:08.244Z",
   "result": "PASS"
 }
