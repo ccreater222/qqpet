@@ -31,6 +31,8 @@ const {
   desktopServerModeCapability,
 } = await import('../../src/main/renderer-runtime-flags.ts')
 const { createSyncFixtures, GAME_TIME_MS } = await import('./sync-fixtures.mjs')
+const { assertRemoteServerUrl } = await import('../../src/main/remote-endpoint.ts')
+const { createWebSocketTransport } = await import('../../src/main/remote-websocket-transport.ts')
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url))
 const fixtures = createSyncFixtures()
@@ -278,6 +280,7 @@ class FakeServer {
     this.authorityResetAfterCommandOnce = false
     this.forceNotApplied = new Set()
     this.replayDeliveryOnReconnect = false
+    this.authorityResetOnNextCachedHello = false
     this.muteProjection = null
   }
 
@@ -317,6 +320,24 @@ class FakeServer {
 
   handle(connection, frame) {
     if (frame.t === 'hello') {
+      if (this.authorityResetOnNextCachedHello && frame.cachedAuthority !== undefined) {
+        this.authorityResetOnNextCachedHello = false
+        this.authority = clone(RESET_AUTHORITY)
+        this.revision = 5
+        this.eventSeq = 6
+        this.shared = sharedWithYb(this.shared.petInfo.yb + 1)
+        connection.emit({
+          t: 'authorityResetRequired',
+          code: 'authority_reset_required',
+          v: PROTOCOL_VERSION,
+          requestId: frame.requestId,
+          authority: clone(RESET_STAMP),
+          reason: 'cache_newer',
+          requireFullSnapshot: true,
+        })
+        connection.close(4002, 'authority_reset_required')
+        return
+      }
       this.clients.add(connection)
       let deviceId = OWNER_DEVICE_ID
       if (frame.auth.kind === 'pairing') {
@@ -618,6 +639,212 @@ test('commandStatus not_applied rejects the in-flight command and a fresh opId r
   )
 })
 
+test('correlated protocol error frames settle the matching command and export', async t => {
+  const server = new FakeServer()
+  let commandFrame = null
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'command') {
+      commandFrame = frame
+      return
+    }
+    if (frame.t === 'exportBundle') {
+      connection.emit({
+        t: 'error',
+        v: PROTOCOL_VERSION,
+        requestId: frame.requestId,
+        code: 'internal',
+        message: 'export handler failed',
+        refreshProjection: false,
+      })
+      return
+    }
+    server.handle(connection, frame)
+  })
+  const { repository } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  await repository.start()
+
+  let commandSettled = false
+  const commandPromise = repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-handler-error' })
+  commandPromise.then(() => { commandSettled = true })
+  await until(() => commandFrame !== null, 'command request')
+  const connection = transport.connections[0]
+  connection.emit({
+    t: 'error',
+    v: PROTOCOL_VERSION,
+    requestId: 'some-other-request',
+    code: 'internal',
+    message: 'not mine',
+    refreshProjection: false,
+  })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(commandSettled, false, 'an uncorrelated error frame must not settle the command')
+  connection.emit({
+    t: 'error',
+    v: PROTOCOL_VERSION,
+    requestId: commandFrame.requestId,
+    code: 'internal',
+    message: 'command handler failed',
+    refreshProjection: false,
+  })
+  const result = await commandPromise
+  assert.equal(result.status, 'rejected')
+  assert.equal(result.error.code, 'internal')
+  assert.equal(result.error.message, 'command handler failed')
+
+  const exportPromise = repository.exportBundle()
+  await until(
+    () => connection.sent.some(frame => frame.t === 'exportBundle'),
+    'export request',
+  )
+  const exportRequest = connection.sent.find(frame => frame.t === 'exportBundle')
+  connection.emit({
+    t: 'error',
+    v: PROTOCOL_VERSION,
+    requestId: exportRequest.requestId,
+    code: 'internal',
+    message: 'export handler failed',
+    refreshProjection: false,
+  })
+  await assert.rejects(exportPromise, /internal: export handler failed/)
+})
+
+test('refresh rejection keeps the command pending and read-only until the projection arrives', async t => {
+  const server = new FakeServer()
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'command') {
+      if (frame.opId === 'op-refresh-first') {
+        connection.emit(commandResultFrame({
+          opId: frame.opId,
+          requestId: frame.requestId,
+          commandType: frame.command.type,
+          status: 'rejected',
+          error: { code: 'busy', message: 'state changed; refresh required', refreshProjection: true },
+        }))
+      } else {
+        connection.emit(commandResultFrame({
+          opId: frame.opId,
+          requestId: frame.requestId,
+          commandType: frame.command.type,
+          status: 'applied',
+          commandSeq: 2,
+          revision: server.revision,
+          eventSeq: server.eventSeq,
+          result: { accepted: true },
+        }))
+      }
+      return
+    }
+    server.handle(connection, frame)
+  })
+  const { repository } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  await repository.start()
+
+  let firstSettled = false
+  const first = repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-refresh-first' })
+  first.then(() => { firstSettled = true })
+  await until(
+    () => transport.connections[0].sent.some(frame => frame.t === 'command' && frame.opId === 'op-refresh-first'),
+    'first command',
+  )
+  await until(
+    () => repository.getStatus().state === 'catching_up' && repository.getStatus().readOnly === true,
+    'refresh gate',
+  )
+  assert.equal(firstSettled, false, 'the refresh command must not settle before its projection')
+
+  const retryBefore = await repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-refresh-before' })
+  assert.equal(retryBefore.status, 'rejected')
+  assert.equal(retryBefore.error.code, 'server_catching_up')
+  assert.equal(
+    transport.connections[0].sent.filter(frame => frame.t === 'command').length,
+    1,
+    'no retry may be sent while the refresh projection is outstanding',
+  )
+
+  const current = repository.getProjection()
+  transport.connections[0].emit({
+    t: 'projection',
+    v: PROTOCOL_VERSION,
+    revision: current.revision + 1,
+    eventSeq: current.eventSeq,
+    gameTimeMs: current.gameTimeMs + 60_000,
+    timeZone: current.timeZone,
+    advanceWhileEmpty: current.advanceWhileEmpty,
+    authority: clone(current.authority),
+    save: clone(server.shared),
+    events: [],
+  })
+  const firstResult = await first
+  assert.equal(firstResult.status, 'rejected')
+  assert.equal(firstResult.error.refreshProjection, true)
+  assert.equal(repository.getStatus().state, 'online')
+  assert.equal(repository.getStatus().readOnly, false)
+
+  const retryAfter = await repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-refresh-after' })
+  assert.equal(retryAfter.status, 'applied')
+  assert.equal(
+    transport.connections[0].sent.filter(frame => frame.t === 'command').length,
+    2,
+  )
+})
+
+test('protocol error with refreshProjection keeps the command pending until a projection', async t => {
+  const server = new FakeServer()
+  let commandFrame = null
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'command') {
+      commandFrame = frame
+      return
+    }
+    server.handle(connection, frame)
+  })
+  const { repository } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  await repository.start()
+
+  let settled = false
+  const pending = repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-error-refresh' })
+  pending.then(() => { settled = true })
+  await until(() => commandFrame !== null, 'command request')
+  const connection = transport.connections[0]
+  connection.emit({
+    t: 'error',
+    v: PROTOCOL_VERSION,
+    requestId: commandFrame.requestId,
+    code: 'internal',
+    message: 'projection refresh required',
+    refreshProjection: true,
+  })
+  await until(
+    () => repository.getStatus().state === 'catching_up' && repository.getStatus().readOnly === true,
+    'error refresh gate',
+  )
+  assert.equal(settled, false)
+  const blockedRetry = await repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-error-refresh-retry' })
+  assert.equal(blockedRetry.status, 'rejected')
+  assert.equal(blockedRetry.error.code, 'server_catching_up')
+
+  const current = repository.getProjection()
+  connection.emit({
+    t: 'projection',
+    v: PROTOCOL_VERSION,
+    revision: current.revision + 1,
+    eventSeq: current.eventSeq,
+    gameTimeMs: current.gameTimeMs + 60_000,
+    timeZone: current.timeZone,
+    advanceWhileEmpty: current.advanceWhileEmpty,
+    authority: clone(current.authority),
+    save: clone(server.shared),
+    events: [],
+  })
+  const result = await pending
+  assert.equal(result.status, 'rejected')
+  assert.equal(result.error.refreshProjection, true)
+  assert.equal(repository.getStatus().state, 'online')
+})
+
 test('duplicate opId returns the stored result without a second mutation', async t => {
   const server = new FakeServer()
   const { repository } = await makeRepository(server)
@@ -678,6 +905,32 @@ test('authority_reset_required discards the cache and recovers from a full snaps
   assert.equal(repository.getProjection().authority.epoch, 9)
   assert.equal(store.token, TOKEN)
   assert.equal(resyncProjections.at(-1).authority.authorityId, 'authority-reset-c10')
+})
+
+test('4002 authority reset close is recoverable and reconnects without cachedAuthority', async t => {
+  const server = new FakeServer()
+  server.authorityResetOnNextCachedHello = true
+  const transport = server.transport()
+  const { repository } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  await repository.start()
+  const first = [...server.clients][0]
+  server.clients.delete(first)
+  first.close(1006, 'network lost')
+  await until(() => transport.connections.length >= 3, 'post-reset reconnect')
+  await until(
+    () => repository.getProjection()?.authority.authorityId === RESET_AUTHORITY.authorityId,
+    'reset authority snapshot',
+  )
+  const secondHello = transport.connections[1].sent.find(frame => frame.t === 'hello')
+  const thirdHello = transport.connections[2].sent.find(frame => frame.t === 'hello')
+  assert.ok(secondHello?.cachedAuthority, 'the first reconnect still presents the stale cached authority')
+  assert.equal(thirdHello?.cachedAuthority, undefined)
+  assert.equal(thirdHello?.lastRevision, undefined)
+  assert.equal(thirdHello?.lastEventSeq, undefined)
+  assert.equal(repository.getStatus().notice, undefined)
+  assert.equal(repository.getStatus().readOnly, false)
+  assert.notEqual(repository.getStatus().notice, 'device_revoked')
 })
 
 test('owner export, detach and handoff commands use the shared catalog', async t => {
@@ -749,6 +1002,128 @@ test('reconnect uses capped jittered exponential backoff', async t => {
   assert.equal(sleeps[0], 75)
   assert.equal(sleeps[1], 150)
   assert.ok(sleeps.every(delay => delay >= 50 && delay <= 10_000))
+})
+
+test('remote endpoint validation requires wss for non-loopback hosts at every boundary', async () => {
+  const valid = [
+    'wss://pet.example/v1/sync',
+    'wss://127.0.0.1:8443/v1/sync',
+    'ws://localhost:8080/v1/sync',
+    'ws://dev.localhost:8080/v1/sync',
+    'ws://127.0.0.1:8080/v1/sync',
+    'ws://127.2.3.4:8080/v1/sync',
+    'ws://[::1]:8080/v1/sync',
+  ]
+  for (const url of valid) assert.equal(assertRemoteServerUrl(url), url)
+  const insecure = [
+    'ws://pet.example/v1/sync',
+    'ws://localhost.evil.example/v1/sync',
+    'ws://127.0.0.1.evil.example/v1/sync',
+    'https://pet.example/v1/sync',
+    'not a url',
+  ]
+  for (const url of insecure) {
+    assert.throws(() => assertRemoteServerUrl(url), /ws:\/\/|wss|loopback|invalid_payload/i)
+  }
+
+  const mod = await import('../../src/main/remote-repository.ts')
+  const store = new MemoryTokenStore()
+  store.token = TOKEN
+  const noopTransport = { connect() { throw new Error('must not connect') } }
+  assert.throws(
+    () => new mod.RemoteRepository({
+      serverUrl: 'ws://pet.example/v1/sync',
+      appVersion: 'test',
+      tokenStore: store,
+      transport: noopTransport,
+    }),
+    /loopback|wss/i,
+  )
+  assert.doesNotThrow(() => new mod.RemoteRepository({
+    serverUrl: 'ws://localhost:8080/v1/sync',
+    appVersion: 'test',
+    tokenStore: store,
+    transport: noopTransport,
+  }))
+  assert.doesNotThrow(() => new mod.RemoteRepository({
+    serverUrl: 'wss://pet.example/v1/sync',
+    appVersion: 'test',
+    tokenStore: store,
+    transport: noopTransport,
+  }))
+
+  let socketsCreated = 0
+  class FakeSocket {
+    constructor(url) {
+      socketsCreated += 1
+      this.url = url
+      this.onopen = null
+      this.onmessage = null
+      this.onclose = null
+      this.onerror = null
+    }
+    send() {}
+    close() {}
+  }
+  const transport = createWebSocketTransport(FakeSocket)
+  const handlers = { onOpen() {}, onMessage() {}, onClose() {} }
+  assert.throws(() => transport.connect('ws://pet.example/v1/sync', null, handlers), /loopback|wss/i)
+  assert.equal(socketsCreated, 0, 'the transport must reject before constructing a socket')
+  transport.connect('ws://127.0.0.1:8080/v1/sync', null, handlers)
+  transport.connect('wss://pet.example/v1/sync', null, handlers)
+  assert.equal(socketsCreated, 2)
+})
+
+test('fatal hello closes reject start and do not reconnect', async t => {
+  for (const scenario of [
+    { code: 4000, reason: 'auth_failed' },
+    { code: 4001, reason: 'protocol_mismatch' },
+  ]) {
+    await t.test(scenario.reason, async t => {
+      const server = new FakeServer()
+      const transport = new FakeTransport((connection, frame) => {
+        if (frame.t === 'hello') {
+          connection.close(scenario.code, scenario.reason)
+        }
+      })
+      const { repository } = await makeRepository(server, { transport })
+      t.after(() => repository.stop())
+      await assert.rejects(repository.start(), new RegExp(scenario.reason))
+      await new Promise(resolve => setTimeout(resolve, 25))
+      assert.equal(transport.connections.length, 1, 'a terminal hello close must not be retried')
+      assert.equal(repository.getStatus().state, 'error')
+      assert.equal(repository.getStatus().connection, 'error')
+    })
+  }
+})
+
+test('reconnect backoff is not reset by a socket open before welcome', async t => {
+  let connects = 0
+  const transport = {
+    connect(_url, _token, handlers) {
+      connects += 1
+      const connection = { send() {}, close() {} }
+      queueMicrotask(() => {
+        handlers.onOpen()
+        queueMicrotask(() => handlers.onClose({ code: 1006, reason: 'dropped before welcome' }))
+      })
+      return connection
+    },
+  }
+  const server = new FakeServer()
+  const { repository, sleeps } = await makeRepository(server, {
+    transport,
+    backoff: { baseMs: 100, maxMs: 10_000, random: () => 0.5 },
+  })
+  t.after(() => repository.stop())
+  const startup = repository.start()
+  await until(() => connects >= 4, 'pre-welcome reconnect attempts')
+  await repository.stop()
+  await startup
+  assert.ok(sleeps.length >= 3)
+  assert.equal(sleeps[0], 75)
+  assert.equal(sleeps[1], 150)
+  assert.equal(sleeps[2], 300)
 })
 
 test('pairing exchange persists the issued token and never exposes secrets', async t => {

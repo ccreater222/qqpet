@@ -1,4 +1,5 @@
 import type { RemoteTransport } from './remote-repository'
+import { assertRemoteServerUrl } from './remote-endpoint'
 
 export interface WebSocketMessageEventLike {
   data: unknown
@@ -32,6 +33,7 @@ export function createWebSocketTransport(factory?: WebSocketFactoryLike): Remote
   if (Constructor === undefined) throw new Error('WebSocket is unavailable in this runtime')
   return {
     connect(url: string, _token: string | null, handlers): { send: (data: string) => void; close: () => void } {
+      assertRemoteServerUrl(url)
       const socket = new Constructor(url)
       let closed = false
       socket.onopen = () => {

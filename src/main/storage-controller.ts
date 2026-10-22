@@ -29,6 +29,7 @@ import {
   type StorageStatusView,
 } from '../shared/storage'
 import type { RemoteSyncConfig, RemoteTokenStore } from './remote-repository'
+import { assertRemoteServerUrl } from './remote-endpoint'
 import { desktopServerModeCapability } from './renderer-runtime-flags'
 
 export interface StorageLocalAuthority {
@@ -152,9 +153,10 @@ function validatePairInput(value: unknown): StoragePairInput {
     throw new Error('invalid_payload: pairing input must be an object')
   }
   const record = value as Record<string, unknown>
-  if (typeof record.serverUrl !== 'string' || (record.serverUrl.startsWith('wss://') === false && record.serverUrl.startsWith('ws://') === false)) {
+  if (typeof record.serverUrl !== 'string') {
     throw new Error('invalid_payload: serverUrl must be a ws:// or wss:// URL')
   }
+  assertRemoteServerUrl(record.serverUrl)
   if (typeof record.code !== 'string' || record.code.length === 0) throw new Error('invalid_payload: pairing code is required')
   if (typeof record.deviceLabel !== 'string' || record.deviceLabel.length === 0) throw new Error('invalid_payload: device label is required')
   return { serverUrl: record.serverUrl, code: record.code, deviceLabel: record.deviceLabel }
@@ -169,7 +171,10 @@ function validateModeInput(value: unknown): StorageSetModeInput {
   if (record.initialSource !== undefined && record.initialSource !== 'upload-local' && record.initialSource !== 'use-server') {
     throw new Error('invalid_payload: initialSource must be upload-local or use-server')
   }
-  if (record.serverUrl !== undefined && typeof record.serverUrl !== 'string') throw new Error('invalid_payload: serverUrl must be a string')
+  if (record.serverUrl !== undefined) {
+    if (typeof record.serverUrl !== 'string') throw new Error('invalid_payload: serverUrl must be a string')
+    assertRemoteServerUrl(record.serverUrl)
+  }
   if (record.pairingCode !== undefined && typeof record.pairingCode !== 'string') throw new Error('invalid_payload: pairingCode must be a string')
   if (record.deviceLabel !== undefined && typeof record.deviceLabel !== 'string') throw new Error('invalid_payload: deviceLabel must be a string')
   if (record.expectedEpoch !== undefined && (typeof record.expectedEpoch !== 'number' || Number.isSafeInteger(record.expectedEpoch) === false)) {

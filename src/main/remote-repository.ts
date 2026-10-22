@@ -1,5 +1,6 @@
 import { randomUUID as nodeRandomUUID } from 'node:crypto'
 import { startSave } from '../shared/save-logic'
+import { assertRemoteServerUrl } from './remote-endpoint'
 import type { SaveData } from '../shared/save'
 import type { OrderedEvent } from '../shared/pet-runtime/events'
 import {
@@ -13,6 +14,7 @@ import {
 import { isOwnerCommand, parsePetCommand } from '../shared/sync/command-validation'
 import { parseClientMessage, parseServerMessage } from '../shared/sync/protocol-validation'
 import {
+  COMMAND_ERROR_CODES,
   PROTOCOL_VERSION,
   type ClientHello,
   type CommandErrorCode,
@@ -21,6 +23,7 @@ import {
   type CommandResult,
   type CommandStatusRequest,
   type DeviceRole,
+  type ErrorMessage,
   type PetCommand,
   type ResyncRequest,
   type WireAuthority,
@@ -123,6 +126,16 @@ interface PendingExport {
   timer: ReturnType<typeof setTimeout> | null
 }
 
+interface StartWaiter {
+  resolve: () => void
+  reject: (error: Error) => void
+}
+
+interface PendingCommandRefresh {
+  pending: PendingCommand
+  result: CommandResult
+}
+
 interface ProjectionStateSource {
   revision: number
   eventSeq: number
@@ -147,6 +160,12 @@ function clone<T>(value: T): T {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+const COMMAND_ERROR_CODE_SET = new Set<string>(COMMAND_ERROR_CODES)
+
+function commandErrorCodeOf(code: string): CommandErrorCode {
+  return COMMAND_ERROR_CODE_SET.has(code) ? code as CommandErrorCode : 'internal'
 }
 
 function toCommandResult(frame: WireCommandResult): CommandResult {
@@ -221,9 +240,12 @@ export class RemoteRepository {
   private reconnectAttempt = 0
   private reconnectSleeping = false
   private reconnectBlocked = false
-  private startWaiters: Array<() => void> = []
+  private startWaiters: StartWaiter[] = []
 
   private pendingCommand: PendingCommand | null = null
+  private pendingCommandRefresh: PendingCommandRefresh | null = null
+  private projectionRefreshPending = false
+  private authorityResetPending = false
   private reconciledOnConnection = false
   private readonly pendingExports = new Map<string, PendingExport>()
 
@@ -249,7 +271,7 @@ export class RemoteRepository {
     if (typeof options.appVersion !== 'string' || options.appVersion.length === 0) {
       throw new Error('RemoteRepository appVersion is required')
     }
-    this.serverUrl = options.serverUrl
+    this.serverUrl = assertRemoteServerUrl(options.serverUrl)
     this.appVersion = options.appVersion
     this.tokenStore = options.tokenStore
     this.transport = options.transport
@@ -306,7 +328,7 @@ export class RemoteRepository {
       ...(this.lastError === undefined ? {} : { lastError: this.lastError, error: this.lastError }),
       state: this.state,
       role: this.role,
-      readOnly: authority.state !== 'active',
+      readOnly: authority.state !== 'active' || this.projection === null || this.projectionRefreshPending || this.state !== 'online',
       catchingUp: this.state === 'catching_up',
       ...(this.lastCommandSeq === undefined ? {} : { commandSeq: this.lastCommandSeq }),
       ...(this.notice === undefined ? {} : { notice: this.notice }),
@@ -352,12 +374,15 @@ export class RemoteRepository {
       }
     }
     if (this.projection !== null && this.state === 'online') return this.getProjection()
+    if (this.reconnectBlocked) {
+      throw new Error(this.lastError ?? 'remote connection cannot be restarted')
+    }
     if (this.token === null && this.pair === undefined) {
       this.lastError = 'a device token or pairing code is required before connecting'
       this.setState('error')
       throw new Error(this.lastError)
     }
-    const waiter = new Promise<void>(resolve => { this.startWaiters.push(resolve) })
+    const waiter = new Promise<void>((resolve, reject) => { this.startWaiters.push({ resolve, reject }) })
     if (this.connection === null && this.state !== 'catching_up') {
       this.setState('connecting')
       this.connect()
@@ -378,6 +403,8 @@ export class RemoteRepository {
     } catch {
       // closing is best effort
     }
+    this.pendingCommandRefresh = null
+    this.projectionRefreshPending = false
     if (this.pendingCommand !== null) {
       const pending = this.pendingCommand
       this.pendingCommand = null
@@ -417,6 +444,9 @@ export class RemoteRepository {
     const parsed = parsePetCommand(command)
     if (parsed.ok === false) throw new Error(parsed.error.code + ': ' + parsed.error.message)
     const opId = options.opId ?? this.newUuid()
+    if (this.projectionRefreshPending) {
+      return this.rejected(command, opId, 'server_catching_up', 'the repository is waiting for the refreshed projection') as CommandResult<K>
+    }
     if (this.pendingCommand !== null) {
       return this.rejected(command, opId, 'busy', 'another command is already in flight') as CommandResult<K>
     }
@@ -531,7 +561,13 @@ export class RemoteRepository {
   private resolveStartWaiters(): void {
     const waiters = this.startWaiters
     this.startWaiters = []
-    for (const resolve of waiters) resolve()
+    for (const waiter of waiters) waiter.resolve()
+  }
+
+  private rejectStartWaiters(error: Error): void {
+    const waiters = this.startWaiters
+    this.startWaiters = []
+    for (const waiter of waiters) waiter.reject(error)
   }
 
   private queuePersistence(write: () => Promise<void>): void {
@@ -603,7 +639,8 @@ export class RemoteRepository {
 
   private handleOpen(): void {
     if (this.stopped) return
-    this.reconnectAttempt = 0
+    // A successful socket open only proves the transport is reachable. Keep the
+    // reconnect attempt counter until the server has accepted the hello.
     this.reconnectSleeping = false
     this.reconciledOnConnection = false
     this.snapshotSeen = false
@@ -629,7 +666,7 @@ export class RemoteRepository {
       this.disconnect()
       return
     }
-    const cached = this.projection
+    const cached = this.authorityResetPending ? null : this.projection
     const hello: ClientHello = {
       t: 'hello',
       v: PROTOCOL_VERSION,
@@ -637,8 +674,8 @@ export class RemoteRepository {
       appVersion: this.appVersion,
       ...(this.config?.petId === undefined || this.config.petId.length === 0 ? {} : { petId: this.config.petId }),
       ...(this.config?.deviceId === undefined || this.config.deviceId.length === 0 ? {} : { deviceId: this.config.deviceId }),
-      ...(this.cursor.revision > 0 ? { lastRevision: this.cursor.revision } : {}),
-      ...(this.cursor.eventSeq > 0 ? { lastEventSeq: this.cursor.eventSeq } : {}),
+      ...(this.authorityResetPending || this.cursor.revision === 0 ? {} : { lastRevision: this.cursor.revision }),
+      ...(this.authorityResetPending || this.cursor.eventSeq === 0 ? {} : { lastEventSeq: this.cursor.eventSeq }),
       ...(cached === null ? {} : {
         cachedAuthority: {
           authorityId: cached.authority.authorityId,
@@ -724,7 +761,7 @@ export class RemoteRepository {
         this.handleAuthorityResetRequired(frame)
         break
       case 'error':
-        this.handleError(frame.code, frame.message)
+        this.handleError(frame)
         break
       case 'pong':
         break
@@ -736,10 +773,13 @@ export class RemoteRepository {
   private handleWelcome(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'welcome' }>): void {
     if (frame.protocolVersion !== PROTOCOL_VERSION) {
       this.lastError = 'unsupported server protocol version ' + String(frame.protocolVersion)
+      this.reconnectBlocked = true
       this.setState('error')
+      this.rejectStartWaiters(new Error(this.lastError))
       this.disconnect()
       return
     }
+    this.reconnectAttempt = 0
     this.role = frame.deviceRole
     this.authority = frame.authority
     this.timeZone = frame.timeZone
@@ -766,6 +806,15 @@ export class RemoteRepository {
     this.expectedSnapshot = frame.delivery === 'snapshot' || frame.delivery === 'replay+snapshot'
     this.expectedReplay = frame.delivery === 'replay' || frame.delivery === 'replay+snapshot'
     if (frame.delivery === 'none' || frame.delivery === 'replay') {
+      if (this.authorityResetPending) {
+        // Authentication succeeded but the server planned a cached/replay-only
+        // delivery. A reset lineage must still recover from a full snapshot.
+        this.setState('catching_up')
+        this.expectedSnapshot = false
+        this.expectedReplay = false
+        this.requestResyncInternal(true)
+        return
+      }
       this.setState('online')
       this.expectedSnapshot = false
       this.resolveStartWaiters()
@@ -835,6 +884,7 @@ export class RemoteRepository {
   private handleSnapshot(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'snapshot' }>): void {
     this.snapshotSeen = true
     const kind = this.syncMode
+    const recoveredAuthorityReset = this.authorityResetPending
     const sameState = this.projection !== null
       && frame.revision === this.cursor.revision
       && frame.eventSeq === this.cursor.eventSeq
@@ -843,8 +893,11 @@ export class RemoteRepository {
       this.timeZone = frame.timeZone
       this.advanceWhileEmpty = frame.advanceWhileEmpty
       this.gameTimeMs = frame.gameTimeMs
+      this.authorityResetPending = false
+      if (recoveredAuthorityReset) this.notice = undefined
       this.persistConfig()
       this.emitStatus()
+      if (this.projectionRefreshPending) this.finishProjectionRefresh(false)
       return
     }
     if (kind === 'initial' && this.projection !== null && frame.revision < this.cursor.revision) {
@@ -857,12 +910,14 @@ export class RemoteRepository {
     if (kind === 'initial') {
       this.emitProjection(projection, replayEvents)
     } else {
-      this.notice = undefined
       this.emitResync(projection, replayEvents)
     }
+    if (kind !== 'initial' || recoveredAuthorityReset) this.notice = undefined
     this.syncMode = 'initial'
     this.expectedSnapshot = false
+    this.authorityResetPending = false
     this.emitStatus()
+    if (this.projectionRefreshPending) this.finishProjectionRefresh(false)
   }
 
   private handleReplay(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'replay' }>): void {
@@ -878,13 +933,18 @@ export class RemoteRepository {
   }
 
   private handleReady(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'ready' }>): void {
+    this.reconnectAttempt = 0
     this.timeZone = frame.timeZone
     this.advanceWhileEmpty = frame.advanceWhileEmpty
     this.gameTimeMs = frame.gameTimeMs
     this.authority = frame.authority
-    if (this.expectedSnapshot && this.snapshotSeen === false && frame.catchingUp === false) {
+    if (
+      (this.expectedSnapshot || this.authorityResetPending)
+      && this.snapshotSeen === false
+      && frame.catchingUp === false
+    ) {
       this.lastError = 'server sent ready without the required full snapshot'
-      this.requestResyncInternal(false)
+      this.requestResyncInternal(this.authorityResetPending)
       return
     }
     if (this.expectedReplay && this.snapshotSeen === false) {
@@ -921,12 +981,17 @@ export class RemoteRepository {
     this.setState('online')
     this.resolveStartWaiters()
     this.persistConfig()
-    this.flushReconciliation()
+    if (this.projectionRefreshPending) {
+      this.finishProjectionRefresh(true)
+    } else {
+      this.flushReconciliation()
+    }
   }
 
   private handleProjection(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'projection' }>): void {
     if (this.pendingResync) return
     if (this.projection !== null && frame.revision === this.cursor.revision && frame.eventSeq === this.cursor.eventSeq) {
+      if (this.projectionRefreshPending) this.finishProjectionRefresh(true)
       return
     }
     const cursor = this.projectionCursor()
@@ -939,6 +1004,7 @@ export class RemoteRepository {
     const projection = this.acceptState(this.projectionStateSource(frame))
     this.emitProjection(projection, frame.events)
     this.emitStatus()
+    if (this.projectionRefreshPending) this.finishProjectionRefresh(true)
   }
 
   private projectionCursor(): ProjectionCursor | null {
@@ -954,16 +1020,115 @@ export class RemoteRepository {
     }
   }
 
+  private settlePendingCommand(pending: PendingCommand, result: CommandResult): void {
+    if (this.pendingCommand === pending) this.pendingCommand = null
+    this.emitCommandResult(result)
+    pending.settle()
+    pending.resolve(result)
+    this.emitStatus()
+  }
+
+  private commandResultNeedsRefresh(result: CommandResult): boolean {
+    return result.status !== 'applied' && result.error?.refreshProjection === true
+  }
+
+  private rejectedFromError(
+    pending: PendingCommand,
+    frame: ErrorMessage,
+  ): CommandResult {
+    return {
+      status: 'rejected',
+      commandType: pending.command.type,
+      opId: pending.opId,
+      commandSeq: this.lastCommandSeq ?? 0,
+      revision: frame.revision ?? this.cursor.revision,
+      eventSeq: this.cursor.eventSeq,
+      error: {
+        code: commandErrorCodeOf(frame.code),
+        message: frame.message,
+        refreshProjection: frame.refreshProjection,
+      },
+    } as CommandResult
+  }
+
+  private rejectMatchingExport(frame: ErrorMessage): boolean {
+    if (frame.requestId === undefined) return false
+    const pending = this.pendingExports.get(frame.requestId)
+    if (pending === undefined) return false
+    this.pendingExports.delete(frame.requestId)
+    if (pending.timer !== null) clearTimeout(pending.timer)
+    pending.reject(new Error(frame.code + ': ' + frame.message))
+    return true
+  }
+
+  /**
+   * Keep a command/refresh gate closed until the server has delivered the
+   * projection (or full snapshot + ready) requested by refreshProjection.
+   */
+  private beginProjectionRefresh(
+    pending: PendingCommand | null,
+    result: CommandResult | null,
+    resync: 'none' | 'cache' | 'authority',
+  ): void {
+    if (pending !== null && result !== null) {
+      this.pendingCommandRefresh = { pending, result }
+    }
+    this.projectionRefreshPending = true
+    this.setState('catching_up')
+    if (resync === 'authority') this.requestResyncInternal(true)
+    else if (resync === 'cache') this.requestResyncInternal(false)
+    this.emitStatus()
+  }
+
+  private finishProjectionRefresh(onlineAfter: boolean): void {
+    this.projectionRefreshPending = false
+    const refresh = this.pendingCommandRefresh
+    this.pendingCommandRefresh = null
+    if (refresh !== null && this.pendingCommand === refresh.pending) {
+      this.pendingCommand = null
+      this.emitCommandResult(refresh.result)
+      refresh.pending.settle()
+      refresh.pending.resolve(refresh.result)
+    }
+    if (onlineAfter && this.stopped === false) {
+      this.setState('online')
+      this.resolveStartWaiters()
+    } else {
+      this.emitStatus()
+    }
+  }
+
+  private prepareAuthorityReset(authority?: WireAuthority): void {
+    this.authorityResetPending = true
+    this.notice = 'authority_reset_required'
+    if (authority !== undefined) this.authority = authority
+    this.projection = null
+    this.cursor = { revision: 0, eventSeq: 0 }
+    this.replayEvents = []
+    this.pendingResync = false
+    this.setState('catching_up')
+  }
+
   private handleCommandResult(frame: WireCommandResult): void {
     const result = toCommandResult(frame)
     this.lastCommandSeq = frame.commandSeq
     const pending = this.pendingCommand
-    if (pending !== null && pending.opId === frame.opId) {
-      this.pendingCommand = null
-      this.emitCommandResult(result)
-      pending.settle()
-      pending.resolve(result)
-      this.emitStatus()
+    if (
+      pending !== null
+      && pending.opId === frame.opId
+      && pending.requestId === frame.requestId
+    ) {
+      if (this.commandResultNeedsRefresh(result)) {
+        this.beginProjectionRefresh(pending, result, 'none')
+        return
+      }
+      this.settlePendingCommand(pending, result)
+      return
+    }
+    // Preserve the refresh barrier even when the late/duplicate result no longer
+    // has a pending waiter: no new command may race the authoritative projection.
+    if (this.commandResultNeedsRefresh(result)) {
+      this.beginProjectionRefresh(null, null, 'none')
       return
     }
     this.emitCommandResult(result)
@@ -975,11 +1140,7 @@ export class RemoteRepository {
     if (pending === null || pending.opId !== frame.opId) return
     if (frame.status === 'not_applied') {
       const result = this.rejected(pending.command as Extract<PetCommand, { type: CommandKey }>, pending.opId, 'not_available', 'the server did not apply the command; retry with a fresh opId')
-      this.pendingCommand = null
-      this.emitCommandResult(result)
-      pending.settle()
-      pending.resolve(result)
-      this.emitStatus()
+      this.settlePendingCommand(pending, result)
       return
     }
     const source = frame.result ?? {
@@ -994,11 +1155,11 @@ export class RemoteRepository {
       eventSeq: this.cursor.eventSeq,
     }
     const result = toCommandResult(source)
-    this.pendingCommand = null
-    this.emitCommandResult(result)
-    pending.settle()
-    pending.resolve(result)
-    this.emitStatus()
+    if (this.commandResultNeedsRefresh(result)) {
+      this.beginProjectionRefresh(pending, result, 'cache')
+      return
+    }
+    this.settlePendingCommand(pending, result)
   }
 
   private handlePortableBundle(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'portableBundle' }>): void {
@@ -1010,40 +1171,99 @@ export class RemoteRepository {
   }
 
   private handleAuthorityResetRequired(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'authorityResetRequired' }>): void {
-    this.notice = 'authority_reset_required'
-    this.authority = {
+    const authority: WireAuthority = {
       owner: frame.authority.owner,
       authorityId: frame.authority.authorityId,
       restoreGeneration: frame.authority.restoreGeneration,
       epoch: frame.authority.epoch,
       state: 'active',
     }
-    this.projection = null
-    this.cursor = { revision: 0, eventSeq: 0 }
-    this.replayEvents = []
-    this.pendingResync = false
-    this.setState('catching_up')
+    this.prepareAuthorityReset(authority)
     this.requestResyncInternal(true)
   }
 
-  private handleError(code: string, message: string): void {
+  private terminalFailure(message: string, notice?: string): void {
+    this.reconnectBlocked = true
     this.lastError = message
-    if (code === 'auth_failed' || code === 'protocol_mismatch' || code === 'unauthorized') {
-      this.reconnectBlocked = true
-      this.setState('error')
+    if (notice !== undefined) this.notice = notice
+    this.rejectPendingWork(new Error(message))
+    this.setState('error')
+    this.rejectStartWaiters(new Error(message))
+  }
+
+  private rejectPendingWork(error: Error): void {
+    this.pendingCommandRefresh = null
+    this.projectionRefreshPending = false
+    if (this.pendingCommand !== null) {
+      const pending = this.pendingCommand
+      this.pendingCommand = null
+      pending.settle()
+      pending.reject(error)
+    }
+    for (const pending of this.pendingExports.values()) {
+      if (pending.timer !== null) clearTimeout(pending.timer)
+      pending.reject(error)
+    }
+    this.pendingExports.clear()
+  }
+
+  private handleError(frame: ErrorMessage): void {
+    this.lastError = frame.message
+    const pending = this.pendingCommand
+    const commandMatched = pending !== null
+      && frame.requestId !== undefined
+      && pending.requestId === frame.requestId
+    const exportMatched = this.rejectMatchingExport(frame)
+
+    if (frame.code === 'authority_reset_required') this.prepareAuthorityReset()
+
+    if (commandMatched) {
+      const result = this.rejectedFromError(pending, frame)
+      if (frame.refreshProjection) {
+        this.beginProjectionRefresh(
+          pending,
+          result,
+          frame.code === 'authority_reset_required' ? 'authority' : 'none',
+        )
+      } else {
+        this.settlePendingCommand(pending, result)
+        if (frame.code === 'authority_reset_required') this.requestResyncInternal(true)
+      }
+      if (frame.code !== 'authority_reset_required' && (frame.code === 'auth_failed' || frame.code === 'protocol_mismatch')) {
+        this.terminalFailure(frame.message)
+        this.disconnect()
+      }
+      return
+    }
+
+    if (frame.refreshProjection) {
+      this.beginProjectionRefresh(
+        null,
+        null,
+        frame.code === 'authority_reset_required' ? 'authority' : 'none',
+      )
+      return
+    }
+
+    if (
+      frame.code === 'auth_failed'
+      || frame.code === 'protocol_mismatch'
+      || (frame.code === 'unauthorized' && exportMatched === false)
+    ) {
+      this.terminalFailure(frame.message)
       this.disconnect()
       return
     }
-    if (code === 'server_catching_up') {
+    if (frame.code === 'server_catching_up') {
       this.setState('catching_up')
       return
     }
-    if (code === 'authority_reset_required') {
-      this.notice = 'authority_reset_required'
-      this.projection = null
-      this.cursor = { revision: 0, eventSeq: 0 }
-      this.pendingResync = false
+    if (frame.code === 'authority_reset_required') {
       this.requestResyncInternal(true)
+      return
+    }
+    if (exportMatched) {
+      this.emitStatus()
       return
     }
     this.emitStatus()
@@ -1134,12 +1354,35 @@ export class RemoteRepository {
   private handleClose(info: RemoteTransportCloseInfo): void {
     this.connection = null
     if (this.stopped) return
-    if (info.code === 4002) {
-      this.reconnectBlocked = true
-      this.notice = 'device_revoked'
-      this.lastError = info.reason.length > 0 ? info.reason : 'the server closed this device session'
+    if (this.reconnectBlocked) {
       this.setState('error')
       return
+    }
+    const closeReason = typeof info.reason === 'string' ? info.reason : ''
+    const reason = closeReason.trim().toLowerCase()
+    if (info.code === 4000 || info.code === 4001) {
+      // Auth/protocol mismatches happen before welcome and are permanent for
+      // this start attempt. Never retry them in a tight loop.
+      const message = closeReason.length > 0
+        ? closeReason
+        : info.code === 4000
+          ? 'auth_failed'
+          : 'protocol_mismatch'
+      this.terminalFailure(message)
+      return
+    }
+    if (info.code === 4002 && reason === 'revoked') {
+      this.terminalFailure(
+        closeReason.length > 0 ? closeReason : 'the server revoked this device session',
+        'device_revoked',
+      )
+      return
+    }
+    if (info.code === 4002 && (reason === 'authority_reset_required' || reason === 'superseded')) {
+      // The server sends authorityResetRequired and then closes with one of
+      // these reasons. The reset intent must survive the socket so the next
+      // hello omits cachedAuthority and receives a full snapshot.
+      this.prepareAuthorityReset()
     }
     this.setState('offline')
     this.scheduleReconnect()
