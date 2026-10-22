@@ -1,0 +1,223 @@
+{
+  "startedAt": "2026-10-22T20:48:53.879Z",
+  "platform": "darwin",
+  "arch": "arm64",
+  "node": "v22.19.0",
+  "electron": "/Users/ccreater/Desktop/work/qqpet/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+  "steps": [
+    {
+      "name": "compile standalone server and Electron main harness",
+      "status": "pass",
+      "durationMs": 258,
+      "detail": {
+        "serverEntry": "/Users/ccreater/Desktop/work/qqpet/server/dist/server/src/index.js",
+        "harnessEntry": "/Users/ccreater/Desktop/work/qqpet/out/e2e/electron-harness.mjs"
+      }
+    },
+    {
+      "name": "initialize temporary SQLite WAL server and mint real pairing codes",
+      "status": "pass",
+      "durationMs": 150,
+      "detail": {
+        "dbPath": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/qqpet.sqlite",
+        "pairingExpiresAtMs": 1792702734216,
+        "authorityId": "712c6e7a-3ec7-45d9-849a-b5b234dc292e"
+      }
+    },
+    {
+      "name": "start real standalone server and verify WAL + synchronous=FULL health",
+      "status": "pass",
+      "durationMs": 122,
+      "detail": {
+        "journalMode": "wal",
+        "synchronous": "full",
+        "authorityId": "712c6e7a-3ec7-45d9-849a-b5b234dc292e",
+        "revision": 0,
+        "gameTimeMs": 1792702134213
+      }
+    },
+    {
+      "name": "launch two real Electron processes with distinct userData and pair owner/player",
+      "status": "pass",
+      "durationMs": 504,
+      "detail": {
+        "ownerPid": 93020,
+        "playerPid": 93022,
+        "ownerDeviceId": "0c24dba2-f1dd-406c-8668-83778c33b1a3",
+        "playerDeviceId": "f9fa6090-ecb0-4801-8c6c-0641e0429b28",
+        "ownerUserData": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/electron-owner",
+        "playerUserData": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/electron-player"
+      }
+    },
+    {
+      "name": "first-run adopt on empty server and two-client convergence",
+      "status": "pass",
+      "durationMs": 59,
+      "detail": {
+        "revision": 1,
+        "eventSeq": 2,
+        "hash": "7918e4dc718a31d0f56148a5e284d8cbc373d999894cfca41520f8fc1facf800",
+        "name": "宠宝~"
+      }
+    },
+    {
+      "name": "feed on instance A updates inventory/task and reaches instance B within 3s",
+      "status": "pass",
+      "durationMs": 85,
+      "detail": {
+        "revision": 3,
+        "eventSeq": 6,
+        "hash": "e4e1ff444c081f1040d8f49f49c4ef55b20b36b71641e69c123df69ea93a87cd",
+        "eatTaskBefore": 0,
+        "eatTaskAfter": 1,
+        "foodBefore": 5,
+        "foodAfter": 4,
+        "playerLatencyMs": 29
+      }
+    },
+    {
+      "name": "duplicate opId is idempotent on the real server",
+      "status": "pass",
+      "durationMs": 159,
+      "detail": {
+        "opId": "c12-duplicate-op",
+        "originalStatus": "applied",
+        "revision": 4,
+        "commandSeq": 4,
+        "foodCount": 5
+      }
+    },
+    {
+      "name": "lost command result reconciles via commandStatus after reconnect without resend",
+      "status": "pass",
+      "durationMs": 55,
+      "detail": {
+        "opId": "c12-lost-result",
+        "status": "applied",
+        "revision": 5,
+        "commandSeq": 5,
+        "growthBefore": 1,
+        "growthAfter": 12,
+        "commandFramesForOp": 1,
+        "commandStatusReconciled": true
+      }
+    },
+    {
+      "name": "revision gap triggers resync and full snapshot convergence",
+      "status": "pass",
+      "durationMs": 57,
+      "detail": {
+        "droppedProjectionRevision": 6,
+        "nextCommandRevision": 7,
+        "resyncRequests": 1,
+        "snapshotsReceived": 2,
+        "convergedRevision": 7,
+        "hash": "d86b3c6f0196f5c49d4b4d44c76db6785a25443e17d1ab4bdfdce9c2ccd60ea2"
+      }
+    },
+    {
+      "name": "device revoke closes the player Electron connection and preserves owner projection",
+      "status": "pass",
+      "durationMs": 568,
+      "detail": {
+        "revokedDeviceId": "f9fa6090-ecb0-4801-8c6c-0641e0429b28",
+        "playerState": "error",
+        "playerNotice": "device_revoked",
+        "playerProjectionPresent": false,
+        "playerCachePresent": false,
+        "ownerStillOnline": "online",
+        "ownerProjectionHashUnchanged": true
+      }
+    },
+    {
+      "name": "authority detach and resume recover to a full authoritative snapshot",
+      "status": "pass",
+      "durationMs": 718,
+      "detail": {
+        "archivedEpoch": 0,
+        "resumedEpoch": 2,
+        "authorityState": "active",
+        "snapshotHashPreserved": true,
+        "snapshotsReceived": 5,
+        "healthAuthorityEpoch": 2
+      }
+    },
+    {
+      "name": "create consistent online backup for later restore/authority-reset proof",
+      "status": "pass",
+      "durationMs": 71,
+      "detail": {
+        "backupPath": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/c12-pre-restart.sqlite",
+        "backupBytes": 139264,
+        "revision": 8,
+        "eventSeq": 10,
+        "gameTimeMs": 1792702134213,
+        "authorityId": "712c6e7a-3ec7-45d9-849a-b5b234dc292e",
+        "authorityEpoch": 2,
+        "restoreGeneration": 0
+      }
+    },
+    {
+      "name": "server restart catch-up preserves state and advances game time",
+      "status": "pass",
+      "durationMs": 62414,
+      "detail": {
+        "downtimeMs": 62000,
+        "revisionBefore": 8,
+        "revisionAfter": 9,
+        "gameTimeBefore": 1792702134213,
+        "gameTimeAfter": 1792702194213,
+        "gameTimeAdvancedMs": 60000,
+        "authorityIdPreserved": true,
+        "name": "宠宝~"
+      }
+    },
+    {
+      "name": "authority_reset_required after operator restore recovers to a full snapshot",
+      "status": "pass",
+      "durationMs": 429,
+      "detail": {
+        "previousAuthorityId": "712c6e7a-3ec7-45d9-849a-b5b234dc292e",
+        "previousRestoreGeneration": 0,
+        "restoredAuthorityId": "945349a1-cb04-4a2d-be89-4f1a77344fa8",
+        "restoreGeneration": 1,
+        "authorityResetFrames": 1,
+        "snapshotsReceived": 2,
+        "snapshotRevision": 9,
+        "snapshotEventSeq": 11,
+        "snapshotHash": "3775f7e97ef34e8a859fddafe97d8ed20e3d7a68a86db040c0634573727d557e",
+        "recoveredName": "宠宝~"
+      }
+    },
+    {
+      "name": "projection/log secret and device-local field hygiene",
+      "status": "pass",
+      "durationMs": 1,
+      "detail": {
+        "canonicalProjectionForbiddenFieldsAbsent": true,
+        "deviceIdAbsentFromCanonicalProjection": true,
+        "tokensAndPairingCodesAbsentFromServerLog": true
+      }
+    }
+  ],
+  "evidence": {
+    "database": {
+      "path": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/qqpet.sqlite",
+      "journalMode": "wal",
+      "synchronous": "full",
+      "backupPath": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/c12-pre-restart.sqlite",
+      "restoreGenerationFile": "/var/folders/yz/qns_ln856bbd1ffvz1q8sslh0000gn/T/qqpet-c12-e2e-AoWm32/restore-generation.txt"
+    },
+    "twoProcesses": true,
+    "realWebSocket": true,
+    "realStandaloneServer": true,
+    "guiCoverage": false
+  },
+  "residualGap": [
+    "The Electron harness has no BrowserWindow or renderer. It exercises the real production RemoteRepository, real WebSocket transport, real Electron main-process boundary and real standalone server, but not renderer/GUI automation.",
+    "Two separate Electron OS processes with distinct QQPET_USER_DATA directories are used; full desktop shell startup, preload IPC and visual projection rendering are not covered by this automated test."
+  ],
+  "finishedAt": "2026-10-22T20:49:59.534Z",
+  "result": "pass",
+  "serverLog": "{\"ts\":\"2026-10-22T20:49:59.306Z\",\"level\":\"info\",\"event\":\"server.started\",\"bind\":\"127.0.0.1\",\"port\":51697,\"wsPath\":\"/v1/sync\"}\n(node:96603) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
+}
