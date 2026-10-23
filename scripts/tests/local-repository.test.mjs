@@ -362,6 +362,26 @@ test('detach freezes epoch and server-detach import validates authority then rea
   assert.equal(repo.getDocument().bundle.engine.sessionCoverage.length, importedDoc.bundle.engine.sessionCoverage.length)
 })
 
+test('portable import rejects farmland beyond the canonical plot limit without mutating authority', async () => {
+  const dir = tempDir()
+  writeJson(join(dir, 'legacy.json'), fixtures.save)
+  const clock = { value: WALL_TIME_MS }
+  const repo = makeRepo(repoOptions(dir, clock))
+  await repo.load()
+  const before = repo.getDocument()
+  const bundle = repo.exportPortableBundle()
+  const farm = JSON.parse(bundle.shared.saveJsonData.farm)
+  farm.farmland = Array.from({ length: 19 }, () => ({ farmland: 'Wasteland' }))
+  bundle.shared.saveJsonData.farm = JSON.stringify(farm)
+  bundle.engine.save = JSON.parse(JSON.stringify(bundle.shared))
+  const result = await repo.importPortableBundle(bundle, { opId: 'op-oversized-farm' })
+  assert.equal(result, null)
+  assert.equal(repo.getStatus().state, 'ready')
+  assert.equal(repo.getDocument().revision, before.revision)
+  assert.equal(repo.getDocument().bundle.shared.saveJsonData.farm, before.bundle.shared.saveJsonData.farm)
+  await repo.stop()
+})
+
 test('failed import stays read-only and rollbackDetach restores the frozen pre-detach authority', async () => {
   const dir = tempDir()
   writeJson(join(dir, 'legacy.json'), fixtures.save)

@@ -276,6 +276,7 @@ app.whenReady().then(async () => {
   const appliedSettings = { ...getSave().settings }
   const viewHost: { onView(listener: (view: SaveData) => void): () => void } | null = storage ?? rendererRuntime
   viewHost?.onView((view) => {
+    setSaveView(view)
     if (win.isDestroyed()) return
     const next = view.settings
     if (next.zoom !== appliedSettings.zoom) win.webContents.setZoomFactor(next.zoom)

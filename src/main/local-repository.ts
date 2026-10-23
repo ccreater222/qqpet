@@ -1,8 +1,9 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { atomicWrite } from './atomic-write'
 import { startSave } from '../shared/save-logic'
+import { STORAGE_CONFIG_FILE, parseStorageConfig } from '../shared/storage'
 import { sessionActivityForInterval } from '../shared/pet-runtime/coverage'
 import type { CoverageReopen, CoverageSurvivor, EngineState, SessionCoverageInterval } from '../shared/pet-runtime/types'
 import { orderedDomainEvent, type DomainEvent } from '../shared/pet-runtime/events'
@@ -21,7 +22,7 @@ import {
 } from '../shared/sync/data-boundary'
 import {
   assertLocalPetDocumentV2, migrateLegacyLocalPetDocumentV2, migrateLegacySaveDataToPortableBundle,
-  migratePortablePetBundle, LOCAL_DOCUMENT_FORMAT, LOCAL_DOCUMENT_SCHEMA_VERSION,
+  migratePortablePetBundle, validateRemoteProjectionCacheV2, LOCAL_DOCUMENT_FORMAT, LOCAL_DOCUMENT_SCHEMA_VERSION,
   type AuthorityStamp, type LocalEventHistoryEntry, type LocalPetDocumentV2, type PortablePetBundleV1,
 } from '../shared/sync/portable'
 import type { StorageBackupStatus, StorageMigrationStatus } from '../shared/storage'
@@ -146,23 +147,49 @@ function cloneProjection(value: LocalPetProjection): LocalPetProjection { return
 export interface LocalDeviceOverlayPreviewOptions {
   documentPath: string
   legacySavePath?: string
+  storageConfigPath?: string
+}
+
+function cloneDeviceOverlay(device: DeviceLocalOverlay): DeviceLocalOverlay {
+  return JSON.parse(JSON.stringify(device)) as DeviceLocalOverlay
+}
+
+function storageModeForStartup(path: string): 'local' | 'server' {
+  if (existsSync(path) === false) return 'local'
+  try {
+    return parseStorageConfig(JSON.parse(readFileSync(path, 'utf8')) as unknown).mode
+  } catch {
+    return 'local'
+  }
 }
 
 /**
  * C7 startup: synchronously read only the device-local overlay so the first
  * window and its request headers use the persisted display/HD settings before
- * the asynchronous repository load finishes. Falls back to a legacy save the
- * repository would migrate on its first start. Never mutates anything.
+ * the asynchronous repository load finishes. In server mode save.json is the
+ * RemoteProjectionCacheV2, not a legacy local save, so its validated device
+ * overlay takes precedence over the archived local document. Local mode falls
+ * back to a legacy save the repository would migrate on its first start. Never
+ * mutates anything.
  */
 export function readLocalDeviceOverlayPreview(options: LocalDeviceOverlayPreviewOptions): DeviceLocalOverlay | null {
+  const directory = dirname(options.documentPath)
+  const legacySavePath = options.legacySavePath ?? join(directory, 'save.json')
+  const storageConfigPath = options.storageConfigPath ?? join(directory, STORAGE_CONFIG_FILE)
   try {
+    if (storageModeForStartup(storageConfigPath) === 'server' && existsSync(legacySavePath)) {
+      const cache = JSON.parse(readFileSync(legacySavePath, 'utf8')) as unknown
+      if (validateRemoteProjectionCacheV2(cache) && cache.authority.state !== 'reset') {
+        return cloneDeviceOverlay(cache.device)
+      }
+    }
     if (existsSync(options.documentPath)) {
       const parsed = JSON.parse(readFileSync(options.documentPath, 'utf8')) as unknown
       const loaded = normalizeLocalPetDocument(parsed)
-      return JSON.parse(JSON.stringify(loaded.document.device)) as DeviceLocalOverlay
+      return cloneDeviceOverlay(loaded.document.device)
     }
-    if (options.legacySavePath !== undefined && existsSync(options.legacySavePath)) {
-      const parsed = JSON.parse(readFileSync(options.legacySavePath, 'utf8')) as Record<string, unknown>
+    if (storageModeForStartup(storageConfigPath) === 'local' && existsSync(legacySavePath)) {
+      const parsed = JSON.parse(readFileSync(legacySavePath, 'utf8')) as Record<string, unknown>
       return toDeviceLocalOverlay(startSave(parsed), 'startup-preview')
     }
   } catch {

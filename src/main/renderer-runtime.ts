@@ -1,6 +1,6 @@
 import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { IPC } from '../shared/ipc'
 import type { SaveData, SavePatch } from '../shared/save'
 import type { OrderedEvent } from '../shared/pet-runtime/events'
@@ -31,7 +31,7 @@ import {
 } from '../shared/sync/data-boundary'
 import type { CommandKey, CommandResult, PetCommand } from '../shared/sync/protocol'
 import type { PortablePetBundleV1 } from '../shared/sync/portable'
-import type { StorageBackupStatus, StorageMigrationStatus } from '../shared/storage'
+import { STORAGE_CONFIG_FILE, type StorageBackupStatus, type StorageMigrationStatus } from '../shared/storage'
 import {
   createLocalRepository,
   readLocalDeviceOverlayPreview,
@@ -116,6 +116,7 @@ export class DesktopRendererRuntime {
     return readLocalDeviceOverlayPreview({
       documentPath: this.documentPath,
       legacySavePath: this.legacySavePath,
+      storageConfigPath: join(dirname(this.documentPath), STORAGE_CONFIG_FILE),
     })
   }
 

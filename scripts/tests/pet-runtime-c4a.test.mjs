@@ -459,6 +459,69 @@ test('fresh runtime farm can buy fertilizer then fertilize a growing plot', () =
   rejected(poor, 'farm.buyFertilizer', { fertilizerId: 'Fertilizer', quantity: 1 }, {}, 'insufficient_funds')
 })
 
+test('farm fertilizer packages normalize to base inventory and grant seven units', () => {
+  for (const [packageId, baseId, baseName] of [
+    ['FertilizerFastP', 'FertilizerFast', '快速化肥'],
+    ['FertilizerVeryFastP', 'FertilizerVeryFast', '急速化肥'],
+  ]) {
+    const state = baseState()
+    state.save.petInfo.yb = 20_000
+    const beforeYb = state.save.petInfo.yb
+    const fertilizer = FARM_FERTILIZERS.find(candidate => candidate.item === packageId)
+    assert.ok(fertilizer)
+    const bought = ok(state, 'farm.buyFertilizer', { fertilizerId: packageId, quantity: 2 })
+    assert.deepEqual(bought.result, { fertilizerId: baseId, quantity: 14, cost: fertilizer.price * 2 })
+    assert.equal(bought.state.save.petInfo.yb, beforeYb - fertilizer.price * 2)
+    const farm = blob(bought.state, 'farm')
+    assert.deepEqual(farm.burden, [{ name: baseName, Items: baseId, number: 14 }])
+    assert.equal(JSON.stringify(farm).includes(packageId), false)
+    assert.equal(bought.events[0].payload.fertilizerId, baseId)
+    assert.equal(bought.events[0].payload.quantity, 14)
+  }
+
+  // A package purchase merges into an existing base-fertilizer stack.
+  const baseBought = ok(baseState(), 'farm.buyFertilizer', { fertilizerId: 'FertilizerFast', quantity: 1 })
+  const merged = ok(baseBought.state, 'farm.buyFertilizer', { fertilizerId: 'FertilizerFastP', quantity: 1 })
+  assert.deepEqual(blob(merged.state, 'farm').burden, [{ name: '快速化肥', Items: 'FertilizerFast', number: 8 }])
+})
+
+test('farm package fertilizer op-id replay is idempotent', () => {
+  const petId = 'pet-farm-fertilizer-package'
+  const deviceId = 'device-farm-fertilizer-package'
+  const command = { type: 'farm.buyFertilizer', payload: { fertilizerId: 'FertilizerFastP', quantity: 2 } }
+  const initial = baseState()
+  initial.save.petInfo.yb = 20_000
+  const beforeYb = initial.save.petInfo.yb
+  const document = createPersistedRuntimeState(initial)
+  const first = executeCommandIdempotent(petId, deviceId, document, command, context(document.engine), 'op-fertilizer-package-1')
+  assert.equal(first.duplicate, false)
+  assert.equal(first.outcome.ok, true)
+  assert.deepEqual(first.outcome.result, { fertilizerId: 'FertilizerFast', quantity: 14, cost: 8000 })
+  assert.equal(first.document.engine.save.petInfo.yb, beforeYb - 8000)
+  const boughtFarm = blob(first.document.engine, 'farm')
+  assert.deepEqual(boughtFarm.burden, [{ name: '快速化肥', Items: 'FertilizerFast', number: 14 }])
+  assert.equal(JSON.stringify(boughtFarm).includes('FertilizerFastP'), false)
+
+  const replay = executeCommandIdempotent(petId, deviceId, first.document, command, context(first.document.engine), 'op-fertilizer-package-1')
+  assert.equal(replay.duplicate, true)
+  assert.equal(replay.outcome.ok, true)
+  assert.deepEqual(replay.outcome.result, { fertilizerId: 'FertilizerFast', quantity: 14, cost: 8000 })
+  assert.equal(replay.outcome.events.length, 0)
+  assert.equal(stableStringify(replay.document.engine), stableStringify(first.document.engine))
+})
+
+test('farm runtime bounds oversized farmland to the canonical plot limit', () => {
+  const state = baseState()
+  state.save.saveJsonData.farm = JSON.stringify({
+    farmland: Array.from({ length: 24 }, () => ({ farmland: 'Wasteland' })),
+  })
+  rejected(state, 'farm.reclaim', { plotIds: [18] }, {}, 'not_available')
+  const reclaimed = ok(state, 'farm.reclaim', { plotIds: [17] })
+  const farm = blob(reclaimed.state, 'farm')
+  assert.equal(farm.farmland.length, 18)
+  assert.equal(farm.farmland[17].farmland, 'FarmlandS')
+})
+
 test('farm reclaim validation is strict while duplicate ids are rejected by the handler', () => {
   assert.equal(validateCommandPayload('farm.reclaim', { plotIds: [6, 7] }), true)
   assert.deepEqual(parsePetCommand({ type: 'farm.reclaim', payload: { plotIds: [6, 7] } }), {
@@ -644,14 +707,19 @@ test('C4a fishing, farm and island content tables drift-check against renderer/S
   const fertilizerDurations = {}
   for (const match of fertilizerBlock.matchAll(/"([^"]+)":(\d+)/g)) fertilizerDurations[match[1]] = Number(match[2])
   const propsXml = readFileSync('resources/pet/qqfarm/com/MyFarm/data/xml/props.xml', 'utf8')
-  const fertilizerNames = {}
+  const fertilizerProps = {}
   for (const match of propsXml.matchAll(/<item\s+([^>]+)>/g)) {
     const row = attrs(match[1])
-    if (row.object && row.name) fertilizerNames[row.object] = row.name
+    if (row.object && row.name) fertilizerProps[row.object] = { name: row.name, price: Number(row.price) }
   }
-  const expectedFertilizers = Object.entries(fertilizerDurations).map(([item, duration]) => ({ item, name: fertilizerNames[item], duration }))
-  assert.deepEqual(FARM_FERTILIZERS.map(({ item, name, duration }) => ({ item, name, duration })), expectedFertilizers)
-  assert.ok(FARM_FERTILIZERS.every(({ price }) => Number.isSafeInteger(price) && price > 0))
+  const expectedFertilizers = Object.entries(fertilizerDurations).map(([item, duration]) => ({
+    item,
+    name: fertilizerProps[item].name,
+    duration,
+    price: fertilizerProps[item].price,
+  }))
+  assert.deepEqual(FARM_FERTILIZERS, expectedFertilizers)
+  assert.deepEqual(FARM_FERTILIZERS.map(({ price }) => price), [500, 800, 1000, 4000, 5000])
   assert.throws(() => assert.deepEqual(FARM_FERTILIZERS, [...expectedFertilizers, { item: 'FertilizerSynthetic', name: '合成化肥', duration: 123 }]), assert.AssertionError)
   assert.throws(() => assert.deepEqual([...FARM_FERTILIZERS, { item: 'RuntimeOnly', name: '仅运行时', duration: 1 }], expectedFertilizers), assert.AssertionError)
 })

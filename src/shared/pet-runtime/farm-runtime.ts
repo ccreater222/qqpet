@@ -1,5 +1,6 @@
 import type { CommandPayloadMap } from '../sync/protocol'
 import { FARM_CROPS, FARM_FERTILIZERS, FARM_SEEDS, type FarmCropDefinition, type FarmSeedDefinition } from './content/index'
+import { FARM_MAX_PLOTS } from './farm-limits'
 import { domainEvent, type DomainEvent } from './events'
 import type { HandlerContext, HandlerResult } from './handler-types'
 import { earnYb, payYb, readSharedBlob, reject, requireLivingPet, writeSharedBlob } from './runtime-helpers'
@@ -8,6 +9,7 @@ import type { EngineState, JsonObject, JsonValue } from './types'
 import type { RuntimeRng } from './runtime-helpers'
 
 const PEST_TIME = 14400
+const FERTILIZER_PACKAGE_UNITS = 7
 const PEST_LOSS = 2
 const CARE_EXP = 2
 const EXP_PER_RANK = 100
@@ -53,7 +55,7 @@ function freshFarm(): FarmState {
   return {
     house: 'house', kennel: 'kennel', fence: 'fence', experience: '1', rank: '01',
     burden: [], warehouse: [], weather: 'Sunny',
-    farmland: Array.from({ length: 18 }, (_, index) => ({ farmland: index < 6 ? 'FarmlandS' : 'Wasteland' })),
+    farmland: Array.from({ length: FARM_MAX_PLOTS }, (_, index) => ({ farmland: index < 6 ? 'FarmlandS' : 'Wasteland' })),
   }
 }
 
@@ -77,7 +79,7 @@ function readFarmFromState(state: EngineState): FarmState {
     ...parsed,
     burden: parsed.burden ?? [],
     warehouse: parsed.warehouse ?? [],
-    farmland: parsed.farmland ?? fresh.farmland,
+    farmland: Array.isArray(parsed.farmland) ? parsed.farmland.slice(0, FARM_MAX_PLOTS) : fresh.farmland,
   }
 }
 
@@ -158,6 +160,9 @@ function uniquePlots(plotIds: number[]): number[] {
 }
 
 function landAt(farm: FarmState, plotId: number): FarmLand {
+  if (Number.isSafeInteger(plotId) === false || plotId < 0 || plotId >= FARM_MAX_PLOTS) {
+    reject('not_available', 'farm plot does not exist')
+  }
   const land = farm.farmland[plotId]
   if (land === undefined) reject('not_available', 'farm plot does not exist')
   return land
@@ -354,14 +359,19 @@ export function farmBuyFertilizer(context: HandlerContext, payload: CommandPaylo
   const farm = requireFarmReady(context)
   const fertilizer = FARM_FERTILIZERS.find(item => item.item === payload.fertilizerId)
   if (fertilizer === undefined) reject('not_available', 'unknown farm fertilizer')
+  const baseItem = fertilizer.item.endsWith('P') ? fertilizer.item.slice(0, -1) : fertilizer.item
+  const baseFertilizer = FARM_FERTILIZERS.find(item => item.item === baseItem)
+  if (baseFertilizer === undefined) reject('not_available', 'unknown farm fertilizer')
+  const unitsPerPackage = baseItem === fertilizer.item ? 1 : FERTILIZER_PACKAGE_UNITS
+  const granted = unitsPerPackage * payload.quantity
   const cost = fertilizer.price * payload.quantity
   payYb(context.state.save, cost)
-  const entry = farm.burden.find(item => item.Items === payload.fertilizerId)
-  if (entry !== undefined) entry.number += payload.quantity
-  else farm.burden.push({ name: fertilizer.name, Items: fertilizer.item, number: payload.quantity })
+  const entry = farm.burden.find(item => item.Items === baseItem)
+  if (entry !== undefined) entry.number += granted
+  else farm.burden.push({ name: baseFertilizer.name, Items: baseItem, number: granted })
   return {
-    result: json({ fertilizerId: payload.fertilizerId, quantity: payload.quantity, cost }),
-    events: [farmChanged(context, farm, 'buyFertilizer', { fertilizerId: payload.fertilizerId, quantity: payload.quantity, cost })],
+    result: json({ fertilizerId: baseItem, quantity: granted, cost }),
+    events: [farmChanged(context, farm, 'buyFertilizer', { fertilizerId: baseItem, quantity: granted, cost })],
   }
 }
 

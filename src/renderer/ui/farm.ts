@@ -3,6 +3,7 @@ import { registerProjectionCacheInvalidator } from '../pet/projection-cache'
 import { uiCommands } from '../pet/command-map'
 import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import FARM from '../../shared/pet-runtime/content/farm.json'
+import { FARM_MAX_PLOTS } from '../../shared/pet-runtime/farm-limits'
 import { SwfPlayer } from '../swf/player'
 import { readSol, writeSol, type Sol } from '../swf/sol'
 import { openBox } from './box'
@@ -80,9 +81,9 @@ function runtimeFarmPlots(stored: string | undefined): (RuntimeLand | null)[] {
     parsed = {}
   }
   if (Array.isArray(parsed.farmland)) {
-    return Array.from({ length: Math.max(18, parsed.farmland.length) }, (_, index) => parsed.farmland?.[index] ?? null)
+    return Array.from({ length: FARM_MAX_PLOTS }, (_, index) => parsed.farmland?.[index] ?? null)
   }
-  return Array.from({ length: 18 }, (_, index) => ({ farmland: index < 6 ? 'FarmlandS' : 'Wasteland' }))
+  return Array.from({ length: FARM_MAX_PLOTS }, (_, index) => ({ farmland: index < 6 ? 'FarmlandS' : 'Wasteland' }))
 }
 
 /** Projection-only plot labels; exported for the focused farm tests. */
@@ -321,7 +322,9 @@ export async function farmNews(): Promise<{ ripe: number; pests: number } | null
       // blob lacks them, age may only be measured with the projection clock;
       // wall time runs through pauses and catch-up at a different rate.
       const canonicalRipe = Number(land.state ?? 0) >= 5 || Number(land.progress ?? 0) >= 1
-      const ageRipe = gameNow !== null && crop !== undefined && land.time !== undefined
+      const hasCanonicalMaturity = land.state !== undefined || land.progress !== undefined
+      const ageRipe = hasCanonicalMaturity === false
+        && gameNow !== null && crop !== undefined && land.time !== undefined
         && gameNow - Number(land.time) >= crop.time
       if (canonicalRipe || ageRipe) { ripe++; continue }
       if (land.grass !== undefined || land.worm !== undefined || land.farmland === 'FarmlandG') pests++

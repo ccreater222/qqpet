@@ -1,6 +1,7 @@
 import type { PetInfo, SaveData, Settings } from '../save'
 import type { JsonObject } from '../pet-runtime/types'
 import { assertJsonSafe, stableStringify } from '../pet-runtime/serialization'
+import { FARM_MAX_PLOTS } from '../pet-runtime/farm-limits'
 import {
   assertOnlyKeys,
   assertRequiredKeys,
@@ -759,6 +760,9 @@ function assertFarmBlob(value: unknown, path: string): void {
   }
   if (value.farmland !== undefined) {
     assertBlobArray(value.farmland, path + '.farmland')
+    if (value.farmland.length > FARM_MAX_PLOTS) {
+      failSchema('invalid_schema', path + '.farmland', 'expected at most ' + FARM_MAX_PLOTS + ' plots')
+    }
     value.farmland.forEach((land, index) => assertFarmLandBlob(land, path + '.farmland[' + index + ']'))
   }
 }

@@ -441,6 +441,17 @@ test('saveJsonData per-blob validators reject unknown fields and nested secrets'
     ...VALID_SAVE_JSON_BLOBS.island,
     errands: [{ ...VALID_SAVE_JSON_BLOBS.island.errands[0], unknownCanonicalField: true }],
   })), false)
+  const boundedFarm = {
+    ...VALID_SAVE_JSON_BLOBS.farm,
+    farmland: Array.from({ length: 18 }, () => ({ farmland: 'Wasteland' })),
+  }
+  assert.equal(validateSharedSaveJsonBlob('farm', JSON.stringify(boundedFarm)), true, 'canonical farm plot limit')
+  const oversizedFarm = {
+    ...VALID_SAVE_JSON_BLOBS.farm,
+    farmland: Array.from({ length: 19 }, () => ({ farmland: 'Wasteland' })),
+  }
+  assert.equal(validateSharedSaveJsonBlob('farm', JSON.stringify(oversizedFarm)), false, 'oversized farm rejected')
+  assert.throws(() => assertCanonicalSaveJsonBlob('farm', JSON.stringify(oversizedFarm)), /at most 18 plots/)
   assert.equal(validateSharedSaveJsonBlob('signin', JSON.stringify({
     collectionList: { '2026': { '13': [1700000000] } },
   })), false)

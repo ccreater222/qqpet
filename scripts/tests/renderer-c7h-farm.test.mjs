@@ -6,6 +6,7 @@ import { runInNewContext } from 'node:vm'
 
 const { uiCommands } = await import('../../src/renderer/pet/command-map.ts')
 const FARM = JSON.parse(readFileSync(new URL('../../src/shared/pet-runtime/content/farm.json', import.meta.url), 'utf8'))
+const { FARM_MAX_PLOTS } = await import('../../src/shared/pet-runtime/farm-limits.ts')
 
 function strippedSource(relativePath) {
   return stripTypeScriptTypes(readFileSync(new URL(relativePath, import.meta.url), 'utf8'), { mode: 'transform' })
@@ -15,7 +16,7 @@ function strippedSource(relativePath) {
 }
 
 function loadFarm(scope, expose) {
-  const context = { ...scope }
+  const context = { FARM_MAX_PLOTS, ...scope }
   runInNewContext(strippedSource('../../src/renderer/ui/farm.ts') + '\nthis.__farm = { ' + expose + ' }', context)
   return context.__farm
 }
@@ -123,6 +124,47 @@ test('runtime farmNews derives ripeness from canonical progress and the projecti
     window: { qqpet: { setFocusable: () => {} } },
   }, 'farmNews, save')
   assert.deepEqual(JSON.parse(JSON.stringify(await farm.farmNews())), { ripe: 1, pests: 0 })
+  assert.deepEqual(writes, [])
+  assert.equal(farm.save.saveJsonData.farm, stored)
+})
+
+test('runtime farmNews does not let stale age override contradictory canonical maturity fields', async () => {
+  const gameNow = Math.floor(Date.now() / 1000)
+  const stored = JSON.stringify({
+    experience: 10,
+    rank: 2,
+    weather: 'Sunny',
+    farmland: [
+      { farmland: 'FarmlandS', crop: 'RadishSeed', time: gameNow - 200_000, state: 4, progress: 0.9 },
+      { farmland: 'FarmlandS', crop: 'RadishSeed', time: gameNow - 200_000, state: 0, progress: 0.1 },
+    ],
+  })
+  const writes = []
+  const farm = loadFarm({
+    runtimeProjectionMode: true,
+    info: { yb: 500, name: 'pet' },
+    save: { saveJsonData: { farm: stored }, petInfo: { yb: 500, name: 'pet' } },
+    currentProjectionView: () => ({ gameTimeMs: gameNow * 1000, timeZone: 'UTC' }),
+    location: { hostname: 'test' },
+    localStorage: { getItem: () => null, setItem: () => {} },
+    registerProjectionCacheInvalidator: () => {},
+    update: (...args) => writes.push(['update', ...args]),
+    setInfo: (...args) => writes.push(['setInfo', ...args]),
+    writeSol: (...args) => writes.push(['writeSol', ...args]),
+    readSol: () => null,
+    onSaveFlush: () => () => {},
+    onProjectionApplied: () => () => {},
+    FARM,
+    div: () => ({ append: () => {}, textContent: '' }),
+    button: () => ({ append: () => {}, addEventListener: () => {} }),
+    img: () => ({}),
+    avatar: () => '',
+    scaleYb: (value) => value,
+    openBox: () => () => {},
+    SwfPlayer: class {},
+    window: { qqpet: { setFocusable: () => {} } },
+  }, 'farmNews, save')
+  assert.deepEqual(JSON.parse(JSON.stringify(await farm.farmNews())), { ripe: 0, pests: 0 })
   assert.deepEqual(writes, [])
   assert.equal(farm.save.saveJsonData.farm, stored)
 })
@@ -325,6 +367,29 @@ test('short imported farmland keeps missing indices non-actionable and out of re
   assert.deepEqual(JSON.parse(JSON.stringify(mounted.calls)), [
     { type: 'farm.reclaim', payload: { plotIds: [1] } },
   ])
+  assert.deepEqual(mounted.writes, [])
+})
+
+test('oversized imported farmland is bounded to the canonical 18 plots in projection and UI', async () => {
+  const stored = JSON.stringify({
+    experience: '1', rank: '01', weather: 'Sunny', burden: [], warehouse: [],
+    farmland: Array.from({ length: 24 }, (_, index) => ({ farmland: index < 6 ? 'FarmlandS' : 'Wasteland' })),
+  })
+  const labels = loadFarm({
+    runtimeProjectionMode: true,
+    save: { saveJsonData: { farm: stored } },
+    location: { hostname: 'test' },
+    localStorage: { getItem: () => null, setItem: () => {} },
+    registerProjectionCacheInvalidator: () => {},
+    FARM,
+  }, 'runtimeFarmPlotLabels, runtimeFarmWastelandPlotIds')
+  assert.equal(labels.runtimeFarmPlotLabels(stored).length, 18)
+  assert.deepEqual(Array.from(labels.runtimeFarmWastelandPlotIds(stored)), Array.from({ length: 12 }, (_, index) => index + 6))
+
+  const mounted = mountRuntimeFarm(stored)
+  assert.ok(findButton(mounted.content, '18 荒地'))
+  assert.equal(findButton(mounted.content, '19 荒地'), null)
+  assert.doesNotMatch(nodeText(mounted.content), /\b19 荒地\b/)
   assert.deepEqual(mounted.writes, [])
 })
 
