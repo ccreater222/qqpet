@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "startedAt": "2026-10-23T02:32:31.913Z",
-  "codeRevision": "333a307d3abc9c3c49a200d1bd5e260e339feedd",
+  "startedAt": "2026-10-23T02:42:59.266Z",
+  "codeRevision": "3fa293d414d6b4596289fa5ef8c5ac14a99d736d",
   "platform": "darwin",
   "arch": "arm64",
   "node": "v22.19.0",
@@ -9,7 +9,7 @@
     {
       "name": "compile compiled desktop app and standalone server",
       "status": "pass",
-      "durationMs": 1443,
+      "durationMs": 1457,
       "detail": {
         "desktopEntry": "out/main/index.js",
         "serverEntry": "server/dist/server/src/index.js"
@@ -22,16 +22,16 @@
       "detail": {
         "temporarySqlite": true,
         "journalMode": "wal",
-        "authorityIdHash": "a0c02f60f85946e317376b74f2ddd36f37fb5881ed9b49ad188e69de6de48ba0",
+        "authorityIdHash": "69d55f341cbd6687ab94e034593e7beb43b0b0ac94fb3c1e7323125908899723",
         "duplicatePairingCodes": false
       }
     },
     {
       "name": "start real standalone server and verify WAL/synchronous=FULL health",
       "status": "pass",
-      "durationMs": 115,
+      "durationMs": 114,
       "detail": {
-        "pid": 65990,
+        "pid": 91070,
         "ready": true,
         "journalMode": "wal",
         "synchronous": "full",
@@ -42,9 +42,9 @@
     {
       "name": "launch owner Electron app with real BrowserWindow and preload renderer",
       "status": "pass",
-      "durationMs": 626,
+      "durationMs": 739,
       "detail": {
-        "mainPid": 65994,
+        "mainPid": 91073,
         "rendererUrl": "app://bundle/index.html",
         "userDataIsolated": true,
         "storageApi": "window.qqpet.storage"
@@ -53,9 +53,9 @@
     {
       "name": "launch player Electron app with distinct userData and real BrowserWindow",
       "status": "pass",
-      "durationMs": 339,
+      "durationMs": 525,
       "detail": {
-        "mainPid": 66023,
+        "mainPid": 91109,
         "distinctMainProcesses": true,
         "distinctUserData": true,
         "rendererUrl": "app://bundle/index.html"
@@ -64,18 +64,18 @@
     {
       "name": "pair owner via real renderer window.qqpet.storage API",
       "status": "pass",
-      "durationMs": 20,
+      "durationMs": 264,
       "detail": {
         "role": "owner",
         "paired": true,
-        "deviceIdHash": "ef0c4f5964ec664e59745c852912904cc0acda6170226ea13700a4fb605f2d32",
+        "deviceIdHash": "79060da09d2d29afe0676bca84a446ee8c53d4a32877f6066502bc472c25190f",
         "pairingInputSource": "window.qqpet.storage.pair"
       }
     },
     {
       "name": "switch owner renderer to server mode with use-server source",
       "status": "pass",
-      "durationMs": 7,
+      "durationMs": 73,
       "detail": {
         "initialSource": "use-server",
         "requestedMode": "server",
@@ -88,58 +88,58 @@
     {
       "name": "pair player via real renderer storage API and switch to server mode",
       "status": "pass",
-      "durationMs": 54,
+      "durationMs": 139,
       "detail": {
         "role": "player",
         "initialSource": "use-server",
         "requestedMode": "server",
         "activeMode": "server",
-        "deviceIdHash": "178c7de12a680f7dd6ffe7cfa4f95eb8fd651752bc46df715d6d40df16bf7200",
+        "deviceIdHash": "a963a404f784ebd85007d04f8627bd27fe862dd817f8341e23f6eca95cb455f7",
         "pairingAndModeSource": "window.qqpet.storage"
       }
     },
     {
       "name": "initial two-renderer projection convergence over real WebSocket",
       "status": "pass",
-      "durationMs": 197,
+      "durationMs": 82,
       "detail": {
         "revision": 0,
         "eventSeq": 0,
         "projectionHash": "cc82c3fb95be5a1e4e61cb6a0514d62dc70c0363c7e9e1fc046b401d8ea55d26",
         "activeClientCount": 2,
-        "websocketUrl": "ws://127.0.0.1:60735/v1/sync"
+        "websocketUrl": "ws://127.0.0.1:63064/v1/sync"
       }
     },
     {
       "name": "adopt pet from owner renderer and converge player renderer",
       "status": "pass",
-      "durationMs": 190,
+      "durationMs": 80,
       "detail": {
         "revision": 1,
         "eventSeq": 2,
-        "projectionHash": "3f59a12fa050e1e5231c33fa006e3a2eb1d1f7071c3de71f0e6793f2a12647cc",
+        "projectionHash": "e5c87f05ad09731079a708d0402e7457e8362c62d65ecd816b67fb80c8dd5d23",
         "adoptedName": "宠宝~"
       }
     },
     {
       "name": "buy food from owner renderer and converge player renderer",
       "status": "pass",
-      "durationMs": 77,
+      "durationMs": 80,
       "detail": {
         "revision": 2,
         "foodCount": 5,
-        "projectionHash": "3fb93a63f78b5980823f27de08215c03fff0496b16a2370ffce4be0e703cecec"
+        "projectionHash": "a3a482948030881bf032531e6bf1a39947a521e3bc46a79f0faff049b9a74723"
       }
     },
     {
       "name": "canonical feed from owner renderer reaches player renderer within 3s",
       "status": "pass",
-      "durationMs": 166,
+      "durationMs": 168,
       "detail": {
         "revision": 3,
         "eventSeq": 6,
-        "projectionHash": "85256a4d0e7c790d8620a3cce184f3b31e0681ae56ed677bb6c7ae88b4b3031d",
-        "playLatencyMs": 81,
+        "projectionHash": "7aeccf6f20735f6d4ab50998f99f5e238fd739556bab79addb1b44668ed2eacb",
+        "playLatencyMs": 85,
         "eatTaskBefore": 0,
         "eatTaskAfter": 1,
         "foodBefore": 5,
@@ -150,21 +150,21 @@
     {
       "name": "duplicate opId through renderer is idempotent",
       "status": "pass",
-      "durationMs": 333,
+      "durationMs": 331,
       "detail": {
         "firstStatus": "applied",
         "secondStatus": "duplicate",
         "duplicateOriginal": "applied",
         "revision": 4,
         "commandSeq": 4,
-        "projectionHash": "d11513bfa2c0c246d952e05c3decb4df292ce027742953512867d47632da34ad",
+        "projectionHash": "46b8cc5737814810a11a83de4318cb5ff7dc847e56db1a2db914ba02f8e4b9d5",
         "foodCountUnchanged": true
       }
     },
     {
       "name": "dropped projection frame triggers renderer revision-gap resync",
       "status": "pass",
-      "durationMs": 166,
+      "durationMs": 167,
       "detail": {
         "droppedProjections": 1,
         "sentResyncs": 1,
@@ -172,14 +172,14 @@
         "secondCommandRevision": 6,
         "recoveredRevision": 6,
         "recoveredEventSeq": 9,
-        "projectionHash": "0d820baf22e287f0a8a7b8abe334b11717eabfc966dae54a634ea2ddf56335e3",
+        "projectionHash": "b0382ae03bb1dc5544ce537a924c2aa5980436eb4ecbf52f7d793ba56435948b",
         "resyncRecovered": true
       }
     },
     {
       "name": "two-renderer competing actions reject exactly one canonical mutation",
       "status": "pass",
-      "durationMs": 334,
+      "durationMs": 252,
       "detail": {
         "commandsSubmitted": 2,
         "appliedCount": 1,
@@ -197,43 +197,43 @@
         "eatTaskBefore": 1,
         "eatTaskAfter": 2,
         "rewardDuplicated": false,
-        "projectionHash": "a4b113c64c8a2e3d6e2218bd99b31748c5c321852e712195b7b8dfd9b2ff6f74"
+        "projectionHash": "391b389f5d0231766a657dc1c2deadd7ef2b1c4c9313b390559ded95832d2a25"
       }
     },
     {
       "name": "feed latency p95 across ten renderer commands",
       "status": "pass",
-      "durationMs": 1000,
+      "durationMs": 998,
       "detail": {
         "sampleCount": 10,
         "percentileMethod": "nearest-rank",
-        "p95Ms": 85.931,
-        "medianMs": 81.091,
-        "minMs": 74.792,
-        "maxMs": 85.931,
+        "p95Ms": 84.555,
+        "medianMs": 82.218,
+        "minMs": 73.175,
+        "maxMs": 84.555,
         "sampleLatenciesMs": [
-          82.361,
-          81.084,
-          85.931,
-          75.051,
-          81.468,
-          81.091,
-          83.173,
-          74.792,
-          78.708,
-          82.687
+          83.503,
+          76.806,
+          83.673,
+          79.557,
+          84.555,
+          83.085,
+          73.175,
+          82.218,
+          83.031,
+          78.797
         ],
         "thresholdMs": 3000,
         "allSamplesApplied": true,
         "ownerRevision": 19,
         "playerRevision": 19,
-        "projectionHash": "2bca2556fc0e4a1a00eabb5ff74625feaeb6c9c6185c7d96e8c73c0b00e203c2"
+        "projectionHash": "ab5d5e7dec4ed9bff20c535110ffcd1473a0fc0b4072bd97fab26a17e068e9d5"
       }
     },
     {
       "name": "game diudiule exam island-quiz session token abuse is rejected without answer keys",
       "status": "pass",
-      "durationMs": 1917,
+      "durationMs": 1915,
       "detail": {
         "sessionKinds": [
           "game",
@@ -250,7 +250,7 @@
           "settledReplay": "already_claimed",
           "expired": "not_available"
         },
-        "expiredAtGameMs": 1792722753425,
+        "expiredAtGameMs": 1792723380792,
         "diudiuleYbBefore": 4907,
         "diudiuleYbAfter": 4908,
         "answerFreeResults": [
@@ -261,25 +261,25 @@
         "answerKeysProjected": false,
         "activeSessionsAfter": 0,
         "sessionTokenHashes": [
-          "eabc9544c74913c6b4226f4ed9e2986edc34e2ad288b1047696f7db7c6ffc2ef",
-          "c2cecd4f0e16e93a578931f839b805068b3ba2dbdece1f03dfe04f42c28c7a04",
-          "c86cf71681adfe6d986cbd5ece29f97549edc92cfc3a9432c933c67694971179",
-          "92f9789062626394355f8aaec41599954e339da004c5d7f6bfc9da8082fec145",
-          "afa897b93b2714283116237689ac66225c9ba90d64813d0674003db871d55b68"
+          "ee2521ccbd40640af29ebcdd7cf2eef6048360fbff90177862b9f71026523d63",
+          "a9a68b2b9442079e35fd128316e2c33a00c8e11081f258dec955937010a1d88b",
+          "de341d4bac714a2636e39b7d9e6b1600aab82e6a1921a71e0217b0fef07ee19a",
+          "9537f20586f4d07b92c63da8b3a03e5e9832aa27ae4049e8eacf61ebda7f9176",
+          "f189d619dfd86174b77053437f591606b8b48f44d5fdc87c22e054d9e3655aab"
         ],
         "convergedRevision": 31,
-        "convergedEventSeq": 56,
-        "projectionHash": "9e9c192e425db450dec9a167fe26295e612cff1c33c65ea725648a1358556004"
+        "convergedEventSeq": 57,
+        "projectionHash": "a3f83981da4fca8c34a3498943d7c5fc63c4075a000468db93943d2220e98d79"
       }
     },
     {
       "name": "connected reset reopens exact survivor coverage",
       "status": "pass",
-      "durationMs": 251,
+      "durationMs": 252,
       "detail": {
-        "operationIdHash": "86a5ac45cbb17da6bc62e56b8a4c25e2d2190eaa2da061865ebc0b5db102a750",
+        "operationIdHash": "83a741622845ca071d1fdce58b4ba963807d41aa4a309d093559279defc0a724",
         "operationState": "completed",
-        "commitWallMs": 1792722759170,
+        "commitWallMs": 1792723386913,
         "survivorCount": 2,
         "reopenedRowCount": 2,
         "extraOpenRows": 0,
@@ -289,37 +289,37 @@
         "activeClientCountBefore": 2,
         "activeClientCountAfter": 2,
         "reAdoptedRevision": 33,
-        "projectionHash": "3f59a12fa050e1e5231c33fa006e3a2eb1d1f7071c3de71f0e6793f2a12647cc"
+        "projectionHash": "e5c87f05ad09731079a708d0402e7457e8362c62d65ecd816b67fb80c8dd5d23"
       }
     },
     {
       "name": "fresh-host portable import clamps and preserves canonical projection",
       "status": "pass",
-      "durationMs": 2535,
+      "durationMs": 1923,
       "detail": {
         "sourceExportMode": "local",
-        "sourceBundleHash": "d966312ecbd74263041a356adb2bcdb40effb2c5f90814a71496179277bf5e5f",
+        "sourceBundleHash": "87b3f13734ef3df1191290bb203529e1b95258133c530ca72bdde15052d3b84d",
         "rejectedWithoutClamp": "rejected",
         "rejectionCode": "anchor_out_of_bounds",
         "importStatus": "applied",
         "importClamped": true,
-        "clockSkippedMs": -359669,
-        "effectiveAnchorWallMs": 1792722761264,
+        "clockSkippedMs": -359831,
+        "effectiveAnchorWallMs": 1792723388531,
         "restoreGenerationBefore": 0,
         "restoreGenerationAfter": 1,
         "restoreGenerationReset": true,
         "nextEpoch": 2,
         "authorityOwner": "server",
         "authorityState": "active",
-        "serverAuthorityIdBeforeHash": "66e1f72e30e4d2962e02b0c426df6c015e8377233778c699afa63815076c4e98",
-        "authorityIdHash": "40bba43eaf5acb250a5335bb75a591171760f1ce1c2f172c848b996a877927d5",
-        "sourceAuthorityIdHash": "40bba43eaf5acb250a5335bb75a591171760f1ce1c2f172c848b996a877927d5",
-        "expectedSharedHash": "bcfb164f573c738032d88f5a6ca66adad293efabe0321300d27b6b4e4b044060",
-        "ownerSharedHash": "bcfb164f573c738032d88f5a6ca66adad293efabe0321300d27b6b4e4b044060",
-        "playerSharedHash": "bcfb164f573c738032d88f5a6ca66adad293efabe0321300d27b6b4e4b044060",
-        "expectedGameTimeMs": 1792722400106,
-        "ownerGameTimeMs": 1792722400106,
-        "playerGameTimeMs": 1792722400106,
+        "serverAuthorityIdBeforeHash": "7fbc792e6bac68df46fc39a6c92cf0e41b829d0c7939e6efad04d3b644770aab",
+        "authorityIdHash": "afec1d189aabc3b10a92f42ad80ca97958d980ff3e489b1b506dd4eaf4ed1c0d",
+        "sourceAuthorityIdHash": "afec1d189aabc3b10a92f42ad80ca97958d980ff3e489b1b506dd4eaf4ed1c0d",
+        "expectedSharedHash": "45f4f358cc61fa2ed1cefc224df2517fdc37d3d86183c253d64e271d009f6b24",
+        "ownerSharedHash": "45f4f358cc61fa2ed1cefc224df2517fdc37d3d86183c253d64e271d009f6b24",
+        "playerSharedHash": "45f4f358cc61fa2ed1cefc224df2517fdc37d3d86183c253d64e271d009f6b24",
+        "expectedGameTimeMs": 1792723027689,
+        "ownerGameTimeMs": 1792723027689,
+        "playerGameTimeMs": 1792723027689,
         "survivorCount": 2,
         "reopenedRowCount": 2,
         "extraOpenRows": 0,
@@ -330,7 +330,7 @@
     {
       "name": "owner detach then resume restores authority and both renderer projections converge",
       "status": "pass",
-      "durationMs": 1046,
+      "durationMs": 990,
       "detail": {
         "archivedEpoch": 0,
         "resumedEpoch": 2,
@@ -339,14 +339,14 @@
         "ownerProjectionHashPreserved": true,
         "playerProjectionConverged": true,
         "convergedRevision": 34,
-        "convergedEventSeq": 59,
-        "projectionHash": "3f59a12fa050e1e5231c33fa006e3a2eb1d1f7071c3de71f0e6793f2a12647cc"
+        "convergedEventSeq": 60,
+        "projectionHash": "e5c87f05ad09731079a708d0402e7457e8362c62d65ecd816b67fb80c8dd5d23"
       }
     },
     {
       "name": "startup crash repair uses heartbeat grace and reconnects without duplicate events",
       "status": "pass",
-      "durationMs": 32674,
+      "durationMs": 32675,
       "detail": {
         "crashSignal": "SIGKILL",
         "frozenBeforeKillMs": 32000,
@@ -354,44 +354,44 @@
         "preCrashOpenCoverage": 2,
         "repairedCoverage": 2,
         "repairedAtHeartbeatGrace": true,
-        "repairWallMs": 1792722794968,
-        "readyWallMs": 1792722795077,
-        "oldCoverageIdsHash": "ce35e517c0c9927eb164592b25b322cab58236b593cd0e392830a2a0d186641f",
-        "reopenedCoverageIdsHash": "b93f727bc3eff0538b99f9ad87238bbe64fdaf2b0418df9455e9b956e7f9c59e",
+        "repairWallMs": 1792723422057,
+        "readyWallMs": 1792723422163,
+        "oldCoverageIdsHash": "618a7e97592a18723324b74e477e4571385717740ff17c78f5c11e53fe4e7ba7",
+        "reopenedCoverageIdsHash": "8ca15d16d5eef546668bc8bf5bc540d37cd78518f60180008a7c6ca2c0284ba9",
         "ownerReconnectSockets": 1,
         "playerReconnectSockets": 1,
         "revision": 34,
-        "eventSeq": 59,
+        "eventSeq": 60,
         "commandRows": 45,
-        "eventRows": 59,
+        "eventRows": 60,
         "duplicateOpIds": 0,
         "duplicateEventSeqs": 0,
-        "projectionHash": "3f59a12fa050e1e5231c33fa006e3a2eb1d1f7071c3de71f0e6793f2a12647cc",
+        "projectionHash": "e5c87f05ad09731079a708d0402e7457e8362c62d65ecd816b67fb80c8dd5d23",
         "activeClientCount": 2
       }
     },
     {
       "name": "deterministic restart catch-up has exact state and active clients",
       "status": "pass",
-      "durationMs": 717,
+      "durationMs": 697,
       "detail": {
         "expectedTicks": 2,
         "observedTicks": 2,
-        "gameTimeBefore": 1792722753425,
-        "gameTimeAfter": 1792722873425,
-        "gameTimeExpected": 1792722873425,
+        "gameTimeBefore": 1792723380792,
+        "gameTimeAfter": 1792723500792,
+        "gameTimeExpected": 1792723500792,
         "revisionBefore": 35,
         "revisionAfter": 36,
         "revisionExpected": 36,
-        "eventSeqBefore": 60,
-        "eventSeqAfter": 62,
-        "eventSeqExpected": 62,
-        "sharedHashBefore": "3f59a12fa050e1e5231c33fa006e3a2eb1d1f7071c3de71f0e6793f2a12647cc",
-        "sharedHashAfter": "9845487b1f5c6304d37c17a9758a60d5276659b12fa8794dd75510c4f6217647",
-        "sharedHashExpected": "9845487b1f5c6304d37c17a9758a60d5276659b12fa8794dd75510c4f6217647",
-        "rngBeforeHash": "3c4eebe6e1458e58bcc242a990b9146c00542a3d0df4402b99b524dc3a9dc995",
-        "rngAfterHash": "8d209596653b846e4bca7b5e66cfdc1a9b8a243fa354f90912004c22122ecb3b",
-        "rngExpectedHash": "8d209596653b846e4bca7b5e66cfdc1a9b8a243fa354f90912004c22122ecb3b",
+        "eventSeqBefore": 61,
+        "eventSeqAfter": 63,
+        "eventSeqExpected": 63,
+        "sharedHashBefore": "e5c87f05ad09731079a708d0402e7457e8362c62d65ecd816b67fb80c8dd5d23",
+        "sharedHashAfter": "31ad120e99d01a6b220e90267cf62c38d5d5993e6fb97a3b5029f629358039e3",
+        "sharedHashExpected": "31ad120e99d01a6b220e90267cf62c38d5d5993e6fb97a3b5029f629358039e3",
+        "rngBeforeHash": "2198c3a3fa0f046b73004b0ae037714bd46791f91719bdc4cb4ae9fe6bfa98f9",
+        "rngAfterHash": "b6c171f8a29dd33eea0c808bb01e64d339e963b6793a83586b5a572eecdb65e7",
+        "rngExpectedHash": "b6c171f8a29dd33eea0c808bb01e64d339e963b6793a83586b5a572eecdb65e7",
         "rngAdvancedByPublishedTicks": true,
         "rngMatchedDeterministicOracle": true,
         "jobsBeforeHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
@@ -400,19 +400,19 @@
         "sessionsBeforeHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "sessionsAfterHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "sessionsUnchanged": true,
-        "rewindAnchorMs": 1792722665681,
-        "previousAnchorMs": 1792722795058,
+        "rewindAnchorMs": 1792723292753,
+        "previousAnchorMs": 1792723422138,
         "exactComparisons": true,
-        "projectionHash": "9845487b1f5c6304d37c17a9758a60d5276659b12fa8794dd75510c4f6217647",
+        "projectionHash": "31ad120e99d01a6b220e90267cf62c38d5d5993e6fb97a3b5029f629358039e3",
         "activeClientCount": 2
       }
     },
     {
       "name": "device revoke disconnects player renderer and forces read-only",
       "status": "pass",
-      "durationMs": 80,
+      "durationMs": 84,
       "detail": {
-        "revokedDeviceIdHash": "178c7de12a680f7dd6ffe7cfa4f95eb8fd651752bc46df715d6d40df16bf7200",
+        "revokedDeviceIdHash": "a963a404f784ebd85007d04f8627bd27fe862dd817f8341e23f6eca95cb455f7",
         "playerNotice": "device_revoked",
         "playerConnection": "error",
         "playerReadOnly": true,
@@ -427,10 +427,10 @@
     {
       "name": "revoked renderer reconnect is rejected after relaunch",
       "status": "pass",
-      "durationMs": 1045,
+      "durationMs": 1054,
       "detail": {
-        "previousMainPid": 66023,
-        "reconnectMainPid": 67392,
+        "previousMainPid": 91109,
+        "reconnectMainPid": 92426,
         "freshMainProcess": true,
         "copiedUserDataIdentityPreserved": true,
         "serverAuthRevokedBefore": 0,
@@ -449,7 +449,7 @@
     {
       "name": "timed work completes exactly once at server-owned deadline across restart",
       "status": "pass",
-      "durationMs": 2131,
+      "durationMs": 12023,
       "detail": {
         "jobId": 1,
         "startedAtGameMs": 1893470400000,
@@ -487,7 +487,7 @@
     {
       "name": "advanceWhileEmpty true and false have exact zero-client state deltas",
       "status": "pass",
-      "durationMs": 4438,
+      "durationMs": 24221,
       "detail": {
         "enabled": {
           "advanceWhileEmpty": true,
@@ -537,7 +537,7 @@
     {
       "name": "online-time and sign-in gift split credits only covered intervals exactly once",
       "status": "pass",
-      "durationMs": 2718,
+      "durationMs": 2647,
       "detail": {
         "signinDay": 1893448800,
         "signinRewardEventCount": 1,
@@ -593,12 +593,12 @@
     {
       "name": "real LocalRepository authority detach resume fences epochs and failed imports",
       "status": "pass",
-      "durationMs": 6438,
+      "durationMs": 6322,
       "detail": {
         "sourceLocalRevision": 1,
         "sourceLocalEpoch": 1,
-        "sourceAuthorityIdHash": "65a09e8c3818d1f78188fdbae294395be9287e14e83a8838baaba13a328ad807",
-        "sourceHandoffIdHash": "a84b2e505aa6f7b2c9fa43208ce54c41c2eda76117abfdc41c83a8781f453047",
+        "sourceAuthorityIdHash": "356f7b909d76ab6d2a155d73e141762594b278f11ff895271024a9c9fc2a6a3a",
+        "sourceHandoffIdHash": "8fb7ee07ad4683402deb14635b5e5abf15c163ec14990ad470516f40a49a4311",
         "uploadHandoffState": "applied",
         "uploadNextEpoch": 3,
         "uploadServerEpoch": 3,
@@ -657,7 +657,7 @@
     {
       "name": "real BrowserWindow/preload/renderer proof and evidence hygiene",
       "status": "pass",
-      "durationMs": 63,
+      "durationMs": 80,
       "detail": {
         "electronMainPidsDistinct": true,
         "browserWindowCount": 2,
@@ -685,7 +685,7 @@
     {
       "name": "clean teardown of both Electron apps and standalone server",
       "status": "pass",
-      "durationMs": 366,
+      "durationMs": 370,
       "detail": {
         "ownerExited": true,
         "playerExited": true,
@@ -707,8 +707,8 @@
     "realRenderer": true,
     "rendererCoverage": true,
     "guiCoverage": true,
-    "ownerPid": 65994,
-    "playerPid": 67392,
+    "ownerPid": 91073,
+    "playerPid": 92426,
     "rendererProof": {
       "electronMainPidsDistinct": true,
       "browserWindowCount": 2,
@@ -728,7 +728,7 @@
       "electronVersion": "44.6.0"
     },
     "websocket": {
-      "serverUrl": "ws://127.0.0.1:60735/v1/sync",
+      "serverUrl": "ws://127.0.0.1:63064/v1/sync",
       "activeClientCountAtConvergence": 2
     },
     "scenarios": {
@@ -784,6 +784,6 @@
     "The local-authority fault case drops one already-serialized admin.resumeServer frame and replays it with only expectedEpoch fenced by +1. The portable bundle itself is produced by LocalRepository and is never edited; the resulting server rejection drives the production rollback path.",
     "Local and server timestamps in the handoff scenario share a near-wall clock fixture, but the test clock is not advanced during the final local scheduler run; local archive/freeze assertions compare persisted document hashes rather than wall-clock tick counts."
   ],
-  "finishedAt": "2026-10-23T02:33:33.542Z",
+  "finishedAt": "2026-10-23T02:44:30.131Z",
   "result": "PASS"
 }
