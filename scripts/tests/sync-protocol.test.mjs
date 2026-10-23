@@ -493,6 +493,14 @@ test('every protocol message variant has a valid shape and correlated requests r
   for (const [type, message] of Object.entries(serverMessages)) {
     assert.equal(parseServerMessage(message).ok, true, type)
   }
+  assert.equal(parseServerMessage({ ...ready, weatherLocation: 'Shanghai' }).ok, true)
+  for (const malformedWeatherLocation of [null, 42, {}, ['Shanghai']]) {
+    assert.equal(
+      parseServerMessage({ ...ready, weatherLocation: malformedWeatherLocation }).ok,
+      false,
+      'ready weatherLocation must be an optional string',
+    )
+  }
 
   for (const type of ['hello', 'command', 'commandStatus', 'exportBundle', 'resync']) {
     const message = { ...clientMessages[type] }

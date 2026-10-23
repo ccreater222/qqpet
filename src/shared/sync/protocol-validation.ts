@@ -389,6 +389,9 @@ export function parseServerMessage(value: unknown): ProtocolValidationResult<Ser
       if (isNonEmptyString(message.timeZone) === false || typeof message.advanceWhileEmpty !== 'boolean') {
         return invalid('invalid_frame', 'invalid ready settings')
       }
+      if (optionalString(message, 'weatherLocation') === false) {
+        return invalid('invalid_frame', 'invalid ready weatherLocation')
+      }
       if (validateWireAuthority(message.authority) === false || typeof message.catchingUp !== 'boolean') {
         return invalid('invalid_frame', 'invalid ready authority/catch-up state')
       }

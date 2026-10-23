@@ -95,6 +95,41 @@ function serverBundle(overrides = {}) {
   return Object.assign(bundle, overrides)
 }
 
+function frozenBundle(mode) {
+  const bundle = clone(fixtures.bundle)
+  const minutes = 60_000
+  const days = 24 * 60 * minutes
+  if (mode === 'paused') bundle.engine.save.settings.paused = true
+  if (mode === 'dead' || mode === 'buried') bundle.engine.save.petInfo.health = 0
+  if (mode === 'buried') bundle.engine.save.isBury = true
+  // advanceMinuteInPlace shifts the next boundary and deadlines in lockstep
+  // while deliberately retaining the last day boundary that actually ran.
+  const frozenSinceMs = bundle.engine.gameTimeMs - 2 * days - 17 * minutes
+  bundle.engine.lastProcessedDayBoundaryKey = dayKeyAt(frozenSinceMs, bundle.engine.timeZone)
+  bundle.engine.nextDailyBoundaryMs = nextDailyBoundaryMs(frozenSinceMs, bundle.engine.timeZone)
+    + (bundle.engine.gameTimeMs - frozenSinceMs)
+  bundle.shared = clone(bundle.engine.save)
+  return bundle
+}
+
+function frozenServerBundle(mode) {
+  const bundle = frozenBundle(mode)
+  bundle.authority = {
+    ...bundle.authority,
+    owner: 'server',
+    epoch: 2,
+    detachedAtWallMs: GAME_TIME_MS,
+  }
+  delete bundle.originLocalDeviceId
+  return bundle
+}
+
+function assertCanonicalDailyMetadata(engine) {
+  assert.equal(engine.lastProcessedDayBoundaryKey, dayKeyAt(engine.gameTimeMs, engine.timeZone))
+  assert.equal(engine.nextDailyBoundaryMs, nextDailyBoundaryMs(engine.gameTimeMs, engine.timeZone))
+  assert.ok(engine.nextDailyBoundaryMs > engine.gameTimeMs)
+}
+
 class FakeLocalAuthority {
   constructor(options = {}) {
     this.calls = []
@@ -246,6 +281,7 @@ class FakeRemoteAuthority {
     this.commandResults = []
     this.role = options.role ?? 'owner'
     this.weatherCity = options.weatherCity ?? '杭州'
+    this.startError = options.startError ?? null
     this.deviceOverlay = clone(options.deviceOverlay ?? fixtures.device)
     this.projectionCacheRestored = options.hasProjectionCache === true
     this.projection = {
@@ -277,7 +313,11 @@ class FakeRemoteAuthority {
     }
   }
 
-  async start() { this.calls.push('start'); return this.getProjection() }
+  async start() {
+    this.calls.push('start')
+    if (this.startError !== null) throw this.startError
+    return this.getProjection()
+  }
   async stop() { this.calls.push('stop') }
   async flush() { this.calls.push('flush') }
   async load() { return clone(this.projection.save) }
@@ -400,6 +440,22 @@ function duplicateApplied(commandType, result) {
   }
 }
 
+async function createUncertainUpload() {
+  const harness = makeController()
+  const originalCommand = FakeRemoteAuthority.prototype.command
+  harness.remote.command = async function command(command, options = {}) {
+    this.commands.push({ type: command.type, payload: clone(command.payload), options: clone(options) })
+    throw new Error('offline: result unknown')
+  }
+  await harness.controller.setMode({ mode: 'server', initialSource: 'upload-local' })
+  harness.remote.command = originalCommand
+  assert.equal(harness.controller.status().handoff.state, 'frozen')
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), true)
+  const opId = harness.remote.commands[0].options.opId
+  assert.equal(typeof opId, 'string')
+  return { harness, opId }
+}
+
 test('local to server handoff freezes local before upload and applies the owner import', async () => {
   const harness = makeController()
   harness.remote.commandResults.push(applied('admin.importPortableBundle', { importClamped: false, clockSkippedMs: 0, epoch: 5 }))
@@ -513,6 +569,32 @@ test('use-server against an archived server resumes with the current local bundl
   assert.equal(status.handoff.state, 'applied')
 })
 
+test('archived-server resume threads caller clamp, rebind and expected epoch options', async () => {
+  const harness = makeController()
+  harness.remote.status.authority.state = 'archived'
+  harness.remote.projection.authority.state = 'archived'
+  harness.remote.commandResults.push(applied('admin.resumeServer', {
+    imported: true,
+    epoch: 9,
+    importClamped: true,
+    clockSkippedMs: 60_000,
+  }))
+  await harness.controller.setMode({
+    mode: 'server',
+    initialSource: 'use-server',
+    allowClamp: true,
+    rebindLocalSessions: true,
+    expectedEpoch: 9,
+  })
+  assert.equal(harness.remote.commands.length, 1)
+  assert.equal(harness.remote.commands[0].type, 'admin.resumeServer')
+  assert.equal(harness.remote.commands[0].payload.allowClamp, true)
+  assert.equal(harness.remote.commands[0].payload.rebindLocalSessions, true)
+  assert.equal(harness.remote.commands[0].payload.expectedEpoch, 9)
+  assert.equal(harness.controller.status().handoff.importClamped, true)
+  assert.equal(harness.controller.status().handoff.clockSkippedMs, 60_000)
+})
+
 test('a rejected archived-server resume rolls the frozen local authority back', async () => {
   const harness = makeController()
   harness.remote.status.authority.state = 'archived'
@@ -555,6 +637,26 @@ test('server to local detach validates the exact stamp before local import and l
   assert.equal(harness.local.sendEnabled, true)
 })
 
+test('server detach imports a paused frozen engine with shifted daily metadata', async () => {
+  const harness = makeController()
+  harness.remote.commandResults.push(applied('admin.importPortableBundle', {}))
+  await harness.controller.setMode({ mode: 'server', initialSource: 'upload-local' })
+  const bundle = frozenServerBundle('paused')
+  assert.notEqual(
+    bundle.engine.lastProcessedDayBoundaryKey,
+    dayKeyAt(bundle.engine.gameTimeMs, bundle.engine.timeZone),
+  )
+  harness.remote.commandResults.push(applied('admin.exportForDetach', { authority: bundle.authority, bundle }))
+  await harness.controller.setMode({ mode: 'local' })
+  const status = harness.controller.status()
+  assert.equal(status.mode, 'local')
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.handoff.state, 'applied')
+  const imported = harness.local.lastImport.bundle.engine
+  assert.equal(imported.save.settings.paused, true)
+  assertCanonicalDailyMetadata(imported)
+})
+
 test('a failed server to local import leaves local read-only with a retryable frozen handoff', async () => {
   const local = new FakeLocalAuthority({ failImport: true })
   const harness = makeController({ local })
@@ -572,15 +674,22 @@ test('a failed server to local import leaves local read-only with a retryable fr
   assert.equal(status.handoff.reason, 'local_import_failed')
 })
 
-test('a successful retry of a failed server-detach import persists local mode and clears the journal', async () => {
+test('a successful retry of a failed server-detach import persists local mode and merges the captured remote overlay', async () => {
   const local = new FakeLocalAuthority({ failImport: true })
   const harness = makeController({ local })
   harness.remote.commandResults.push(applied('admin.importPortableBundle', {}))
   await harness.controller.setMode({ mode: 'server', initialSource: 'upload-local' })
+  harness.remote.deviceOverlay.settings.zoom = 2.5
+  harness.remote.deviceOverlay.settings.aiKey = 'sk-detach-overlay'
+  harness.remote.deviceOverlay.petInfo.lastX = 777
   const bundle = serverBundle()
   harness.remote.commandResults.push(applied('admin.exportForDetach', { authority: bundle.authority, bundle }))
   await harness.controller.setMode({ mode: 'local' })
   assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), true)
+  const journal = JSON.parse(readFileSync(join(harness.dir, 'storage-handoff.json'), 'utf8'))
+  assert.equal(journal.remoteOverlay.settings.zoom, 2.5)
+  assert.equal(journal.remoteOverlay.settings.aiKey, 'sk-detach-overlay')
+  assert.equal(journal.remoteOverlay.petInfo.lastX, 777)
   assert.equal(JSON.parse(readFileSync(join(harness.dir, 'storage-config.json'), 'utf8')).mode, 'server')
 
   local.failImport = false
@@ -589,7 +698,35 @@ test('a successful retry of a failed server-detach import persists local mode an
   assert.equal(status.activeMode, 'local')
   assert.equal(status.handoff.state, 'applied')
   assert.equal(local.status.authorityState, 'active')
+  assert.equal(local.deviceOverlay.settings.zoom, 2.5)
+  assert.equal(local.deviceOverlay.settings.aiKey, 'sk-detach-overlay')
+  assert.equal(local.deviceOverlay.petInfo.lastX, 777)
   assert.equal(JSON.parse(readFileSync(join(harness.dir, 'storage-config.json'), 'utf8')).mode, 'local')
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), false)
+})
+
+test('restart retry merges the remote overlay persisted in the detach journal', async () => {
+  const local = new FakeLocalAuthority({ failImport: true })
+  const harness = makeController({ local })
+  harness.remote.commandResults.push(applied('admin.importPortableBundle', {}))
+  await harness.controller.setMode({ mode: 'server', initialSource: 'upload-local' })
+  harness.remote.deviceOverlay.settings.zoom = 3.25
+  harness.remote.deviceOverlay.settings.aiKey = 'sk-restart-overlay'
+  harness.remote.deviceOverlay.petInfo.lastY = 888
+  const bundle = serverBundle()
+  harness.remote.commandResults.push(applied('admin.exportForDetach', { authority: bundle.authority, bundle }))
+  await harness.controller.setMode({ mode: 'local' })
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), true)
+
+  local.failImport = false
+  const restarted = makeController({ dir: harness.dir, local, remote: harness.remote })
+  const status = await restarted.controller.initialize()
+  assert.equal(status.mode, 'local')
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.handoff.state, 'applied')
+  assert.equal(local.deviceOverlay.settings.zoom, 3.25)
+  assert.equal(local.deviceOverlay.settings.aiKey, 'sk-restart-overlay')
+  assert.equal(local.deviceOverlay.petInfo.lastY, 888)
   assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), false)
 })
 
@@ -615,6 +752,85 @@ test('startup reconciles a frozen local-to-server upload with the persisted opId
   assert.equal(status.mode, 'server')
   assert.equal(status.activeMode, 'server')
   assert.equal(status.handoff.state, 'applied')
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), false)
+})
+
+test('offline-startup retry reconnects a frozen upload and reports the still-offline attempt', async () => {
+  const { harness, opId } = await createUncertainUpload()
+  harness.remote.startError = new Error('offline: dial failed')
+  const restarted = makeController({ dir: harness.dir, local: harness.local, remote: harness.remote })
+  let status = await restarted.controller.initialize()
+  assert.equal(status.handoff.state, 'frozen')
+
+  const startsBefore = harness.remote.calls.filter(call => call === 'start').length
+  status = await restarted.controller.retryHandoff()
+  const startsAfter = harness.remote.calls.filter(call => call === 'start').length
+  assert.ok(startsAfter > startsBefore, 'retry must make a fresh dial attempt')
+  assert.equal(status.handoff.state, 'frozen')
+  assert.equal(status.handoff.retryable, true)
+  assert.match(status.handoff.message, /离线/)
+
+  harness.remote.startError = null
+  harness.remote.commandResults.push(applied('admin.importPortableBundle', { epoch: 6 }))
+  status = await restarted.controller.retryHandoff()
+  assert.equal(status.mode, 'server')
+  assert.equal(status.activeMode, 'server')
+  assert.equal(status.handoff.state, 'applied')
+  assert.equal(harness.remote.commands.at(-1).options.opId, opId)
+  assert.equal(harness.local.status.authorityState, 'archived')
+  assert.equal(JSON.parse(readFileSync(join(harness.dir, 'storage-config.json'), 'utf8')).mode, 'server')
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), false)
+})
+
+test('offline-startup rollback reconnects and resolves a stored upload rejection', async () => {
+  const { harness, opId } = await createUncertainUpload()
+  harness.remote.startError = new Error('offline: dial failed')
+  const restarted = makeController({ dir: harness.dir, local: harness.local, remote: harness.remote })
+  await restarted.controller.initialize()
+
+  harness.remote.startError = null
+  harness.remote.commandResults.push(rejected('admin.importPortableBundle', 'authority_fork_risk', 'stored rejection'))
+  const status = await restarted.controller.rollbackHandoff()
+  assert.equal(status.mode, 'local')
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.handoff.state, 'rolled_back')
+  assert.equal(status.handoff.reason, 'authority_fork_risk')
+  assert.equal(harness.remote.commands.at(-1).options.opId, opId)
+  assert.equal(harness.local.status.authorityState, 'active')
+  assert.equal(JSON.parse(readFileSync(join(harness.dir, 'storage-config.json'), 'utf8')).mode, 'local')
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), false)
+})
+
+test('server-mode config is durable before the applied upload journal is cleared', async () => {
+  const { harness, opId } = await createUncertainUpload()
+  harness.remote.commandResults.push(applied('admin.importPortableBundle', { epoch: 6 }))
+  const originalPersistConfig = harness.controller.persistConfig
+  let journalPresentAtConfigWrite = false
+  let handoffAtConfigWrite = null
+  harness.controller.persistConfig = function persistConfigThatCrashes() {
+    const path = join(harness.dir, 'storage-handoff.json')
+    journalPresentAtConfigWrite = existsSync(path)
+    if (journalPresentAtConfigWrite) handoffAtConfigWrite = JSON.parse(readFileSync(path, 'utf8')).handoff.state
+    throw new Error('disk full')
+  }
+
+  const frozen = await harness.controller.retryHandoff()
+  assert.equal(journalPresentAtConfigWrite, true, 'the journal must still exist when mode is written')
+  assert.equal(handoffAtConfigWrite, 'applied', 'the finalizing journal must record the applied handoff')
+  assert.equal(frozen.handoff.state, 'frozen')
+  assert.equal(frozen.handoff.retryable, true)
+  assert.equal(harness.local.status.authorityState, 'archived')
+  assert.equal(JSON.parse(readFileSync(join(harness.dir, 'storage-config.json'), 'utf8')).mode, 'local')
+  assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), true)
+
+  harness.controller.persistConfig = originalPersistConfig
+  const restarted = makeController({ dir: harness.dir, local: harness.local, remote: harness.remote })
+  const status = await restarted.controller.initialize()
+  assert.equal(status.mode, 'server')
+  assert.equal(status.activeMode, 'server')
+  assert.equal(status.handoff.state, 'applied')
+  assert.equal(harness.remote.commands.at(-1).options.opId, opId)
+  assert.equal(JSON.parse(readFileSync(join(harness.dir, 'storage-config.json'), 'utf8')).mode, 'server')
   assert.equal(existsSync(join(harness.dir, 'storage-handoff.json')), false)
 })
 
@@ -788,6 +1004,58 @@ test('local portable import rejects stale authority epochs before backup or muta
   assert.equal(lineageReport.status, 'rejected')
   assert.equal(lineageReport.errorCode, 'authority_fork_risk')
   assert.equal(harness.local.calls.includes('importPortableBundle'), false)
+})
+
+test('local portable import accepts and normalizes recoverable frozen daily metadata', async () => {
+  const variants = [
+    {
+      name: 'paused',
+      assertState: engine => assert.equal(engine.save.settings.paused, true),
+    },
+    {
+      name: 'dead',
+      assertState: engine => assert.equal(engine.save.petInfo.health, 0),
+    },
+    {
+      name: 'buried',
+      assertState: engine => {
+        assert.equal(engine.save.petInfo.health, 0)
+        assert.equal(engine.save.isBury, true)
+      },
+    },
+  ]
+
+  for (const variant of variants) {
+    const harness = makeController()
+    const bundle = frozenBundle(variant.name)
+    assert.notEqual(
+      bundle.engine.lastProcessedDayBoundaryKey,
+      dayKeyAt(bundle.engine.gameTimeMs, bundle.engine.timeZone),
+      variant.name + ' fixture must carry a shifted day key',
+    )
+    assert.notEqual(
+      bundle.engine.nextDailyBoundaryMs,
+      nextDailyBoundaryMs(bundle.engine.gameTimeMs, bundle.engine.timeZone),
+      variant.name + ' fixture must carry a shifted boundary',
+    )
+    const report = await harness.controller.importBundle({ json: JSON.stringify(bundle) })
+    assert.equal(report.status, 'applied', variant.name + ' import should be accepted')
+    assert.equal(report.importClamped, undefined)
+    const imported = harness.local.lastImport.bundle.engine
+    variant.assertState(imported)
+    assertCanonicalDailyMetadata(imported)
+    assert.equal(imported.save.nowTimeLine, Math.floor(imported.gameTimeMs / 1000))
+  }
+
+  const nonFrozen = clone(fixtures.bundle)
+  const frozenSinceMs = nonFrozen.engine.gameTimeMs - 2 * 24 * 60 * 60_000 - 17 * 60_000
+  nonFrozen.engine.lastProcessedDayBoundaryKey = dayKeyAt(frozenSinceMs, nonFrozen.engine.timeZone)
+  nonFrozen.engine.nextDailyBoundaryMs = nextDailyBoundaryMs(frozenSinceMs, nonFrozen.engine.timeZone)
+    + (nonFrozen.engine.gameTimeMs - frozenSinceMs)
+  nonFrozen.shared = clone(nonFrozen.engine.save)
+  const rejected = await makeController().controller.importBundle({ json: JSON.stringify(nonFrozen) })
+  assert.equal(rejected.status, 'rejected')
+  assert.equal(rejected.errorCode, 'invalid_payload')
 })
 
 test('local portable import rejects a seven-day-old anchor and reports explicit clamp shifts', async () => {

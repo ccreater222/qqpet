@@ -10,7 +10,7 @@ import type { PortablePetBundleV1 } from '../shared/sync/portable'
 import { migratePortablePetBundle } from '../shared/sync/portable'
 import { commandResultData, commandResultError } from '../shared/sync/command-result'
 import { planPortableImportPlan, type PortableImportCurrentAuthority } from '../shared/sync/portable-import-plan'
-import type { DeviceLocalOverlay } from '../shared/sync/data-boundary'
+import { assertDeviceLocalOverlay, type DeviceLocalOverlay } from '../shared/sync/data-boundary'
 import type { RendererProjection, RendererRepositoryStatus, RendererRuntimeInfo } from '../shared/renderer-api'
 import {
   defaultStorageConfig,
@@ -140,6 +140,12 @@ interface PendingUpload {
   command: Extract<PetCommand, { type: 'admin.importPortableBundle' | 'admin.resumeServer' }>
   requestedRebind: boolean
   archiveReason: 'use_server' | 'mode_switch'
+}
+
+interface PendingServerBundle {
+  bundle: PortablePetBundleV1
+  /** Device-local values read from the remote before detach; merged after a successful local import. */
+  remoteOverlay: DeviceLocalOverlay | null
 }
 
 const STORAGE_HANDOFF_FILE = 'storage-handoff.json'
@@ -305,7 +311,7 @@ export class DesktopStorageController {
   private lastWeatherCity = ''
   private handoffValue: StorageHandoffReport = emptyHandoffReport()
   private pendingUpload: PendingUpload | null = null
-  private pendingServerBundle: { bundle: PortablePetBundleV1 } | null = null
+  private pendingServerBundle: PendingServerBundle | null = null
   private capturedEvents: OrderedEvent[] = []
   private initialized = false
   private initialization: Promise<StorageStatusView> | null = null
@@ -550,7 +556,11 @@ export class DesktopStorageController {
         return this.status()
       }
     } else {
-      const outcome = await this.useServerAuthority()
+      const outcome = await this.useServerAuthority({
+        allowClamp: parsed.allowClamp === true,
+        rebindLocalSessions: parsed.rebindLocalSessions === true,
+        ...(parsed.expectedEpoch === undefined ? {} : { expectedEpoch: parsed.expectedEpoch }),
+      })
       if (outcome !== 'applied') {
         this.mapModeLocal()
         this.persistConfig()
@@ -793,11 +803,36 @@ export class DesktopStorageController {
 
   /** Retries a frozen upload or failed server-detach import; never issues a fresh epoch. */
   async retryHandoff(): Promise<StorageStatusView> {
-    if (this.pendingUpload !== null && this.remote !== null && this.local.getStatus().authorityState === 'handoff_pending') {
-      const pending = this.pendingUpload
-      const result = await this.remote.command(pending.command, { opId: pending.opId })
-      const outcome = await this.applyUploadResult(result, pending.archiveReason, pending.requestedRebind)
-      if (outcome === 'applied') this.activateServerMode()
+    if (this.pendingUpload !== null && this.local.getStatus().authorityState === 'handoff_pending') {
+      if (await this.ensurePendingUploadRemote() === false) {
+        this.emitStatus()
+        return this.status()
+      }
+      const remote = this.remote
+      if (remote !== null) {
+        const pending = this.pendingUpload
+        let result: CommandResult
+        try {
+          result = await remote.command(pending.command, { opId: pending.opId })
+        } catch (error) {
+          this.handoffValue = {
+            direction: 'local_to_server',
+            state: 'frozen',
+            retryable: true,
+            message: '交接结果未知（' + messageOf(error) + '），保持冻结，可重试或回滚。',
+            atWallMs: this.now(),
+          }
+          try { this.persistPendingHandoffState() } catch { /* keep the in-memory frozen state */ }
+          this.emitStatus()
+          return this.status()
+        }
+        await this.applyUploadResult(result, pending.archiveReason, pending.requestedRebind)
+      }
+      this.emitStatus()
+      return this.status()
+    }
+    if (this.pendingUpload !== null && this.local.getStatus().authorityState === 'archived') {
+      await this.finalizeArchivedPendingUpload()
       this.emitStatus()
       return this.status()
     }
@@ -815,10 +850,19 @@ export class DesktopStorageController {
    * server-detach import. Unknown outcomes stay frozen.
    */
   async rollbackHandoff(): Promise<StorageStatusView> {
-    if (this.pendingUpload !== null && this.remote !== null && this.local.getStatus().authorityState === 'handoff_pending') {
+    if (this.pendingUpload !== null && this.local.getStatus().authorityState === 'handoff_pending') {
+      if (await this.ensurePendingUploadRemote() === false) {
+        this.emitStatus()
+        return this.status()
+      }
+      const remote = this.remote
+      if (remote === null) {
+        this.emitStatus()
+        return this.status()
+      }
       let result: CommandResult
       try {
-        result = await this.remote.command(this.pendingUpload.command, { opId: this.pendingUpload.opId })
+        result = await remote.command(this.pendingUpload.command, { opId: this.pendingUpload.opId })
       } catch (error) {
         this.handoffValue = {
           direction: 'local_to_server',
@@ -848,9 +892,13 @@ export class DesktopStorageController {
         this.pushActiveProjection()
       } else {
         const pending = this.pendingUpload
-        const outcome = await this.applyUploadResult(result, pending.archiveReason, pending.requestedRebind)
-        if (outcome === 'applied') this.activateServerMode()
+        await this.applyUploadResult(result, pending.archiveReason, pending.requestedRebind)
       }
+      this.emitStatus()
+      return this.status()
+    }
+    if (this.pendingUpload !== null && this.local.getStatus().authorityState === 'archived') {
+      await this.finalizeArchivedPendingUpload()
       this.emitStatus()
       return this.status()
     }
@@ -1108,6 +1156,49 @@ export class DesktopStorageController {
     return true
   }
 
+  /**
+   * A restart may have restored an upload journal while the initial dial was
+   * offline. Retry/rollback are user-visible recovery entry points, so they
+   * make one fresh dial attempt and surface the still-offline state instead of
+   * silently returning the unchanged frozen status forever.
+   */
+  private async ensurePendingUploadRemote(): Promise<boolean> {
+    if (this.remote === null) {
+      try { await this.connectStoredRemote() } catch { /* reported as offline below */ }
+    }
+    if (this.remote !== null && this.remote.getStatus().connection === 'online') return true
+    this.handoffValue = {
+      ...this.handoffValue,
+      direction: this.handoffValue.direction === 'none' ? 'local_to_server' : this.handoffValue.direction,
+      state: 'frozen',
+      retryable: true,
+      message: '仍处于离线状态，无法连接服务器；本机保持冻结，恢复连接后可重试或回滚。',
+      atWallMs: this.now(),
+    }
+    try { this.persistPendingHandoffState() } catch { /* keep the in-memory frozen state */ }
+    return false
+  }
+
+  /** Complete an upload that already archived local but lost its config write. */
+  private async finalizeArchivedPendingUpload(): Promise<void> {
+    const pending = this.pendingUpload
+    if (pending === null) return
+    if (await this.ensurePendingUploadRemote() === false) return
+    if (this.remote === null || this.remote.getStatus().authority.state !== 'active') {
+      this.handoffValue = {
+        ...this.handoffValue,
+        direction: 'local_to_server',
+        state: 'frozen',
+        retryable: true,
+        message: '本机已归档，但服务器权威尚未恢复为活动状态；保持冻结，待服务器可用后重试。',
+        atWallMs: this.now(),
+      }
+      try { this.persistPendingHandoffState() } catch { /* keep the in-memory frozen state */ }
+      return
+    }
+    await this.finalizeAppliedUpload(pending.requestedRebind)
+  }
+
   private async stopRemote(): Promise<void> {
     const remote = this.remote
     this.remote = null
@@ -1150,15 +1241,11 @@ export class DesktopStorageController {
     )
   }
 
-  private activateServerMode(): void {
-    this.mode = 'server'
-    this.activeMode = 'server'
-    this.local.setSendEnabled(false)
-    this.persistConfig()
-    this.pushActiveProjection()
-  }
-
-  private async useServerAuthority(): Promise<UploadOutcome> {
+  private async useServerAuthority(options: {
+    allowClamp: boolean
+    rebindLocalSessions: boolean
+    expectedEpoch?: number
+  }): Promise<UploadOutcome> {
     if (this.local.getStatus().authorityState === 'handoff_pending') {
       await this.local.rollbackDetach()
     }
@@ -1180,9 +1267,10 @@ export class DesktopStorageController {
       // exists. The archived server must first accept admin.resumeServer with
       // this exact local bundle; only an applied result permits local archiving.
       const outcome = await this.uploadLocalToServer({
-        allowClamp: false,
-        rebindLocalSessions: false,
+        allowClamp: options.allowClamp,
+        rebindLocalSessions: options.rebindLocalSessions,
         archiveReason: 'use_server',
+        ...(options.expectedEpoch === undefined ? {} : { expectedEpoch: options.expectedEpoch }),
       })
       if (outcome === 'applied') {
         this.handoffValue = {
@@ -1199,6 +1287,7 @@ export class DesktopStorageController {
     allowClamp: boolean
     rebindLocalSessions: boolean
     archiveReason: 'use_server' | 'mode_switch'
+    expectedEpoch?: number
   }): Promise<UploadOutcome> {
     const localProjection = this.local.getProjection()
     if (localProjection === null || localProjection.save.havePet === false) {
@@ -1217,8 +1306,9 @@ export class DesktopStorageController {
       ...(options.allowClamp ? { allowClamp: true } : {}),
       ...(options.rebindLocalSessions ? { rebindLocalSessions: true } : {}),
     }
+    const expectedEpoch = options.expectedEpoch ?? bundle.authority.epoch
     const command = authorityState === 'archived'
-      ? { type: 'admin.resumeServer' as const, payload: { ...payloadBase, expectedEpoch: bundle.authority.epoch } }
+      ? { type: 'admin.resumeServer' as const, payload: { ...payloadBase, expectedEpoch } }
       : { type: 'admin.importPortableBundle' as const, payload: payloadBase }
     this.pendingUpload = {
       bundle,
@@ -1308,23 +1398,60 @@ export class DesktopStorageController {
       try { this.persistPendingHandoffState() } catch { /* keep the in-memory frozen state */ }
       return 'frozen'
     }
-    const data = recordOf(commandResultData(result))
-    this.pendingUpload = null
-    this.clearPersistedPendingHandoffState()
-    this.handoffValue = {
+    return this.finalizeAppliedUpload(requestedRebind, recordOf(commandResultData(result)))
+  }
+
+  /**
+   * Once the server accepts and the local authority is archived, persist the
+   * server mode while the handoff envelope still exists. Only then is it safe
+   * to delete the journal: a crash before this write restarts with the pending
+   * envelope and reconciles the already-archived local authority.
+   */
+  private async finalizeAppliedUpload(
+    requestedRebind: boolean,
+    data: Record<string, unknown> = {},
+  ): Promise<UploadOutcome> {
+    const provisional: StorageHandoffReport = {
       direction: 'local_to_server',
       state: 'applied',
       requestedRebind,
       rebindReported: requestedRebind,
+      message: '服务器已接管权威，正在持久化服务器模式。',
+      atWallMs: this.now(),
+    }
+    this.handoffValue = provisional
+    try { this.persistPendingHandoffState() } catch { /* the prior pending envelope still fences recovery */ }
+    const previousMode = this.mode
+    const previousActiveMode = this.activeMode
+    this.mode = 'server'
+    try {
+      this.persistConfig()
+    } catch (error) {
+      this.mode = previousMode
+      this.activeMode = previousActiveMode
+      this.handoffValue = {
+        ...provisional,
+        state: 'frozen',
+        retryable: true,
+        message: '服务器已接管权威，但无法持久化服务器模式：' + messageOf(error) + '；请重试完成交接。',
+        atWallMs: this.now(),
+      }
+      try { this.persistPendingHandoffState() } catch { /* keep the in-memory frozen state */ }
+      return 'frozen'
+    }
+    this.activeMode = 'server'
+    this.local.setSendEnabled(false)
+    this.pendingUpload = null
+    this.handoffValue = {
+      ...provisional,
       cancelledSessionKinds: this.cancelledSessionKinds(),
       ...(typeof data.importClamped === 'boolean' ? { importClamped: data.importClamped } : {}),
       ...(typeof data.clockSkippedMs === 'number' ? { clockSkippedMs: data.clockSkippedMs } : {}),
       ...(typeof data.epoch === 'number' ? { nextEpoch: data.epoch } : {}),
       message: '上传完成，服务器已接管权威。',
-      atWallMs: this.now(),
     }
-    const nextProjection = this.remote?.getProjection() ?? null
-    if (nextProjection !== null) this.emitView(nextProjection.save)
+    this.clearPersistedPendingHandoffState()
+    this.pushActiveProjection()
     return 'applied'
   }
 
@@ -1483,7 +1610,7 @@ export class DesktopStorageController {
       this.emitStatus()
       return this.status()
     }
-    this.pendingServerBundle = { bundle }
+    this.pendingServerBundle = { bundle, remoteOverlay }
     this.handoffValue = {
       direction: 'server_to_local',
       state: 'pending',
@@ -1611,6 +1738,7 @@ export class DesktopStorageController {
     const applied = await this.importDetachedBundle(pending.bundle)
     if (applied) {
       await this.stopRemote()
+      if (pending.remoteOverlay !== null) await this.mergeRemoteOverlayIntoLocal(pending.remoteOverlay)
       this.pendingServerBundle = null
       this.mode = 'local'
       this.mapModeLocal()
@@ -1706,7 +1834,13 @@ export class DesktopStorageController {
       }
       if (raw.kind === 'server_to_local') {
         const bundle = migratePortablePetBundle(raw.bundle)
-        this.pendingServerBundle = { bundle }
+        let remoteOverlay: DeviceLocalOverlay | null = null
+        const overlayCandidate = raw.remoteOverlay
+        if (overlayCandidate !== undefined && overlayCandidate !== null) {
+          assertDeviceLocalOverlay(overlayCandidate)
+          remoteOverlay = clone(overlayCandidate)
+        }
+        this.pendingServerBundle = { bundle, remoteOverlay }
         this.handoffValue = this.restoredHandoffReport(raw.handoff, 'server_to_local')
         return
       }
@@ -1746,6 +1880,7 @@ export class DesktopStorageController {
         schemaVersion: STORAGE_HANDOFF_SCHEMA_VERSION,
         kind: 'server_to_local',
         bundle: this.pendingServerBundle.bundle,
+        remoteOverlay: this.pendingServerBundle.remoteOverlay,
         handoff: clone(this.handoffValue),
       }, null, 2))
       return
@@ -1761,14 +1896,13 @@ export class DesktopStorageController {
     if (this.pendingUpload !== null) {
       const localState = this.local.getStatus().authorityState
       if (localState === 'handoff_pending') {
-        if (this.remote === null) {
-          try { await this.connectStoredRemote() } catch { /* stay fenced until connectivity returns */ }
-        }
-        if (this.remote === null || this.remote.getStatus().connection !== 'online') return
+        if (await this.ensurePendingUploadRemote() === false) return
+        const remote = this.remote
         const pending = this.pendingUpload
+        if (remote === null || pending === null) return
         let result: CommandResult
         try {
-          result = await this.remote.command(pending.command, { opId: pending.opId })
+          result = await remote.command(pending.command, { opId: pending.opId })
         } catch (error) {
           this.handoffValue = {
             ...this.handoffValue,
@@ -1781,19 +1915,11 @@ export class DesktopStorageController {
           try { this.persistPendingHandoffState() } catch { /* keep the in-memory frozen state */ }
           return
         }
-        const outcome = await this.applyUploadResult(result, pending.archiveReason, pending.requestedRebind)
-        if (outcome === 'applied') this.activateServerMode()
+        await this.applyUploadResult(result, pending.archiveReason, pending.requestedRebind)
         return
       }
       if (localState === 'archived') {
-        if (this.remote === null) {
-          try { await this.connectStoredRemote() } catch { /* retry later */ }
-        }
-        if (this.remote !== null && this.remote.getStatus().authority.state === 'active') {
-          this.pendingUpload = null
-          this.clearPersistedPendingHandoffState()
-          this.activateServerMode()
-        }
+        await this.finalizeArchivedPendingUpload()
         return
       }
       // The local authority is active, so the uncertain upload no longer owns
