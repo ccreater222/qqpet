@@ -71,6 +71,23 @@ export interface ServerHealth {
   scheduler: SchedulerPetHealth[]
 }
 
+/** Unauthenticated health payload: aggregate operability only, never pet identity or raw errors. */
+export interface PublicHealth {
+  ok: boolean
+  service: 'qqpet-server'
+  live: true
+  ready: boolean
+  pets: number
+  catchingUp: boolean
+  databaseReady: boolean
+  hasError: boolean
+}
+
+/** Authentication result for owner-only detailed health. */
+type DetailedHealthAuthorization =
+  | { ok: true; petId: string }
+  | { ok: false; status: 401 | 403; error: 'unauthorized' | 'forbidden' }
+
 export interface SyncServerOptions {
   now?: () => number
 }
@@ -228,10 +245,11 @@ export class SyncServer {
     return { address: address.address, port: address.port }
   }
 
-  health(): ServerHealth {
+  /** Detailed health for in-process operators/tests; HTTP exposes it only to an authenticated owner. */
+  health(petId?: string): ServerHealth {
     let database: DatabaseOperationalHealth
     try {
-      database = this.store.operationalHealth()
+      database = this.store.operationalHealth(this.now())
     } catch (error) {
       database = {
         writable: false,
@@ -262,6 +280,7 @@ export class SyncServer {
     let listError: string | null = null
     try {
       pets = this.store.listPets()
+      if (petId !== undefined) pets = pets.filter(pet => pet.id === petId)
     } catch (error) {
       listError = error instanceof Error ? error.message : 'database pet listing failed'
     }
@@ -270,6 +289,7 @@ export class SyncServer {
     let schedulerError: string | null = null
     try {
       schedulerHealth = this.scheduler.healthAll()
+        .filter(value => petId === undefined || value.petId === petId)
     } catch (error) {
       schedulerError = error instanceof Error ? error.message : 'scheduler health failed'
     }
@@ -397,25 +417,69 @@ export class SyncServer {
       response.end()
       return
     }
-    if (request.url === '/health') {
-      this.json(response, 200, { ...this.health() })
+    const url = new URL(request.url ?? '/', 'http://localhost')
+    if (url.pathname === '/healthz') {
+      // Liveness is deliberately independent of the database and scheduler. It
+      // must not run PRAGMA checks, canonical decoding, or a write-lock probe.
+      this.json(response, 200, { ok: true, service: 'qqpet-server', live: true })
       return
     }
-    if (request.url === '/healthz') {
-      // Liveness must stay 200 while the process can serve HTTP. Readiness is
-      // reported separately by /readyz and in the body's ready field.
-      this.json(response, 200, { ...this.health(), ok: true })
-      return
-    }
-    if (request.url === '/readyz') {
+    if (url.pathname === '/readyz') {
       const health = this.health()
-      this.json(response, health.ready ? 200 : 503, { ...health, ok: health.ready })
+      this.json(response, health.ready ? 200 : 503, { ...this.publicHealth(health), ok: health.ready })
+      return
+    }
+    if (url.pathname === '/health' || url.pathname === '/health/detail') {
+      const explicitDetail = url.pathname === '/health/detail'
+        || url.searchParams.get('detail') === '1'
+        || url.searchParams.get('detail') === 'true'
+      const authorizationPresent = request.headers.authorization !== undefined
+      if (explicitDetail || authorizationPresent) {
+        const authorization = this.authorizeDetailedHealth(request)
+        if (authorization.ok === false) {
+          this.json(response, authorization.status, { ok: false, error: authorization.error })
+          return
+        }
+        this.json(response, 200, { ...this.health(authorization.petId), ok: true })
+        return
+      }
+      this.json(response, 200, this.publicHealth(this.health()))
       return
     }
     this.json(response, 404, { ok: false, error: 'not_found' })
   }
 
-  private json(response: ServerResponse, status: number, body: Record<string, unknown>): void {
+  private publicHealth(health: ServerHealth): PublicHealth {
+    return {
+      ok: health.ok,
+      service: health.service,
+      live: true,
+      ready: health.ready,
+      pets: health.pets,
+      catchingUp: health.catchingUp,
+      databaseReady: health.dbWritable && health.quickCheck === 'ok',
+      hasError: health.lastError !== null,
+    }
+  }
+
+  private authorizeDetailedHealth(request: IncomingMessage): DetailedHealthAuthorization {
+    const header = request.headers.authorization
+    const match = typeof header === 'string' ? /^Bearer\s+([A-Za-z0-9_-]+)$/.exec(header) : null
+    if (match === null) return { ok: false, status: 401, error: 'unauthorized' }
+    let device: ReturnType<DatabaseStore['getDeviceByTokenGlobal']>
+    try {
+      device = this.store.getDeviceByTokenGlobal(match[1])
+    } catch {
+      return { ok: false, status: 401, error: 'unauthorized' }
+    }
+    if (device === undefined || device.revokedAtMs !== null) {
+      return { ok: false, status: 401, error: 'unauthorized' }
+    }
+    if (device.role !== 'owner') return { ok: false, status: 403, error: 'forbidden' }
+    return { ok: true, petId: device.petId }
+  }
+
+  private json(response: ServerResponse, status: number, body: unknown): void {
     const text = JSON.stringify(body)
     response.writeHead(status, {
       'content-type': 'application/json; charset=utf-8',

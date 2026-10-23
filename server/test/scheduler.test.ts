@@ -11,7 +11,7 @@ import {
 } from '../../src/shared/sync/index.js'
 import { createHeadlessRuntime, dailyBoundaryMs, dayKeyAt, nextDailyBoundaryMs, type EngineState } from '../../src/shared/pet-runtime/index.js'
 import { createServerConfig, type ServerConfig, type ServerConfigInput } from '../src/config.js'
-import { initializePet, openDatabase, type CanonicalPetSnapshot } from '../src/db.js'
+import { initializePet, OPERATIONAL_HEALTH_CACHE_TTL_MS, openDatabase, type CanonicalPetSnapshot } from '../src/db.js'
 import { SyncServer } from '../src/index.js'
 import { materializeImportedCoverage } from '../src/portable-import.js'
 
@@ -288,8 +288,9 @@ test('advanceWhileEmpty true advances zero-client world time in bounded chunks w
   assert.equal(health.authorityState, 'active')
   const httpHealth = await fetch('http://127.0.0.1:' + h.server.address().port + '/health').then(response => response.json()) as Record<string, unknown>
   assert.equal(httpHealth.ready, true)
-  assert.equal(httpHealth.gameTimeMs, after.pet.gameTimeMs)
-  assert.equal(httpHealth.nextTickAtMs, after.pet.lastSchedulerWallMs + 60_000)
+  const detailedHealth = h.server.health()
+  assert.equal(detailedHealth.gameTimeMs, after.pet.gameTimeMs)
+  assert.equal(detailedHealth.nextTickAtMs, after.pet.lastSchedulerWallMs + 60_000)
 })
 
 test('advanceWhileEmpty false freezes with zero clients and reconnect discards the empty gap', async t => {
@@ -495,8 +496,9 @@ test('failed catch-up stays not-ready and fences commands until a retry reaches 
   assert.ok(failedHealth)
   assert.equal(failedHealth.ready, false)
   assert.equal(failedHealth.catchingUp, true)
-  const failedHttpHealth = await fetch('http://127.0.0.1:' + h.server.address().port + '/health')
-    .then(response => response.json()) as Record<string, unknown>
+  const failedHttpHealth = await fetch('http://127.0.0.1:' + h.server.address().port + '/health', {
+    headers: { authorization: 'Bearer ' + owner.token },
+  }).then(response => response.json()) as Record<string, unknown>
   assert.equal(failedHttpHealth.ready, false)
   assert.equal(failedHttpHealth.lastErrorEvent, 'scheduler.tick_failed')
   assert.match(String(failedHttpHealth.lastError), /forced daily-boundary catch-up failure/)
@@ -764,6 +766,145 @@ test('portable import rejects invalid daily-boundary metadata before commit', as
   assert.equal(after.pet.gameTimeMs, before.pet.gameTimeMs)
   assert.equal(after.engine.save.nowTimeLine, before.engine.save.nowTimeLine)
   await owner.close()
+})
+
+test('portable import normalizes nowTimeLine for an in-bounds import without clamping', async t => {
+  const clock = makeClock(Date.now())
+  const h = await createHarness(t, clock, { advanceWhileEmpty: true })
+  adoptDirect(h)
+  const owner = await pairOwner(h)
+
+  const staleNowTimeLine = 123
+  const bundle = buildLocalBundle(h, {
+    mutateEngine: engine => {
+      engine.save.nowTimeLine = staleNowTimeLine
+    },
+  })
+  const result = await sendCommand(owner, 'import-stale-now-timeline', {
+    type: 'admin.importPortableBundle',
+    payload: { bundle, allowClamp: false },
+  })
+  assert.equal(result.status, 'applied')
+  assert.equal((result.result as { importClamped?: boolean } | undefined)?.importClamped, false)
+
+  const imported = canonical(h)
+  assert.equal(imported.engine.importClamped, false)
+  assert.equal(imported.engine.clockSkippedMs, 0)
+  assert.equal(imported.engine.save.nowTimeLine, Math.floor(imported.pet.gameTimeMs / 1000))
+  assert.notEqual(imported.engine.save.nowTimeLine, staleNowTimeLine)
+  await owner.close()
+})
+
+test('portable import normalizes shifted daily metadata for paused, dead, and buried engines', async t => {
+  const clock = makeClock(Date.now())
+  const h = await createHarness(t, clock, { advanceWhileEmpty: true })
+  adoptDirect(h)
+  const owner = await pairOwner(h)
+  const DAY_MS = 24 * 60 * 60 * 1000
+  const MINUTE_MS = 60 * 1000
+  const modes = [
+    {
+      name: 'paused',
+      mutate: (engine: EngineState) => { engine.save.settings.paused = true },
+      assertState: (engine: EngineState) => assert.equal(engine.save.settings.paused, true),
+    },
+    {
+      name: 'dead',
+      mutate: (engine: EngineState) => { engine.save.petInfo.health = 0 },
+      assertState: (engine: EngineState) => assert.equal(engine.save.petInfo.health, 0),
+    },
+    {
+      name: 'buried',
+      mutate: (engine: EngineState) => {
+        engine.save.petInfo.health = 0
+        engine.save.isBury = true
+      },
+      assertState: (engine: EngineState) => assert.equal(engine.save.isBury, true),
+    },
+  ]
+
+  for (const mode of modes) {
+    const bundle = buildLocalBundle(h, {
+      mutateEngine: engine => {
+        mode.mutate(engine)
+        // This is the metadata shape produced by advanceMinuteInPlace while a
+        // paused/dead/buried pet shifts deadlines and the next boundary but
+        // intentionally leaves the last executed day key untouched.
+        const frozenSinceMs = engine.gameTimeMs - 2 * DAY_MS - 17 * MINUTE_MS
+        engine.lastProcessedDayBoundaryKey = dayKeyAt(frozenSinceMs, engine.timeZone)
+        engine.nextDailyBoundaryMs = nextDailyBoundaryMs(frozenSinceMs, engine.timeZone)
+          + (engine.gameTimeMs - frozenSinceMs)
+      },
+    })
+    assert.notEqual(
+      bundle.engine.lastProcessedDayBoundaryKey,
+      dayKeyAt(bundle.engine.gameTimeMs, bundle.engine.timeZone),
+      mode.name + ' fixture must carry a shifted day key',
+    )
+    assert.notEqual(
+      bundle.engine.nextDailyBoundaryMs,
+      nextDailyBoundaryMs(bundle.engine.gameTimeMs, bundle.engine.timeZone),
+      mode.name + ' fixture must carry a shifted boundary',
+    )
+
+    const result = await sendCommand(owner, 'import-frozen-' + mode.name, {
+      type: 'admin.importPortableBundle',
+      payload: { bundle },
+    })
+    assert.equal(result.status, 'applied', mode.name + ' import should be accepted')
+    const imported = canonical(h)
+    mode.assertState(imported.engine)
+    assert.equal(imported.engine.lastProcessedDayBoundaryKey, dayKeyAt(imported.pet.gameTimeMs, imported.engine.timeZone))
+    assert.equal(imported.engine.nextDailyBoundaryMs, nextDailyBoundaryMs(imported.pet.gameTimeMs, imported.engine.timeZone))
+    assert.equal(imported.engine.save.nowTimeLine, Math.floor(imported.pet.gameTimeMs / 1000))
+  }
+  await owner.close()
+})
+
+test('liveness avoids database probes and readiness uses a bounded cached full probe', async t => {
+  const clock = makeClock(Date.now())
+  const h = await createHarness(t, clock, { advanceWhileEmpty: true })
+  adoptDirect(h)
+
+  let probes = 0
+  const storeInternals = h.server.store as unknown as {
+    probeOperationalHealth: () => { writable: boolean; quickCheck: string; error: string | null }
+  }
+  const originalProbe = storeInternals.probeOperationalHealth.bind(h.server.store)
+  storeInternals.probeOperationalHealth = () => {
+    probes += 1
+    return originalProbe()
+  }
+  const baseUrl = 'http://127.0.0.1:' + h.server.address().port
+
+  for (let index = 0; index < 40; index += 1) {
+    const response = await fetch(baseUrl + '/healthz')
+    assert.equal(response.status, 200)
+    const body = await response.json() as Record<string, unknown>
+    assert.deepEqual(body, { ok: true, service: 'qqpet-server', live: true })
+  }
+  assert.equal(probes, 0, 'liveness must not run the readiness probe')
+
+  for (let index = 0; index < 20; index += 1) {
+    const response = await fetch(baseUrl + '/health')
+    assert.equal(response.status, 200)
+    const body = await response.json() as Record<string, unknown>
+    assert.equal(body.ready, true)
+    assert.equal(body.databaseReady, true)
+    assert.equal('petHealth' in body, false)
+    assert.equal('petId' in body, false)
+  }
+  assert.equal(probes, 1, 'readiness traffic should share one full-probe result inside the TTL')
+
+  for (let index = 0; index < 20; index += 1) {
+    const response = await fetch(baseUrl + '/readyz')
+    assert.equal(response.status, 200)
+  }
+  assert.equal(probes, 1, 'readyz should reuse the same bounded probe cache')
+  clock.advance(OPERATIONAL_HEALTH_CACHE_TTL_MS)
+  const refreshed = await fetch(baseUrl + '/readyz')
+  assert.equal(refreshed.status, 200)
+  assert.equal(probes, 2, 'an expired TTL should force exactly one fresh full probe')
 })
 
 test('materializeImportedCoverage preserves stable suspend rows without extending or rewriting them', async t => {

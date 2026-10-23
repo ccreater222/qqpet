@@ -14,7 +14,7 @@ header_up Host {host}
 
 # Health endpoints contain no save contents or secrets. Rate-limit access
 # at your edge if desired.
-@health path /healthz /health /readyz
+@health path /healthz /health /health/detail /readyz
 handle @health {
 reverse_proxy qqpet-sync:8787
 }

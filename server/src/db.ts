@@ -12,6 +12,7 @@ import { finalizeSurvivor, stableCoverageId, survivorDeviceId, survivorKey } fro
 
 export const SCHEMA_VERSION = 1
 export const COVERAGE_CRASH_GRACE_MS = 30_000
+export const OPERATIONAL_HEALTH_CACHE_TTL_MS = 5_000
 
 const MIGRATION_SQL = `
 CREATE TABLE schema_migrations (
@@ -352,6 +353,7 @@ export class DatabaseStore {
   readonly db: DatabaseSync
   private readonly readOnly: boolean
   private closed = false
+  private operationalHealthCache: { checkedAtMs: number; value: DatabaseOperationalHealth } | null = null
 
   constructor(path: string, options: DatabaseStoreOptions = {}) {
     this.readOnly = options.readOnly === true
@@ -410,12 +412,32 @@ export class DatabaseStore {
   }
 
   /**
-   * Non-destructive liveness probe used by health/readiness. quick_check
-   * verifies page integrity; a rolled-back no-op UPDATE verifies the connection
-   * can still acquire a write transaction without changing canonical state.
+   * Non-destructive readiness probe. quick_check verifies page integrity; a
+   * rolled-back no-op UPDATE verifies the connection can still acquire a write
+   * transaction without changing canonical state. The expensive probe is
+   * cached for a bounded interval so unauthenticated readiness traffic cannot
+   * force a write-lock attempt on every request. Liveness must not call this.
    */
-  operationalHealth(): DatabaseOperationalHealth {
+  operationalHealth(nowMs = Date.now()): DatabaseOperationalHealth {
     if (this.closed) return { writable: false, quickCheck: 'closed', error: 'database is closed' }
+    if (Number.isSafeInteger(nowMs) === false || nowMs < 0) {
+      throw new Error('operational health probe time must be a non-negative safe integer')
+    }
+    const cached = this.operationalHealthCache
+    if (cached !== null && nowMs >= cached.checkedAtMs && nowMs - cached.checkedAtMs < OPERATIONAL_HEALTH_CACHE_TTL_MS) {
+      return { ...cached.value }
+    }
+    const probed = this.probeOperationalHealth()
+    this.operationalHealthCache = { checkedAtMs: nowMs, value: { ...probed } }
+    return { ...probed }
+  }
+
+  /** Force the next readiness request to execute a fresh operational probe. */
+  invalidateOperationalHealthCache(): void {
+    this.operationalHealthCache = null
+  }
+
+  private probeOperationalHealth(): DatabaseOperationalHealth {
     let quickCheck = 'unknown'
     let writable = false
     let errorMessage: string | null = null
@@ -484,6 +506,7 @@ export class DatabaseStore {
   close(): void {
     if (this.closed) return
     this.closed = true
+    this.operationalHealthCache = null
     if (this.readOnly === false) {
       try {
         this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')

@@ -54,6 +54,12 @@ function isSafeNonNegative(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0
 }
 
+const MAX_FROZEN_DAILY_BOUNDARY_AHEAD_MS = 26 * 60 * 60 * 1000
+
+function isFrozenEngine(engine: EngineState): boolean {
+  return engine.save.settings.paused || engine.save.petInfo.health <= 0 || engine.save.isBury
+}
+
 function hasCanonicalDailyBoundaryMetadata(engine: EngineState): boolean {
   try {
     return engine.lastProcessedDayBoundaryKey === dayKeyAt(engine.gameTimeMs, engine.timeZone)
@@ -62,6 +68,31 @@ function hasCanonicalDailyBoundaryMetadata(engine: EngineState): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * Frozen/dead/buried engines shift scheduled deadlines and the next daily
+ * boundary in lockstep with every minute while intentionally leaving
+ * lastProcessedDayBoundaryKey at the last day that actually ran. Require the
+ * shifted marker to remain plausibly ahead of game time, then normalize it to
+ * canonical metadata below rather than rejecting an otherwise valid import.
+ */
+function hasRecoverableFrozenDailyBoundaryMetadata(engine: EngineState): boolean {
+  if (isFrozenEngine(engine) === false) return false
+  try {
+    const currentDayKey = dayKeyAt(engine.gameTimeMs, engine.timeZone)
+    const aheadMs = engine.nextDailyBoundaryMs - engine.gameTimeMs
+    return engine.lastProcessedDayBoundaryKey <= currentDayKey
+      && aheadMs > 0
+      && aheadMs <= MAX_FROZEN_DAILY_BOUNDARY_AHEAD_MS
+  } catch {
+    return false
+  }
+}
+
+function normalizeDailyBoundaryMetadata(engine: EngineState): void {
+  engine.lastProcessedDayBoundaryKey = dayKeyAt(engine.gameTimeMs, engine.timeZone)
+  engine.nextDailyBoundaryMs = nextDailyBoundaryMs(engine.gameTimeMs, engine.timeZone)
 }
 
 /**
@@ -122,9 +153,11 @@ export function planPortableImport(options: ImportPlanOptions): ImportPlanResult
   }
   const importedAnchor = engine.lastSchedulerWallMs
   if (isSafeNonNegative(importedAnchor) === false) return fail('invalid_payload', 'imported scheduler anchor is invalid')
-  if (hasCanonicalDailyBoundaryMetadata(engine) === false) {
+  const canonicalDailyMetadata = hasCanonicalDailyBoundaryMetadata(engine)
+  if (canonicalDailyMetadata === false && hasRecoverableFrozenDailyBoundaryMetadata(engine) === false) {
     return fail('invalid_payload', 'imported daily-boundary metadata is invalid')
   }
+  if (canonicalDailyMetadata === false) normalizeDailyBoundaryMetadata(engine)
 
   const pastBound = wallNowMs - MAX_IMPORT_ANCHOR_PAST_MS
   const futureBound = wallNowMs + MAX_IMPORT_FUTURE_SKEW_MS
@@ -158,9 +191,7 @@ export function planPortableImport(options: ImportPlanOptions): ImportPlanResult
       session.startedAtGameMs += clockSkippedMs
       session.expiresAtGameMs += clockSkippedMs
     }
-    engine.lastProcessedDayBoundaryKey = dayKeyAt(engine.gameTimeMs, engine.timeZone)
-    engine.nextDailyBoundaryMs = nextDailyBoundaryMs(engine.gameTimeMs, engine.timeZone)
-    engine.save.nowTimeLine = Math.floor(engine.gameTimeMs / 1000)
+    normalizeDailyBoundaryMetadata(engine)
     importClamped = true
     engine.importClamped = true
     engine.clockSkippedMs = clockSkippedMs
@@ -183,6 +214,10 @@ export function planPortableImport(options: ImportPlanOptions): ImportPlanResult
     rebindLocalSessions: options.rebindLocalSessions,
     nowMs: engine.gameTimeMs,
   })
+  // The authoritative clock is the persisted game time, including imports that
+  // did not require clamp realignment. A stale local save.nowTimeLine must never
+  // survive an accepted import.
+  rebound.save.nowTimeLine = Math.floor(rebound.gameTimeMs / 1000)
   const importedCoverage = materializeImportedCoverage(rebound, wallNowMs)
   rebound.sessionCoverage = importedCoverage
   delete rebound.coverageReopen

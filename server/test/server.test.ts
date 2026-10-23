@@ -599,7 +599,7 @@ test('transaction rollback leaves canonical revision and command sequence unchan
   store.close()
 })
 
-test('health and readiness expose database, log, authority, error and metric operability fields', async t => {
+test('public health is redacted while owner detail retains operability diagnostics', async t => {
   const harness = await createHarness(t)
   const owner = await pairOwner(harness)
   owner.send({
@@ -617,60 +617,138 @@ test('health and readiness expose database, log, authority, error and metric ope
   const backupPath = join(harness.directory, 'backup.sqlite')
   await harness.server.backup(backupPath)
   assert.ok((await readFile(backupPath)).byteLength > 0)
+  const baseUrl = 'http://127.0.0.1:' + harness.server.address().port
+  const ownerAuthorization = { authorization: 'Bearer ' + owner.token }
 
-  const response = await fetch('http://127.0.0.1:' + harness.server.address().port + '/health')
+  const response = await fetch(baseUrl + '/health')
   assert.equal(response.status, 200)
   const body = await response.json() as Record<string, any>
-  assert.equal(body.ok, true)
-  assert.equal(body.journalMode, 'wal')
-  assert.equal(body.synchronous, 'full')
-  assert.equal(body.dbWritable, true)
-  assert.equal(body.quickCheck, 'ok')
-  assert.deepEqual(body.database, { writable: true, quickCheck: 'ok', error: null })
-  assert.equal(body.commandSeq, adopted.commandSeq)
-  assert.equal(body.commandLogSize, 1)
-  assert.ok(body.eventLogSize >= adopted.eventSeq)
-  assert.equal(body.pets, 1)
-  assert.equal(Array.isArray(body.petHealth), true)
-  assert.equal(body.petHealth.length, 1)
-  assert.equal(body.petHealth[0].commandSeq, adopted.commandSeq)
-  assert.equal(body.petHealth[0].eventSeq, adopted.eventSeq)
-  assert.equal(body.petHealth[0].authorityId, harness.server.store.getAuthority('default')?.authorityId)
-  assert.equal(body.petHealth[0].restoreGeneration, harness.server.store.getAuthority('default')?.restoreGeneration)
-  assert.equal(body.petHealth[0].commandLogSize, 1)
-  assert.ok(body.petHealth[0].eventLogSize >= adopted.eventSeq)
-  assert.equal(body.petHealth[0].canonicalOk, true)
-  assert.equal(body.petHealth[0].stuck, false)
-  assert.ok((body.authMetrics['auth.success'] ?? 0) >= 1)
-  assert.equal(body.backupMetrics['backup.success'], 1)
-  assert.equal(typeof body.rateMetrics, 'object')
-  assert.equal(body.lastError, null)
-  const text = JSON.stringify(body)
-  assert.doesNotMatch(text, /pairingCode|token|save_json|payload/i)
-  for (const path of ['/healthz', '/readyz']) {
-    const ready = await fetch('http://127.0.0.1:' + harness.server.address().port + path)
-    assert.equal(ready.status, 200)
-    const readyBody = await ready.json() as Record<string, unknown>
-    assert.equal(readyBody.ok, true)
-    assert.equal(readyBody.ready, true)
+  assert.deepEqual(body, {
+    ok: true,
+    service: 'qqpet-server',
+    live: true,
+    ready: true,
+    pets: 1,
+    catchingUp: false,
+    databaseReady: true,
+    hasError: false,
+  })
+  const publicText = JSON.stringify(body)
+  for (const forbidden of [
+    'petId', 'authorityId', 'revision', 'commandSeq', 'eventSeq', 'commandLogSize',
+    'eventLogSize', 'connections', 'petHealth', 'scheduler', 'lastError', 'database',
+  ]) {
+    assert.equal(forbidden in body, false, 'public health must not expose ' + forbidden)
   }
+  assert.doesNotMatch(publicText, /default|pairingCode|token|save_json|payload/i)
+
+  const detailResponse = await fetch(baseUrl + '/health', { headers: ownerAuthorization })
+  assert.equal(detailResponse.status, 200)
+  const detail = await detailResponse.json() as Record<string, any>
+  assert.equal(detail.ok, true)
+  assert.equal(detail.ready, true)
+  assert.equal(detail.journalMode, 'wal')
+  assert.equal(detail.synchronous, 'full')
+  assert.equal(detail.dbWritable, true)
+  assert.equal(detail.quickCheck, 'ok')
+  assert.deepEqual(detail.database, { writable: true, quickCheck: 'ok', error: null })
+  assert.equal(detail.commandSeq, adopted.commandSeq)
+  assert.equal(detail.commandLogSize, 1)
+  assert.ok(detail.eventLogSize >= adopted.eventSeq)
+  assert.equal(detail.pets, 1)
+  assert.equal(Array.isArray(detail.petHealth), true)
+  assert.equal(detail.petHealth.length, 1)
+  assert.equal(detail.petHealth[0].petId, 'default')
+  assert.equal(detail.petHealth[0].commandSeq, adopted.commandSeq)
+  assert.equal(detail.petHealth[0].eventSeq, adopted.eventSeq)
+  assert.equal(detail.petHealth[0].authorityId, harness.server.store.getAuthority('default')?.authorityId)
+  assert.equal(detail.petHealth[0].restoreGeneration, harness.server.store.getAuthority('default')?.restoreGeneration)
+  assert.equal(detail.petHealth[0].commandLogSize, 1)
+  assert.ok(detail.petHealth[0].eventLogSize >= adopted.eventSeq)
+  assert.equal(detail.petHealth[0].canonicalOk, true)
+  assert.equal(detail.petHealth[0].stuck, false)
+  assert.ok((detail.authMetrics['auth.success'] ?? 0) >= 1)
+  assert.equal(detail.backupMetrics['backup.success'], 1)
+  assert.equal(typeof detail.rateMetrics, 'object')
+  assert.equal(detail.lastError, null)
+  assert.doesNotMatch(JSON.stringify(detail), /pairingCode|token|save_json|payload/i)
+
+  const queryDetail = await fetch(baseUrl + '/health?detail=true', { headers: ownerAuthorization })
+  assert.equal(queryDetail.status, 200)
+  const queryDetailBody = await queryDetail.json() as Record<string, unknown>
+  assert.equal(Array.isArray(queryDetailBody.petHealth), true)
+
+  initializePet(harness.server.store, {
+    petId: 'other',
+    timeZone: 'UTC',
+    nowMs: Date.now(),
+  })
+  const scopedDetail = await fetch(baseUrl + '/health/detail', { headers: ownerAuthorization })
+  assert.equal(scopedDetail.status, 200)
+  const scopedDetailBody = await scopedDetail.json() as Record<string, any>
+  assert.equal(scopedDetailBody.pets, 1)
+  assert.deepEqual(scopedDetailBody.petHealth.map((entry: { petId: string }) => entry.petId), ['default'])
+  assert.deepEqual(scopedDetailBody.scheduler.map((entry: { petId: string }) => entry.petId), ['default'])
+  assert.doesNotMatch(JSON.stringify(scopedDetailBody), /"petId":"other"/)
+
+  const unauthorized = await fetch(baseUrl + '/health?detail=true')
+  assert.equal(unauthorized.status, 401)
+  const unauthorizedText = await unauthorized.text()
+  assert.doesNotMatch(unauthorizedText, /default|petId|authorityId|revision/i)
+  const invalidToken = await fetch(baseUrl + '/health/detail', {
+    headers: { authorization: 'Bearer not-a-real-token' },
+  })
+  assert.equal(invalidToken.status, 401)
+
+  const playerCode = harness.server.store.issuePairingCode('default', 'player', 60_000).code
+  const player = await connect(harness, {
+    kind: 'pairing',
+    code: playerCode,
+    deviceLabel: 'Player desktop',
+  })
+  await readUntil(player, 'ready')
+  const forbidden = await fetch(baseUrl + '/health/detail', {
+    headers: { authorization: 'Bearer ' + player.token },
+  })
+  assert.equal(forbidden.status, 403)
+  assert.deepEqual(await forbidden.json(), { ok: false, error: 'forbidden' })
+  await player.close()
+
+  const liveness = await fetch(baseUrl + '/healthz')
+  assert.equal(liveness.status, 200)
+  assert.deepEqual(await liveness.json(), { ok: true, service: 'qqpet-server', live: true })
+  const readiness = await fetch(baseUrl + '/readyz')
+  assert.equal(readiness.status, 200)
+  const readinessBody = await readiness.json() as Record<string, unknown>
+  assert.equal(readinessBody.ok, true)
+  assert.equal(readinessBody.ready, true)
+  assert.equal('petHealth' in readinessBody, false)
+  assert.equal('lastError' in readinessBody, false)
 
   const corruptStore = openDatabase(harness.dbPath)
   corruptStore.db.prepare("UPDATE pets SET engine_json = '{}' WHERE id = 'default'").run()
   corruptStore.close()
 
-  const liveness = await fetch('http://127.0.0.1:' + harness.server.address().port + '/healthz')
-  assert.equal(liveness.status, 200)
-  const livenessBody = await liveness.json() as Record<string, unknown>
-  assert.equal(livenessBody.ok, true)
-  assert.equal(livenessBody.ready, false)
-  const readiness = await fetch('http://127.0.0.1:' + harness.server.address().port + '/readyz')
-  assert.equal(readiness.status, 503)
-  const readinessBody = await readiness.json() as Record<string, unknown>
-  assert.equal(readinessBody.ok, false)
-  assert.equal(readinessBody.ready, false)
-  assert.equal(readinessBody.lastErrorEvent, 'canonical.health_failed')
-  assert.match(String(readinessBody.lastError), /canonical engine state is corrupt/)
+  const liveAfterCorruption = await fetch(baseUrl + '/healthz')
+  assert.equal(liveAfterCorruption.status, 200)
+  assert.deepEqual(await liveAfterCorruption.json(), { ok: true, service: 'qqpet-server', live: true })
+  const readinessAfterCorruption = await fetch(baseUrl + '/readyz')
+  assert.equal(readinessAfterCorruption.status, 503)
+  const readinessBodyAfterCorruption = await readinessAfterCorruption.json() as Record<string, unknown>
+  assert.equal(readinessBodyAfterCorruption.ok, false)
+  assert.equal(readinessBodyAfterCorruption.ready, false)
+  assert.equal(readinessBodyAfterCorruption.hasError, true)
+  for (const forbidden of ['petId', 'petHealth', 'authorityId', 'lastError', 'lastErrorEvent', 'revision']) {
+    assert.equal(forbidden in readinessBodyAfterCorruption, false, 'public readiness must not expose ' + forbidden)
+  }
+
+  const diagnosticResponse = await fetch(baseUrl + '/health?detail=true', { headers: ownerAuthorization })
+  assert.equal(diagnosticResponse.status, 200)
+  const diagnostic = await diagnosticResponse.json() as Record<string, any>
+  assert.equal(diagnostic.petHealth[0].petId, 'default')
+  assert.equal(diagnostic.petHealth[0].canonicalOk, false)
+  assert.equal(diagnostic.lastErrorEvent, 'canonical.health_failed')
+  assert.match(String(diagnostic.lastError), /canonical engine state is corrupt/)
 })
 
 test('readiness reports a read-only database as not writable', async () => {
@@ -716,14 +794,15 @@ test('readyz reports archived authority as unavailable while healthz stays live'
   const healthz = await fetch('http://127.0.0.1:' + harness.server.address().port + '/healthz')
   assert.equal(healthz.status, 200)
   const liveBody = await healthz.json() as Record<string, unknown>
-  assert.equal(liveBody.ok, true)
-  assert.equal(liveBody.ready, false)
+  assert.deepEqual(liveBody, { ok: true, service: 'qqpet-server', live: true })
   const readyz = await fetch('http://127.0.0.1:' + harness.server.address().port + '/readyz')
   assert.equal(readyz.status, 503)
   const readyBody = await readyz.json() as Record<string, unknown>
   assert.equal(readyBody.ok, false)
   assert.equal(readyBody.ready, false)
-  assert.equal(readyBody.authorityState, 'archived')
+  assert.equal('authorityState' in readyBody, false)
+  assert.equal('petHealth' in readyBody, false)
+  assert.equal(harness.server.health().authorityState, 'archived')
 })
 
 const serverRoot = fileURLToPath(new URL('../../..', import.meta.url))

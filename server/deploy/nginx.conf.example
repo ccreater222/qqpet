@@ -24,7 +24,7 @@ server {
 
     # Keep these routes exactly aligned with server/README.md:
     # /v1/sync is canonical, /sync is its WebSocket alias, and /healthz,
-    # /readyz and /health are the documented HTTP probes.
+    # /readyz, /health and /health/detail are the documented HTTP probes.
     location = /v1/sync {
         proxy_pass http://qqpet_sync;
         proxy_http_version 1.1;
@@ -55,6 +55,12 @@ server {
     }
 
     location = /health {
+        proxy_pass http://qqpet_sync;
+        proxy_set_header Host $host;
+        access_log off;
+    }
+
+    location = /health/detail {
         proxy_pass http://qqpet_sync;
         proxy_set_header Host $host;
         access_log off;

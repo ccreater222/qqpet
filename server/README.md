@@ -75,15 +75,18 @@ A player may submit ordinary gameplay commands.
 
 | Path | Method | Purpose |
 |---|---|---|
-| `/healthz` | GET | Liveness. Returns 200 while HTTP can respond. Body includes operational health. |
-| `/readyz` | GET | Readiness. Returns 200 only when DB, scheduler, canonical state, and authority are ready; otherwise 503. |
-| `/health` | GET | Detailed JSON health, including metrics/counters and scheduler state. No save contents or secrets. |
+| `/healthz` | GET | Liveness. Returns 200 while HTTP can respond. Lightweight aggregate body; no database probe. |
+| `/readyz` | GET | Readiness. Returns 200 only when DB, scheduler, canonical state, and authority are ready; otherwise 503. Public aggregate body only. |
+| `/health` | GET | Public aggregate health. With an owner device token (`Authorization: Bearer ...`), returns detailed health scoped to that owner's pet. |
+| `/health/detail` | GET | Explicit owner-authenticated detailed health. Same authentication and response as `/health` with a bearer token. |
 | `/v1/sync` | WebSocket upgrade | Canonical data plane. `/sync` is retained as an alias. |
 
 Do not expose `/v1/sync` publicly as plain `ws://`. Use Caddy/Nginx or another
-TLS terminator and forward WebSocket upgrade headers. Health responses include
+TLS terminator and forward WebSocket upgrade headers. Public health responses
+are aggregate and non-identifying; owner-authenticated detailed responses include
 revision, command/event sequence numbers, game time, scheduler catch-up state,
-connection count, authority state/epoch/generation, and operational metrics;
+per-pet connection count, authority state/epoch/generation, and operational
+metrics.
 they never include save JSON, pairing codes, device tokens, or session tokens.
 
 ## WebSocket protocol
@@ -268,9 +271,11 @@ Structured JSON logs include events such as `server.started`, `command.committed
 `backup.success`, `backup.failed`, and `server.stopped`. They include pet/device
 and command identifiers plus revision/event sequence, duration, and error code,
 but never payloads, save bodies, tokens, pairing codes, or answer keys. The
-health JSON exposes counter groups for commands, auth, rate limits, backups, and
-scheduler metrics. There is no separate Prometheus endpoint in this release;
-scrape `/health` JSON if needed.
+owner-authenticated detailed health JSON exposes counter groups for commands,
+auth, rate limits, backups, and scheduler metrics. There is no separate
+Prometheus endpoint in this release; scrape authenticated `/health/detail` JSON
+if needed. The expensive SQLite quick-check/write probe is cached for a bounded
+interval; `/healthz` never runs it.
 
 ## Docker and Compose
 
@@ -372,8 +377,8 @@ upstream.
 - TLS certificate/key paths;
 - `Upgrade` and `Connection` headers and `proxy_http_version 1.1` on both
   `/v1/sync` and its `/sync` alias;
-- exact proxy locations for the documented `/health`, `/healthz`, and `/readyz`
-  probes;
+- exact proxy locations for the documented `/health`, `/health/detail`,
+  `/healthz`, and `/readyz` probes;
 - a long `proxy_read_timeout`/`proxy_send_timeout`;
 - a 20 MiB client body limit;
 - a 301 redirect from HTTP to HTTPS.
@@ -565,7 +570,7 @@ two real Electron processes.
 | TLS/proxy change | Update Caddy/Nginx, keep WebSocket upgrade and long read timeout, verify `/readyz` and a desktop reconnect. |
 | Disk pressure | Check DB/WAL/backups; do not delete WAL or open live DB files; move verified backups to separate storage. |
 | Corrupt DB | Stop service, preserve files, restore latest verified backup with rollback fencing, then investigate disk/durability. |
-| Scheduler not ready | Inspect `/readyz` `petHealth`, `catchingUp`, `wallLagMs`, `lastError`, and structured logs; restart only after preserving DB/backups. |
+| Scheduler not ready | Inspect authenticated `/health/detail` (`petHealth`, `catchingUp`, `wallLagMs`, `lastError`) and structured logs; restart only after preserving DB/backups. |
 | Unexpected auth failures | Check rate-limit/auth metrics and device revocation; never log or paste plaintext tokens/codes. |
 
 Graceful shutdown uses `SIGTERM`/`SIGINT`, stops the scheduler, finalizes coverage
@@ -579,8 +584,11 @@ shutdown path runs.
   explicitly self-testing endpoints; use a TLS proxy for any remote client.
 - Do not expose the server port or `/health` publicly without edge controls.
   Caddy/Nginx should proxy only the intended host and paths.
-- Tokens and pairing codes travel only inside the first WebSocket frame, never
-  URLs, query strings, or headers. Keep logs free of raw auth frames.
+- Pairing codes travel only inside the first WebSocket frame. Device tokens
+  authenticate the WebSocket hello; an owner device token may also be sent as an
+  `Authorization: Bearer` header for owner-scoped detailed health. Tokens must
+  never be placed in URLs/query strings. Keep logs free of raw auth frames and
+  headers.
 - Device tokens and pairing codes are stored hashed. Device-local secrets
   (`aiKey`, `searchKey`, `webhookToken`) and local UI/window state are never part
   of a canonical projection or DB.
