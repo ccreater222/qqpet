@@ -22,6 +22,7 @@ export interface ServerConfig {
   maxSnapshotBytes: number
   maxReplayEvents: number
   maxConnectionsPerPet: number
+  maxPreAuthConnections: number
   helloTimeoutMs: number
   idleTimeoutMs: number
   pingIntervalMs: number
@@ -109,6 +110,12 @@ export function createServerConfig(input: ServerConfigInput = {}, env: NodeJS.Pr
     maxSnapshotBytes: integer(input.maxSnapshotBytes, 16 * 1024 * 1024, 'maxSnapshotBytes', 1024),
     maxReplayEvents: integer(input.maxReplayEvents, 10_000, 'maxReplayEvents', 1),
     maxConnectionsPerPet: integer(input.maxConnectionsPerPet, 8, 'maxConnectionsPerPet', 1),
+    maxPreAuthConnections: integer(
+      input.maxPreAuthConnections ?? env.QQPET_SYNC_MAX_PRE_AUTH_CONNECTIONS,
+      64,
+      'maxPreAuthConnections',
+      1,
+    ),
     helloTimeoutMs: integer(input.helloTimeoutMs, 5000, 'helloTimeoutMs', 100),
     idleTimeoutMs: integer(input.idleTimeoutMs, 60_000, 'idleTimeoutMs', 1000),
     pingIntervalMs: integer(input.pingIntervalMs, 20_000, 'pingIntervalMs', 1000),

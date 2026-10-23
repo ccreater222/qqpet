@@ -86,6 +86,7 @@ export class SessionService {
   private pingTimer: NodeJS.Timeout | undefined
   private catchingUpSource: ((petId: string) => boolean) | undefined
   private readonly preAuthRates = new Map<string, RateWindow>()
+  private readonly preAuthConnections = new Set<LiveConnection>()
   private readonly deviceCommandRates = new Map<string, RateWindow>()
   private readonly deviceExpensiveRates = new Map<string, RateWindow>()
 
@@ -108,6 +109,14 @@ export class SessionService {
 
   private isCatchingUp(petId: string): boolean {
     return this.catchingUpSource?.(petId) === true
+  }
+
+  hasPreAuthCapacity(): boolean {
+    return this.preAuthConnections.size < this.config.maxPreAuthConnections
+  }
+
+  preAuthConnectionCount(): number {
+    return this.preAuthConnections.size
   }
 
   private currentSurvivors(petId: string): CoverageSurvivor[] {
@@ -204,6 +213,7 @@ export class SessionService {
       alive: true,
       lastActivityMs: this.now(),
     }
+    this.preAuthConnections.add(connection)
     let initialized = false
     let closeRecorded = false
     const helloDeadline = setTimeout(() => {
@@ -216,6 +226,7 @@ export class SessionService {
       connection.lastActivityMs = this.now()
     })
     socket.on('close', () => {
+      this.preAuthConnections.delete(connection)
       if (closeRecorded) return
       closeRecorded = true
       if (connection.authenticated) this.hub.remove(connection, 'socket_closed')
@@ -228,6 +239,7 @@ export class SessionService {
       void this.onMessage(socket, connection, data, isBinary, preAuthKey)
         .then(() => {
           if (connection.authenticated === false) return
+          this.preAuthConnections.delete(connection)
           initialized = true
           clearTimeout(helloDeadline)
         })

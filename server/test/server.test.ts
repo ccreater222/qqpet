@@ -1320,6 +1320,136 @@ test('restore failure after the swap rolls back to the prior live DB', async t =
   await assert.rejects(readFile(dbPath + '.restore-previous'), /ENOENT/)
 })
 
+test('restore is refused while a running server holds the database and succeeds after clean shutdown', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-c9-restore-lock-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const dbPath = join(directory, 'restore.sqlite')
+  const backupPath = join(directory, 'backup.sqlite')
+  const generationFile = join(directory, 'restore-generation.txt')
+  const credentialFile = join(directory, 'credential.txt')
+  await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
+  await writeFile(credentialFile, 'operator-credential\n', { mode: 0o600 })
+  await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
+
+  const config = createServerConfig({
+    bind: '127.0.0.1',
+    port: 0,
+    dbPath,
+    backupDir: join(directory, 'backups'),
+    adminSocket: join(directory, 'admin.sock'),
+    restoreGenerationFile: generationFile,
+    schedulerEnabled: false,
+  })
+  const server = new SyncServer(config, openDatabase(dbPath))
+  await server.start()
+  const beforeAuthority = server.store.getAuthority('restore-pet')
+  try {
+    const failure = await runCliFailure([
+      'restore', '--from', backupPath, '--accept-rollback',
+      '--db', dbPath, '--restore-generation', '1',
+      '--owner-admin-credential', credentialFile,
+    ], { QQPET_SYNC_RESTORE_GENERATION_FILE: generationFile })
+    assert.match(failure.stderr, /in use by a running server/i)
+    const afterAuthority = server.store.getAuthority('restore-pet')
+    assert.equal(afterAuthority?.authorityId, beforeAuthority?.authorityId)
+    assert.equal(afterAuthority?.restoreGeneration, beforeAuthority?.restoreGeneration)
+    await assert.rejects(readFile(generationFile), /ENOENT/)
+  } finally {
+    await server.stop()
+  }
+
+  const restored = await runCli([
+    'restore', '--from', backupPath, '--accept-rollback',
+    '--db', dbPath, '--restore-generation', '1',
+    '--owner-admin-credential', credentialFile,
+  ], { QQPET_SYNC_RESTORE_GENERATION_FILE: generationFile })
+  const body = JSON.parse(restored.stdout) as { ok: boolean; restoreGeneration: number }
+  assert.equal(body.ok, true)
+  assert.equal(body.restoreGeneration, 1)
+  assert.equal((await readFile(generationFile, 'utf8')).trim(), '1')
+})
+
+test('startup fails closed when a published restore fence is ahead of the live DB', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-c9-restore-crash-fence-ahead-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const dbPath = join(directory, 'restore.sqlite')
+  const generationFile = join(directory, 'restore-generation.txt')
+  await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
+  await writeFile(generationFile, '1')
+  const config = createServerConfig({
+    bind: '127.0.0.1',
+    port: 0,
+    dbPath,
+    backupDir: join(directory, 'backups'),
+    adminSocket: join(directory, 'admin.sock'),
+    restoreGenerationFile: generationFile,
+    schedulerEnabled: false,
+  })
+  const server = new SyncServer(config, openDatabase(dbPath))
+  await assert.rejects(server.start(), /older than the recorded restore generation/)
+  await server.stop()
+})
+
+test('startup rejects a DB restore generation ahead of the external fence', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-c9-restore-crash-fence-behind-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const dbPath = join(directory, 'restore.sqlite')
+  const generationFile = join(directory, 'restore-generation.txt')
+  await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
+  const seed = openDatabase(dbPath)
+  seed.resetAuthorityAfterRestore('restore-pet', 1)
+  assert.equal(seed.maxRestoreGeneration(), 1)
+  seed.close()
+  await writeFile(generationFile, '0')
+  const config = createServerConfig({
+    bind: '127.0.0.1',
+    port: 0,
+    dbPath,
+    backupDir: join(directory, 'backups'),
+    adminSocket: join(directory, 'admin.sock'),
+    restoreGenerationFile: generationFile,
+    schedulerEnabled: false,
+  })
+  const server = new SyncServer(config, openDatabase(dbPath))
+  await assert.rejects(server.start(), /does not match the recorded restore fence/)
+  await server.stop()
+})
+
+test('restore failure after fence publication rolls the external fence back', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-c9-restore-fence-rollback-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const dbPath = join(directory, 'restore.sqlite')
+  const backupPath = join(directory, 'backup.sqlite')
+  const generationFile = join(directory, 'restore-generation.txt')
+  const credentialFile = join(directory, 'credential.txt')
+  await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
+  await writeFile(credentialFile, 'operator-credential\n', { mode: 0o600 })
+  await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
+  await writeFile(generationFile, '0')
+
+  const beforeStore = openDatabase(dbPath)
+  const beforeAuthority = beforeStore.getAuthority('restore-pet')
+  beforeStore.close()
+  const previousPath = dbPath + '.restore-previous'
+  await mkdir(previousPath)
+  await writeFile(join(previousPath, 'blocker'), 'x')
+
+  const failure = await runCliFailure([
+    'restore', '--from', backupPath, '--accept-rollback',
+    '--db', dbPath, '--restore-generation', '1',
+    '--owner-admin-credential', credentialFile,
+  ], { QQPET_SYNC_RESTORE_GENERATION_FILE: generationFile })
+  assert.match(failure.stderr, /EISDIR|directory/i)
+  assert.equal((await readFile(generationFile, 'utf8')).trim(), '0')
+  assert.equal(await readFile(join(previousPath, 'blocker'), 'utf8'), 'x')
+
+  const afterStore = openDatabase(dbPath)
+  const afterAuthority = afterStore.getAuthority('restore-pet')
+  assert.equal(afterAuthority?.authorityId, beforeAuthority?.authorityId)
+  assert.equal(afterAuthority?.restoreGeneration, beforeAuthority?.restoreGeneration)
+  afterStore.close()
+})
+
 test('finalizeSurvivor preserves existing ends and caps provenance at a known suspend', () => {
   const survivor: CoverageSurvivor = {
     kind: 'server_connection',
@@ -1699,6 +1829,43 @@ test('owner server settings commands persist without unauthenticated HTTP exposu
   assert.equal(denied.error?.code, 'unauthorized')
   await owner.close()
   await player.close()
+})
+
+test('websocket parser cap tightly bounds oversized pre-auth frames', async t => {
+  const harness = await createHarness(t, {
+    maxFrameBytes: 4096,
+    maxCommandBytes: 1024,
+    helloTimeoutMs: 5000,
+    maxPreAuthConnections: 2,
+  })
+  const wss = (harness.server as unknown as { wss: { options: { maxPayload: number } } }).wss
+  assert.equal(wss.options.maxPayload, harness.config.maxFrameBytes + 1)
+
+  const socket = await rawConnect(harness.url)
+  const closed = nextClose(socket)
+  socket.send('x'.repeat(64 * 1024))
+  const close = await closed
+  assert.equal(close.code, 4005)
+  assert.equal(close.reason, 'payload_too_large')
+})
+
+test('pre-auth connection cap rejects excess handshakes and releases on close', async t => {
+  const harness = await createHarness(t, {
+    helloTimeoutMs: 5000,
+    maxPreAuthConnections: 1,
+  })
+  const first = await rawConnect(harness.url)
+  await assert.rejects(rawConnect(harness.url), /429|unexpected server response/i)
+
+  const firstClosed = new Promise<void>(resolve => first.once('close', () => resolve()))
+  first.close()
+  await firstClosed
+  await new Promise(resolve => setTimeout(resolve, 20))
+
+  const third = await rawConnect(harness.url)
+  const thirdClosed = new Promise<void>(resolve => third.once('close', () => resolve()))
+  third.close()
+  await thirdClosed
 })
 
 test('oversized command frames are closed with 4005 before dispatch', async t => {

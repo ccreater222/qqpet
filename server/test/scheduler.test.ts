@@ -560,6 +560,45 @@ test('readiness detects a stalled scheduler pass', async t => {
   assert.equal(health.scheduler[0]?.stuck, true)
 })
 
+test('commands are rejected while readiness is stalled at a stale anchor', async t => {
+  const clock = makeClock(Date.now())
+  const h = await createHarness(t, clock, {
+    advanceWhileEmpty: true,
+    schedulerEnabled: true,
+    schedulerPollMs: 60_000,
+  })
+  adoptDirect(h)
+  const owner = await pairOwner(h)
+  const before = canonical(h)
+  clock.advance(301_000)
+
+  const stalled = h.server.health()
+  assert.equal(stalled.ready, false)
+  assert.equal(stalled.petHealth[0]?.stuck, true)
+
+  const rejected = await sendCommand(owner, 'rename-during-stall', {
+    type: 'pet.rename',
+    payload: { name: 'MustNotApplyDuringStall' },
+  })
+  assert.equal(rejected.status, 'rejected')
+  assert.equal(rejected.error?.code, 'server_catching_up')
+  const afterRejected = canonical(h)
+  assert.equal(afterRejected.engine.save.petInfo.name, before.engine.save.petInfo.name)
+
+  await h.server.scheduler.runOnce()
+  const recovered = h.server.health()
+  assert.equal(recovered.ready, true)
+  assert.equal(recovered.petHealth[0]?.stuck, false)
+
+  const accepted = await sendCommand(owner, 'rename-after-stall', {
+    type: 'pet.rename',
+    payload: { name: 'AppliedAfterStall' },
+  })
+  assert.equal(accepted.status, 'applied')
+  assert.equal(canonical(h).engine.save.petInfo.name, 'AppliedAfterStall')
+  await owner.close()
+})
+
 test('scheduled work rewards are ordered and committed exactly once across a restart', async t => {
   const clock = makeClock(Date.now())
   const h = await createHarness(t, clock, { advanceWhileEmpty: true })

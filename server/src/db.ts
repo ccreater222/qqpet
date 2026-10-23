@@ -1437,6 +1437,12 @@ export class DatabaseStore {
     if (recorded !== undefined && recorded > current) {
       throw new Error('database restore is older than the recorded restore generation; run restore --accept-rollback')
     }
+    if (recorded !== undefined && recorded !== current) {
+      throw new Error('database restore generation does not match the recorded restore fence; run restore --accept-rollback')
+    }
+    if (filePath !== undefined && recorded === undefined && current > 0) {
+      throw new Error('database restore generation fence is missing; run restore --accept-rollback')
+    }
     return current
   }
 

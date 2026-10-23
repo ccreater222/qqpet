@@ -236,6 +236,7 @@ paths. Unknown environment variables are ignored.
 | `QQPET_SYNC_LOG_RETENTION_DAYS` | `30` | Structured-log retention setting. |
 | `QQPET_SYNC_MAX_FRAME_BYTES` | `16777216` | General WebSocket frame ceiling. |
 | `QQPET_SYNC_MAX_COMMAND_BYTES` | `262144` | Command payload ceiling. Admin import may use the snapshot ceiling. |
+| `QQPET_SYNC_MAX_PRE_AUTH_CONNECTIONS` | `64` | Concurrent unauthenticated WebSocket connection ceiling. |
 | `QQPET_SYNC_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. |
 
 These current-release limits are code defaults and are not environment
@@ -497,8 +498,10 @@ that stale clients cannot keep reading or writing an old lineage.
    sudo systemctl stop qqpet-sync.service
    ```
 
-2. Confirm there is no pending WAL data. The restore command refuses if a
-   non-empty `qqpet.sqlite-wal` remains.
+2. Do not infer a stopped server from WAL size. The server holds a lifetime
+   SQLite advisory lock for as long as it runs, and restore acquires the same
+   lock. Restore therefore refuses with `database is in use` while the service
+   is still running, including when an idle server has a zero-byte WAL file.
 
 3. Copy the current DB aside for emergency rollback. Do the same for the
    external restore-generation file.
@@ -516,8 +519,10 @@ that stale clients cannot keep reading or writing an old lineage.
    ```
 
    The CLI validates the whole candidate, applies the new authority UUID and
-   generation in a staged copy, atomically swaps it into place, and writes the
-   external generation fence. Repeated restores must always advance the
+   generation in a staged copy, durably publishes the external generation
+   fence, and then atomically swaps the DB into place. Startup requires the DB
+   and external fence to agree exactly, so a crash between those steps fails
+   closed until restore is rerun. Repeated restores must always advance the
    generation and never reuse an authority UUID.
 
 5. Start the service and verify readiness:

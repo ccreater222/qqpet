@@ -6,6 +6,7 @@ import WebSocket from 'ws'
 import { PROTOCOL_VERSION, type ServerToClient } from '../../src/shared/sync/index'
 import { createServerConfig, type ServerConfig } from './config'
 import { initializePet, inspectRestoreSource, openDatabase, openDatabaseReadOnly, readRestoreGenerationRecord } from './db'
+import { acquireDatabaseLifetimeLock } from './db-lock'
 import { createBackupPath, SyncServer } from './index'
 
 interface ParsedArgs {
@@ -115,21 +116,8 @@ async function readLiveRestoreGeneration(path: string): Promise<number | undefin
   }
 }
 
-async function assertLiveDatabaseStopped(path: string): Promise<void> {
-  try {
-    const info = await stat(path + '-wal')
-    if (info.size > 0) {
-      throw new Error('live database has pending WAL data; stop the server and retry restore')
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
-    throw error
-  }
-}
-
 async function installStagedDatabase(stagedPath: string, livePath: string, previousPath: string): Promise<boolean> {
   const hadLive = await isRegularFile(livePath)
-  await assertLiveDatabaseStopped(livePath)
   await rm(previousPath, { force: true })
   await removeDatabaseSidecars(previousPath)
   if (hadLive) {
@@ -158,11 +146,25 @@ async function rollbackInstalledDatabase(livePath: string, previousPath: string,
   await syncDirectoryBestEffort(dirname(livePath))
 }
 
-async function writeRestoreGeneration(path: string, generation: number): Promise<void> {
+interface FileSnapshot {
+  exists: boolean
+  contents: Buffer
+}
+
+async function snapshotFile(path: string): Promise<FileSnapshot> {
+  try {
+    return { exists: true, contents: await readFile(path) }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { exists: false, contents: Buffer.alloc(0) }
+    throw error
+  }
+}
+
+async function writeFileDurably(path: string, contents: string | Uint8Array): Promise<void> {
   const temporaryPath = path + '.restore-' + process.pid + '-' + randomUUID() + '.tmp'
   try {
     await mkdir(dirname(path), { recursive: true })
-    await writeFile(temporaryPath, String(generation) + '\n', { mode: 0o600 })
+    await writeFile(temporaryPath, contents, { mode: 0o600 })
     await syncFile(temporaryPath)
     await rename(temporaryPath, path)
     await syncDirectoryBestEffort(dirname(path))
@@ -173,6 +175,19 @@ async function writeRestoreGeneration(path: string, generation: number): Promise
       // A cleanup failure after the atomic rename must not report restore failure.
     }
   }
+}
+
+async function writeRestoreGeneration(path: string, generation: number): Promise<void> {
+  await writeFileDurably(path, generation.toString() + String.fromCharCode(10))
+}
+
+async function restoreFileSnapshot(path: string, snapshot: FileSnapshot): Promise<void> {
+  if (snapshot.exists) {
+    await writeFileDurably(path, snapshot.contents)
+    return
+  }
+  await rm(path, { force: true })
+  await syncDirectoryBestEffort(dirname(path))
 }
 
 function sameStringSet(left: string[], right: string[]): boolean {
@@ -299,104 +314,126 @@ async function restore(args: ParsedArgs): Promise<void> {
   }
   if (sourceStat.isFile() === false) throw new Error('backup is not a regular file: ' + from)
 
-  // Validate the entire candidate and its generation fence before the live DB
-  // is opened for writing or replaced.
-  const source = inspectRestoreSource(from)
-  const recorded = readRestoreGenerationRecord(config.restoreGenerationFile)
-  const liveGeneration = await readLiveRestoreGeneration(config.dbPath)
-  const currentGeneration = Math.max(source.maxRestoreGeneration, recorded ?? 0, liveGeneration ?? 0)
-  if (Number.isSafeInteger(currentGeneration) === false || currentGeneration < 0) {
-    throw new Error('restore generation is invalid')
-  }
-  let nextGeneration: number
-  if (requested === undefined) {
-    if (currentGeneration === Number.MAX_SAFE_INTEGER) throw new Error('restore generation cannot advance')
-    nextGeneration = currentGeneration + 1
-  } else {
-    if (requested <= currentGeneration) {
-      throw new Error('--restore-generation must advance beyond the current/recorded generation')
-    }
-    nextGeneration = requested
-  }
-  if (Number.isSafeInteger(nextGeneration) === false || nextGeneration < 0) {
-    throw new Error('restore generation is invalid')
-  }
-
-  const previousPath = config.dbPath + '.restore-previous'
-  let stagedPath: string | undefined
-  let installed = false
-  let committed = false
-  let hadLive = false
+  await mkdir(dirname(config.dbPath), { recursive: true })
+  const databaseLock = acquireDatabaseLifetimeLock(config.dbPath)
   try {
-    await mkdir(dirname(config.dbPath), { recursive: true })
-    const stagedName = '.' + basename(config.dbPath) + '.restore-' + process.pid + '-' + randomUUID() + '.tmp'
-    stagedPath = join(dirname(config.dbPath), stagedName)
-    await copyFile(from, stagedPath, constants.COPYFILE_EXCL)
-
-    // Reset authority only in the staged copy. A failure here cannot alter the
-    // live database, and the reset is committed in one staging transaction.
-    const staged = openDatabase(stagedPath)
-    try {
-      for (const petId of source.petIds) staged.loadCanonical(petId)
-      staged.resetAuthoritiesAfterRestore(source.petIds, nextGeneration)
-    } finally {
-      staged.close()
+    // Validate the entire candidate and its generation fence before the live DB
+    // is opened for writing or replaced.
+    const source = inspectRestoreSource(from)
+    const recorded = readRestoreGenerationRecord(config.restoreGenerationFile)
+    const liveGeneration = await readLiveRestoreGeneration(config.dbPath)
+    const currentGeneration = Math.max(source.maxRestoreGeneration, recorded ?? 0, liveGeneration ?? 0)
+    if (Number.isSafeInteger(currentGeneration) === false || currentGeneration < 0) {
+      throw new Error('restore generation is invalid')
     }
-
-    // Re-open and verify the staged result before it can become live.
-    const verified = inspectRestoreSource(stagedPath)
-    requireRestoreCondition(sameStringSet(verified.petIds, source.petIds), 'restored pet set changed unexpectedly')
-    requireRestoreCondition(verified.maxRestoreGeneration === nextGeneration, 'staged restore generation was not applied')
-    const verifiedAuthorities = new Map(verified.authorities.map(authority => [authority.petId, authority]))
-    requireRestoreCondition(verifiedAuthorities.size === source.authorities.length, 'staged restore authority set is incomplete')
-    for (const original of source.authorities) {
-      const restored = verifiedAuthorities.get(original.petId)
-      if (restored === undefined) throw new Error('staged restore authority is missing: ' + original.petId)
-      requireRestoreCondition(restored.restoreGeneration === nextGeneration, 'staged restore generation was not applied: ' + original.petId)
-      requireRestoreCondition((restored.authorityId === original.authorityId) === false, 'staged restore did not rotate authority: ' + original.petId)
-      requireRestoreCondition(restored.epoch === original.epoch + 1, 'staged restore did not advance authority epoch: ' + original.petId)
-      requireRestoreCondition(
-        restored.state === 'active' && restored.owner === 'server',
-        'staged restore authority is not active on the server: ' + original.petId,
-      )
-    }
-
-    await syncFile(stagedPath)
-    hadLive = await isRegularFile(config.dbPath)
-    await installStagedDatabase(stagedPath, config.dbPath, previousPath)
-    installed = true
-
-    // The live DB now points at the verified staged file. Publish the external
-    // generation fence last; if that fails, roll the previous DB back below.
-    if (config.restoreGenerationFile !== undefined) {
-      await writeRestoreGeneration(config.restoreGenerationFile, nextGeneration)
-    }
-    committed = true
-    print({
-      ok: true,
-      restoredFrom: from,
-      pets: verified.petIds,
-      restoreGeneration: nextGeneration,
-      authority: verified.authorities.map(authority => ({
-        petId: authority.petId,
-        authorityId: authority.authorityId,
-        epoch: authority.epoch,
-        state: authority.state,
-      })),
-    })
-  } catch (error) {
-    if (installed && committed === false) {
-      try {
-        await rollbackInstalledDatabase(config.dbPath, previousPath, hadLive)
-      } catch (rollbackError) {
-        const originalMessage = error instanceof Error ? error.message : String(error)
-        const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-        throw new Error('restore failed and rollback failed: ' + rollbackMessage + '; original error: ' + originalMessage)
+    let nextGeneration: number
+    if (requested === undefined) {
+      if (currentGeneration === Number.MAX_SAFE_INTEGER) throw new Error('restore generation cannot advance')
+      nextGeneration = currentGeneration + 1
+    } else {
+      if (requested <= currentGeneration) {
+        throw new Error('--restore-generation must advance beyond the current/recorded generation')
       }
+      nextGeneration = requested
     }
-    throw error
+    if (Number.isSafeInteger(nextGeneration) === false || nextGeneration < 0) {
+      throw new Error('restore generation is invalid')
+    }
+
+    const previousPath = config.dbPath + '.restore-previous'
+    const generationPath = config.restoreGenerationFile
+    let stagedPath: string | undefined
+    let installed = false
+    let fencePublished = false
+    let committed = false
+    let hadLive = false
+    let fenceSnapshot: FileSnapshot | undefined
+    try {
+      await mkdir(dirname(config.dbPath), { recursive: true })
+      const stagedName = '.' + basename(config.dbPath) + '.restore-' + process.pid + '-' + randomUUID() + '.tmp'
+      stagedPath = join(dirname(config.dbPath), stagedName)
+      await copyFile(from, stagedPath, constants.COPYFILE_EXCL)
+
+      // Reset authority only in the staged copy. A failure here cannot alter the
+      // live database, and the reset is committed in one staging transaction.
+      const staged = openDatabase(stagedPath)
+      try {
+        for (const petId of source.petIds) staged.loadCanonical(petId)
+        staged.resetAuthoritiesAfterRestore(source.petIds, nextGeneration)
+      } finally {
+        staged.close()
+      }
+
+      // Re-open and verify the staged result before it can become live.
+      const verified = inspectRestoreSource(stagedPath)
+      requireRestoreCondition(sameStringSet(verified.petIds, source.petIds), 'restored pet set changed unexpectedly')
+      requireRestoreCondition(verified.maxRestoreGeneration === nextGeneration, 'staged restore generation was not applied')
+      const verifiedAuthorities = new Map(verified.authorities.map(authority => [authority.petId, authority]))
+      requireRestoreCondition(verifiedAuthorities.size === source.authorities.length, 'staged restore authority set is incomplete')
+      for (const original of source.authorities) {
+        const restored = verifiedAuthorities.get(original.petId)
+        if (restored === undefined) throw new Error('staged restore authority is missing: ' + original.petId)
+        requireRestoreCondition(restored.restoreGeneration === nextGeneration, 'staged restore generation was not applied: ' + original.petId)
+        requireRestoreCondition((restored.authorityId === original.authorityId) === false, 'staged restore did not rotate authority: ' + original.petId)
+        requireRestoreCondition(restored.epoch === original.epoch + 1, 'staged restore did not advance authority epoch: ' + original.petId)
+        requireRestoreCondition(
+          restored.state === 'active' && restored.owner === 'server',
+          'staged restore authority is not active on the server: ' + original.petId,
+        )
+      }
+
+      await syncFile(stagedPath)
+
+      // Publish the durable external fence before the live DB swap. A crash
+      // between the two operations leaves the fence ahead of the DB, so startup
+      // rejects the mismatch instead of serving an unverified authority.
+      if (generationPath !== undefined) {
+        fenceSnapshot = await snapshotFile(generationPath)
+        await writeRestoreGeneration(generationPath, nextGeneration)
+        fencePublished = true
+      }
+
+      hadLive = await installStagedDatabase(stagedPath, config.dbPath, previousPath)
+      installed = true
+      committed = true
+      print({
+        ok: true,
+        restoredFrom: from,
+        pets: verified.petIds,
+        restoreGeneration: nextGeneration,
+        authority: verified.authorities.map(authority => ({
+          petId: authority.petId,
+          authorityId: authority.authorityId,
+          epoch: authority.epoch,
+          state: authority.state,
+        })),
+      })
+    } catch (error) {
+      const rollbackErrors: string[] = []
+      if (installed && committed === false) {
+        try {
+          await rollbackInstalledDatabase(config.dbPath, previousPath, hadLive)
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : String(rollbackError))
+        }
+      }
+      if (fencePublished && committed === false && generationPath !== undefined && fenceSnapshot !== undefined) {
+        try {
+          await restoreFileSnapshot(generationPath, fenceSnapshot)
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : String(rollbackError))
+        }
+      }
+      if (rollbackErrors.length > 0) {
+        const originalMessage = error instanceof Error ? error.message : String(error)
+        throw new Error('restore failed and rollback failed: ' + rollbackErrors.join('; ') + '; original error: ' + originalMessage)
+      }
+      throw error
+    } finally {
+      if (stagedPath !== undefined) await removeDatabaseFilesBestEffort(stagedPath)
+    }
   } finally {
-    if (stagedPath !== undefined) await removeDatabaseFilesBestEffort(stagedPath)
+    databaseLock.release()
   }
 }
 

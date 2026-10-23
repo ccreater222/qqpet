@@ -106,24 +106,31 @@ export class SchedulerService {
     return this.catchingUp.has(petId) || this.catchUpFailures.has(petId)
   }
 
+  /** Commands and readiness share the same historical-time and liveness fence. */
+  isCommandBlocked(petId: string): boolean {
+    const authority = this.store.getAuthority(petId)
+    if (authority?.state !== 'active') return false
+    return this.isCatchUpBlocked(petId) || this.isStuck(petId)
+  }
+
   isReady(petId: string): boolean {
     if (this.stopped) return false
-    if (this.isCatchUpBlocked(petId)) return false
     const authority = this.store.getAuthority(petId)
-    return authority?.state === 'active' && this.isStuck(petId) === false
+    return authority?.state === 'active' && this.isCommandBlocked(petId) === false
   }
 
   private isStuck(petId: string): boolean {
     if (this.config.schedulerEnabled === false || this.started === false || this.stopped) return false
+    const authority = this.store.getAuthority(petId)
+    if (authority?.state !== 'active') return false
     if (this.catchingUp.has(petId) || this.catchUpFailures.has(petId)) return false
     const now = this.now()
     const passReference = this.lastRunAtMs ?? this.startedAtMs
     const passStaleAfterMs = Math.max(this.config.schedulerPollMs * 5, 30_000)
     if (passReference !== null && now - passReference > passStaleAfterMs) return true
     const pet = this.store.getPet(petId)
-    const authority = this.store.getAuthority(petId)
     const settings = this.store.getSettings(petId)
-    if (pet === undefined || authority === undefined || authority.state !== 'active') return false
+    if (pet === undefined) return false
     // A live or advance-while-empty pet should advance at least one tick while
     // the scheduler remains healthy. A frozen zero-client pet legitimately
     // leaves its anchor behind until the next connection.

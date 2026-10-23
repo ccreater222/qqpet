@@ -7,6 +7,7 @@ import { createServerConfig, type ServerConfig } from './config'
 import { AuthService } from './auth'
 import { CommandService } from './command-service'
 import { DatabaseStore, openDatabase, type DatabaseOperationalHealth } from './db'
+import { acquireDatabaseLifetimeLock, type DatabaseLifetimeLock } from './db-lock'
 import { createLogger, type Logger } from './logging'
 import { MetricsRegistry } from './metrics'
 import { RuntimeHost } from './runtime-host'
@@ -83,6 +84,7 @@ export class SyncServer {
   readonly scheduler: SchedulerService
   private readonly now: () => number
   private started = false
+  private databaseLock: DatabaseLifetimeLock | undefined
   private lastError: { atMs: number; event: string; message: string } | null = null
 
   constructor(
@@ -111,14 +113,15 @@ export class SyncServer {
     const commands = new CommandService(store, auth, new RuntimeHost(), this.logger, this.metrics, now)
     this.sessions = new SessionService(config, store, auth, commands, this.logger, this.metrics, now)
     this.scheduler = new SchedulerService(config, store, commands, this.sessions.hub, this.logger, this.metrics, now)
-    commands.setCatchingUpGate(petId => this.scheduler.isCatchUpBlocked(petId))
+    commands.setCatchingUpGate(petId => this.scheduler.isCommandBlocked(petId))
     this.sessions.setCatchingUpSource(petId => this.scheduler.isCatchUpBlocked(petId))
     this.http = createServer((request, response) => {
       void this.handleHttp(request, response)
     })
-    // Keep ws' parser from racing us to a protocol 1009 close. Frames that
-    // exceed the application limit are rejected in SessionService with 4005.
-    const wsMaxPayload = Math.max(config.maxFrameBytes * 2, 64 * 1024 * 1024)
+    // Allow one byte beyond the application ceiling so SessionService can emit
+    // the protocol 4005 close, while the parser still bounds pre-auth memory.
+    // Frames much larger than this are remapped from ws 1009 to 4005 below.
+    const wsMaxPayload = Math.min(2 ** 31 - 1, config.maxFrameBytes + 1)
     this.wss = new WebSocketServer({
       noServer: true,
       maxPayload: wsMaxPayload,
@@ -127,6 +130,11 @@ export class SyncServer {
     this.http.on('upgrade', (request, socket, head) => {
       if (request.url !== '/sync' && request.url !== '/v1/sync') {
         socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
+        socket.destroy()
+        return
+      }
+      if (this.sessions.hasPreAuthCapacity() === false) {
+        socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
         socket.destroy()
         return
       }
@@ -156,48 +164,59 @@ export class SyncServer {
     if (this.started) return
     await mkdir(dirname(this.config.dbPath), { recursive: true })
     await mkdir(this.config.backupDir, { recursive: true })
-    this.store.verifyRestoreGeneration(this.config.restoreGenerationFile)
-    // Fail closed before accepting connections if any canonical pet is corrupt.
-    for (const pet of this.store.listPets()) this.store.loadCanonical(pet.id)
-    const startupAt = this.now()
-    const repaired = this.store.repairCoverageOnStartup(startupAt)
-    if (repaired > 0) this.logger.info('coverage.repaired', { intervals: repaired })
-    this.sessions.start()
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error): void => reject(error)
-      this.http.once('error', onError)
-      this.http.listen(this.config.port, this.config.bind, () => {
-        this.http.off('error', onError)
-        resolve()
+    this.databaseLock = acquireDatabaseLifetimeLock(this.config.dbPath)
+    try {
+      this.store.verifyRestoreGeneration(this.config.restoreGenerationFile)
+      // Fail closed before accepting connections if any canonical pet is corrupt.
+      for (const pet of this.store.listPets()) this.store.loadCanonical(pet.id)
+      const startupAt = this.now()
+      const repaired = this.store.repairCoverageOnStartup(startupAt)
+      if (repaired > 0) this.logger.info('coverage.repaired', { intervals: repaired })
+      this.sessions.start()
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error): void => reject(error)
+        this.http.once('error', onError)
+        this.http.listen(this.config.port, this.config.bind, () => {
+          this.http.off('error', onError)
+          resolve()
+        })
       })
-    })
-    this.started = true
-    this.scheduler.start()
-    this.logger.info('server.started', {
-      bind: this.address().address,
-      port: this.address().port,
-      wsPath: '/v1/sync',
-    })
+      this.started = true
+      this.scheduler.start()
+      this.logger.info('server.started', {
+        bind: this.address().address,
+        port: this.address().port,
+        wsPath: '/v1/sync',
+      })
+    } catch (error) {
+      this.databaseLock?.release()
+      this.databaseLock = undefined
+      throw error
+    }
   }
 
   async stop(): Promise<void> {
-    if (!this.started) {
+    try {
+      if (!this.started) {
+        await this.scheduler.stop()
+        return
+      }
+      this.started = false
       await this.scheduler.stop()
+      this.store.finalizeCoverageOperationsOnShutdown(this.now())
+      this.sessions.stop()
+      await new Promise<void>(resolve => {
+        this.wss.close(() => resolve())
+      })
+      await new Promise<void>((resolve, reject) => {
+        this.http.close(error => error === undefined ? resolve() : reject(error))
+      })
+      this.logger.info('server.stopped')
+    } finally {
       this.store.close()
-      return
+      this.databaseLock?.release()
+      this.databaseLock = undefined
     }
-    this.started = false
-    await this.scheduler.stop()
-    this.store.finalizeCoverageOperationsOnShutdown(this.now())
-    this.sessions.stop()
-    await new Promise<void>(resolve => {
-      this.wss.close(() => resolve())
-    })
-    await new Promise<void>((resolve, reject) => {
-      this.http.close(error => error === undefined ? resolve() : reject(error))
-    })
-    this.store.close()
-    this.logger.info('server.stopped')
   }
 
   address(): ServerAddress {
