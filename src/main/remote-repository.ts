@@ -231,7 +231,6 @@ export class RemoteRepository {
   private readonly exportRequestTimeoutMs: number
 
   private deviceOverlay: DeviceLocalOverlay
-  private readonly seededDeviceOverlay: DeviceLocalOverlay | null
   private config: RemoteSyncConfig | null = null
   private token: string | null = null
   private loaded = false
@@ -260,6 +259,7 @@ export class RemoteRepository {
   private pendingCommand: PendingCommand | null = null
   private pendingCommandRefresh: PendingCommandRefresh | null = null
   private projectionRefreshPending = false
+  private projectionRefreshAwaitingReady = false
   private authorityResetPending = false
   private reconciledOnConnection = false
   private readonly pendingExports = new Map<string, PendingExport>()
@@ -279,6 +279,10 @@ export class RemoteRepository {
   private welcomeHeadEventSeq = 0
   private welcomeAuthority: WireAuthority | null = null
   private welcomeDelivery: 'none' | 'snapshot' | 'replay' | 'replay+snapshot' | null = null
+  private preWelcomeAuthority: WireAuthority | null = null
+  private expectedSnapshotAuthority: WireAuthority | null = null
+  private expectedSnapshotMinRevision = 0
+  private expectedSnapshotMinEventSeq = 0
   private pendingResync = false
 
   private persistence: Promise<void> = Promise.resolve()
@@ -313,7 +317,6 @@ export class RemoteRepository {
     this.deviceOverlay = options.deviceOverlay === undefined
       ? toDeviceLocalOverlay(startSave(null), 'remote-device')
       : clone(options.deviceOverlay)
-    this.seededDeviceOverlay = options.deviceOverlay === undefined ? null : clone(options.deviceOverlay)
   }
 
   get roleValue(): DeviceRole {
@@ -446,6 +449,7 @@ export class RemoteRepository {
     }
     this.pendingCommandRefresh = null
     this.projectionRefreshPending = false
+    this.projectionRefreshAwaitingReady = false
     if (this.pendingCommand !== null) {
       const pending = this.pendingCommand
       this.pendingCommand = null
@@ -712,10 +716,8 @@ export class RemoteRepository {
     this.replayInvalid = false
     this.replayFromEventSeq = 0
     this.replayToEventSeq = 0
-    this.welcomeHeadRevision = 0
-    this.welcomeHeadEventSeq = 0
-    this.welcomeAuthority = null
-    this.welcomeDelivery = null
+    this.clearWelcomeHandshake()
+    this.clearExpectedSnapshot()
     this.pendingResync = false
     this.syncMode = 'initial'
     this.expectedSnapshot = false
@@ -861,11 +863,20 @@ export class RemoteRepository {
     }
     this.reconnectAttempt = 0
     this.role = frame.deviceRole
+    this.preWelcomeAuthority = this.projection !== null
+      ? clone(this.projection.authority)
+      : this.authority === null
+        ? null
+        : clone(this.authority)
     this.welcomeHeadRevision = frame.headRevision
     this.welcomeHeadEventSeq = frame.headEventSeq
     this.welcomeAuthority = clone(frame.authority)
     this.welcomeDelivery = frame.delivery
-    this.applyAuthority(frame.authority)
+    // Preserve the handshake bounds before any cache/authority mutation so the
+    // snapshot and ready frames can be checked against the same lineage.
+    this.expectedSnapshotAuthority = clone(frame.authority)
+    this.expectedSnapshotMinRevision = Math.max(this.cursor.revision, frame.headRevision)
+    this.expectedSnapshotMinEventSeq = Math.max(this.cursor.eventSeq, frame.headEventSeq)
     this.timeZone = frame.timeZone
     this.advanceWhileEmpty = frame.advanceWhileEmpty
     if (frame.weatherLocation !== undefined) this.weatherLocation = frame.weatherLocation
@@ -890,14 +901,18 @@ export class RemoteRepository {
     this.queuePersistence(() => this.tokenStore.saveConfig(this.buildConfig()))
     this.expectedSnapshot = frame.delivery === 'snapshot' || frame.delivery === 'replay+snapshot'
     this.expectedReplay = frame.delivery === 'replay' || frame.delivery === 'replay+snapshot'
-    if (this.authorityResetPending) {
-      // Authentication succeeded but the server planned a cached/replay-only
-      // delivery. A reset lineage must still recover from a full snapshot.
+    const welcomeChangesAuthority = this.preWelcomeAuthority !== null
+      && this.sameAuthorityLineage(this.preWelcomeAuthority, frame.authority) === false
+    if (this.authorityResetPending || welcomeChangesAuthority) {
+      // The welcome authority cannot be applied over a cached save from another
+      // lineage. Discard both and recover from a new full snapshot.
       this.expectedSnapshot = false
       this.expectedReplay = false
-      this.requestResyncInternal(true)
+      this.authority = clone(frame.authority)
+      this.requestResyncInternal(true, frame.authority)
       return
     }
+    this.applyAuthority(frame.authority)
     // A welcome only opens the exchange. start() and commands stay gated until
     // a non-catching-up ready completes the replay/snapshot delivery.
     this.setState(frame.catchingUp ? 'catching_up' : 'connecting')
@@ -925,18 +940,10 @@ export class RemoteRepository {
       return
     }
     const cache = raw
-    this.deviceOverlay = this.seededDeviceOverlay === null
-      ? clone(cache.device)
-      : {
-          ...mergeDeviceLocalOverlay(cache.device, {
-            petInfo: clone(this.seededDeviceOverlay.petInfo),
-            settings: clone(this.seededDeviceOverlay.settings),
-            ...(this.seededDeviceOverlay.presentation === undefined
-              ? {}
-              : { presentation: clone(this.seededDeviceOverlay.presentation) }),
-          }),
-          localDeviceId: this.seededDeviceOverlay.localDeviceId,
-        }
+    // A validated cache is the device's last accepted local overlay. The
+    // archived local repository may still be available as a bootstrap seed,
+    // but it must never replace fresher cache-backed settings after restore.
+    this.deviceOverlay = clone(cache.device)
     this.projection = this.materialize({
       revision: cache.revision,
       eventSeq: cache.eventSeq,
@@ -1040,6 +1047,49 @@ export class RemoteRepository {
       && left.epoch === right.epoch
   }
 
+  private clearWelcomeHandshake(): void {
+    this.welcomeDelivery = null
+    this.welcomeHeadRevision = 0
+    this.welcomeHeadEventSeq = 0
+    this.welcomeAuthority = null
+    this.preWelcomeAuthority = null
+  }
+
+  private clearExpectedSnapshot(): void {
+    this.expectedSnapshotAuthority = null
+    this.expectedSnapshotMinRevision = 0
+    this.expectedSnapshotMinEventSeq = 0
+  }
+
+  private armExpectedSnapshot(
+    authority: WireAuthority | null,
+    minRevision: number,
+    minEventSeq: number,
+  ): void {
+    this.expectedSnapshot = true
+    this.expectedReplay = false
+    this.expectedSnapshotAuthority = authority === null ? null : clone(authority)
+    this.expectedSnapshotMinRevision = minRevision
+    this.expectedSnapshotMinEventSeq = minEventSeq
+    this.snapshotSeen = false
+  }
+
+  private readyAuthorityChanged(authority: WireAuthority): boolean {
+    const expected = this.welcomeAuthority
+      ?? this.expectedSnapshotAuthority
+      ?? (this.snapshotSeen ? this.authority : null)
+    return expected !== null && this.sameAuthorityLineage(expected, authority) === false
+  }
+
+  private retryExpectedSnapshot(reason: string, discardCachedAuthority: boolean): void {
+    this.lastError = reason
+    this.snapshotSeen = false
+    // The rejected frame belongs to the in-flight resync. Re-arm it so the
+    // replacement request is not suppressed by the pending-resync guard.
+    this.pendingResync = false
+    this.requestResyncInternal(discardCachedAuthority)
+  }
+
   private buildConfig(): RemoteSyncConfig {
     return {
       serverUrl: this.serverUrl,
@@ -1100,20 +1150,39 @@ export class RemoteRepository {
   }
 
   private handleSnapshot(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'snapshot' }>): void {
-    this.snapshotSeen = true
     const kind = this.syncMode
     const recoveredAuthorityReset = this.authorityResetPending
-    if (
-      kind === 'initial'
-      && this.projection !== null
-      && (frame.revision < this.cursor.revision || frame.eventSeq < this.cursor.eventSeq)
-    ) {
-      this.requestResyncInternal(false)
-      return
+    const handshakeSnapshot = this.welcomeDelivery !== null
+      && this.syncMode === 'initial'
+      && this.pendingResync === false
+    const validateSnapshot = this.expectedSnapshot || handshakeSnapshot
+    if (validateSnapshot) {
+      if (
+        this.expectedSnapshotAuthority !== null
+        && this.sameAuthorityLineage(this.expectedSnapshotAuthority, frame.authority) === false
+      ) {
+        this.retryExpectedSnapshot(
+          'server sent a snapshot from an unexpected authority lineage',
+          true,
+        )
+        return
+      }
+      if (
+        frame.revision < this.expectedSnapshotMinRevision
+        || frame.eventSeq < this.expectedSnapshotMinEventSeq
+      ) {
+        this.retryExpectedSnapshot(
+          'server sent a snapshot below the required cursor or welcome head',
+          false,
+        )
+        return
+      }
     }
+    this.snapshotSeen = true
     const replayEvents = this.replayEvents
     this.replayEvents = []
     const projection = this.acceptState(this.projectionStateSource(frame))
+    if (validateSnapshot) this.expectedSnapshotAuthority = clone(frame.authority)
     if (kind === 'initial') {
       this.emitProjection(projection, replayEvents)
     } else {
@@ -1124,7 +1193,9 @@ export class RemoteRepository {
     this.authorityResetPending = false
     this.pendingResync = false
     this.emitStatus()
-    if (this.projectionRefreshPending) this.finishProjectionRefresh(false)
+    if (this.projectionRefreshPending && this.projectionRefreshAwaitingReady === false) {
+      this.finishProjectionRefresh(false)
+    }
   }
 
   private rejectReplay(reason: string): void {
@@ -1183,6 +1254,13 @@ export class RemoteRepository {
   private handleReady(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'ready' }>): void {
     this.reconnectAttempt = 0
     const previousAuthority = this.projection === null ? null : clone(this.projection.authority)
+    if (this.readyAuthorityChanged(frame.authority)) {
+      this.retryExpectedSnapshot('server ready changed the handshake authority lineage', true)
+      return
+    }
+    const handshakeActive = this.welcomeDelivery !== null
+      && this.syncMode === 'initial'
+      && this.pendingResync === false
     this.applyAuthority(frame.authority)
     this.timeZone = frame.timeZone
     this.advanceWhileEmpty = frame.advanceWhileEmpty
@@ -1199,8 +1277,7 @@ export class RemoteRepository {
 
     const authority = frame.authority
     if (this.catchingUpSeen && this.snapshotSeen === false && authority.state === 'active') {
-      this.lastError = 'server sent a final ready without the catch-up snapshot'
-      this.requestResyncInternal(false)
+      this.retryExpectedSnapshot('server sent a final ready without the catch-up snapshot', false)
       return
     }
     if (
@@ -1208,22 +1285,24 @@ export class RemoteRepository {
       && this.snapshotSeen === false
       && authority.state !== 'archived'
     ) {
-      this.lastError = 'server sent ready without the required full snapshot'
-      this.requestResyncInternal(this.authorityResetPending || authority.state === 'reset')
+      this.retryExpectedSnapshot(
+        'server sent ready without the required full snapshot',
+        this.authorityResetPending || authority.state === 'reset',
+      )
       return
     }
     if (authority.state === 'reset') {
-      this.requestResyncInternal(true)
+      this.retryExpectedSnapshot('server ready reported a reset authority lineage', true)
       return
     }
 
-    if (this.expectedReplay && this.snapshotSeen === false) {
+    if (handshakeActive && this.expectedReplay && this.snapshotSeen === false) {
       if (this.projection === null) {
-        this.requestResyncInternal(false)
+        this.retryExpectedSnapshot('replay arrived without a cached projection', false)
         return
       }
       if (this.replayInvalid || this.replaySeen === false) {
-        this.requestResyncInternal(false)
+        this.retryExpectedSnapshot('replay delivery was invalid or incomplete', false)
         return
       }
       const welcomeAuthority = this.welcomeAuthority
@@ -1238,8 +1317,12 @@ export class RemoteRepository {
         || this.replayToEventSeq !== this.welcomeHeadEventSeq
         || frame.revision !== this.welcomeHeadRevision
         || frame.eventSeq !== this.welcomeHeadEventSeq
-      if (authorityLineageChanged || authorityStateChanged || replayHeadMismatch) {
-        this.requestResyncInternal(authorityLineageChanged)
+      if (authorityLineageChanged) {
+        this.retryExpectedSnapshot('replay projection changed the handshake authority lineage', true)
+        return
+      }
+      if (authorityStateChanged || replayHeadMismatch) {
+        this.retryExpectedSnapshot('replay ready did not match the advertised handshake head', false)
         return
       }
       this.applyReadyState(frame, true)
@@ -1251,7 +1334,7 @@ export class RemoteRepository {
       return
     }
 
-    if (this.welcomeDelivery === 'none') {
+    if (handshakeActive && this.welcomeDelivery === 'none') {
       const welcomeAuthority = this.welcomeAuthority ?? authority
       if (authority.state === 'active') {
         const projection = this.projection
@@ -1266,7 +1349,7 @@ export class RemoteRepository {
           || frame.revision !== this.welcomeHeadRevision
           || frame.eventSeq !== this.welcomeHeadEventSeq
         ) {
-          this.requestResyncInternal(false)
+          this.retryExpectedSnapshot('cached projection did not match the handshake head', false)
           return
         }
       }
@@ -1274,11 +1357,11 @@ export class RemoteRepository {
 
     if (authority.state === 'active') {
       if (this.projection === null) {
-        this.requestResyncInternal(false)
+        this.retryExpectedSnapshot('active ready arrived without a projection', false)
         return
       }
       if (frame.revision !== this.cursor.revision || frame.eventSeq !== this.cursor.eventSeq) {
-        this.requestResyncInternal(false)
+        this.retryExpectedSnapshot('active ready did not match the projection cursor', false)
         return
       }
     }
@@ -1293,7 +1376,7 @@ export class RemoteRepository {
         || previousAuthority.restoreGeneration !== frame.authority.restoreGeneration
         || previousAuthority.epoch !== frame.authority.epoch
         || previousAuthority.state !== frame.authority.state)
-    if (this.projection !== null && (this.welcomeDelivery === 'none' || authorityChanged)) {
+    if (this.projection !== null && ((handshakeActive && this.welcomeDelivery === 'none') || authorityChanged)) {
       this.emitResync(this.projection, [])
     }
     this.finishReady()
@@ -1309,39 +1392,77 @@ export class RemoteRepository {
     this.replayInvalid = false
     this.replayEvents = []
     this.syncMode = 'initial'
+    this.clearWelcomeHandshake()
+    this.clearExpectedSnapshot()
     this.persistConfig()
     this.persistProjectionCache()
     if (this.projectionRefreshPending) {
       this.finishProjectionRefresh(true)
     } else {
+      this.projectionRefreshAwaitingReady = false
       this.markOnline()
     }
   }
 
   private handleProjection(frame: Extract<import('../shared/sync/protocol').ServerToClient, { t: 'projection' }>): void {
     if (this.pendingResync) return
-    if (this.projection !== null && frame.revision === this.cursor.revision && frame.eventSeq === this.cursor.eventSeq) {
+    const sameCursor = this.projection !== null
+      && frame.revision === this.cursor.revision
+      && frame.eventSeq === this.cursor.eventSeq
+    if (this.projection !== null && sameCursor) {
+      const currentProjection = this.projection
+      const currentAuthority = this.authority ?? currentProjection.authority
+      const projectionAuthority = currentProjection.authority
+      if (
+        this.sameAuthorityLineage(currentAuthority, frame.authority) === false
+        || currentAuthority.state !== frame.authority.state
+        || this.sameAuthorityLineage(projectionAuthority, frame.authority) === false
+        || projectionAuthority.state !== frame.authority.state
+      ) {
+        // An equal cursor does not make a changed authority safe to apply over
+        // the already materialized save. Only a full snapshot may establish a
+        // different lineage or state.
+        this.requestResyncInternal(true)
+        return
+      }
       if (frame.weatherLocation !== undefined) {
         this.weatherLocation = frame.weatherLocation
-        this.projection = { ...this.projection, weatherLocation: frame.weatherLocation }
+        this.projection = { ...currentProjection, weatherLocation: frame.weatherLocation }
       }
       this.applyAuthority(frame.authority)
       this.persistProjectionCache()
       this.emitStatus()
-      if (this.projectionRefreshPending) this.finishProjectionRefresh(true)
+      if (this.projectionRefreshPending && this.projectionRefreshAwaitingReady === false) {
+        this.finishProjectionRefresh(true)
+      }
       return
     }
     const cursor = this.projectionCursor()
     const classification = classifyProjectionDelivery(cursor, frame, frame.events)
     if (classification.kind === 'stale') return
+    const currentAuthority = this.authority ?? this.projection?.authority
+    const authorityChanged = this.projection !== null
+      && currentAuthority !== undefined
+      && (
+        this.sameAuthorityLineage(currentAuthority, frame.authority) === false
+        || currentAuthority.state !== frame.authority.state
+        || this.sameAuthorityLineage(this.projection.authority, frame.authority) === false
+        || this.projection.authority.state !== frame.authority.state
+      )
     if (classification.kind === 'resync') {
-      this.requestResyncInternal(false)
+      this.requestResyncInternal(authorityChanged || classification.reason === 'authority_changed')
+      return
+    }
+    if (authorityChanged) {
+      this.requestResyncInternal(true)
       return
     }
     const projection = this.acceptState(this.projectionStateSource(frame))
     this.emitProjection(projection, frame.events)
     this.emitStatus()
-    if (this.projectionRefreshPending) this.finishProjectionRefresh(true)
+    if (this.projectionRefreshPending && this.projectionRefreshAwaitingReady === false) {
+      this.finishProjectionRefresh(true)
+    }
   }
 
   private projectionCursor(): ProjectionCursor | null {
@@ -1367,6 +1488,10 @@ export class RemoteRepository {
 
   private commandResultNeedsRefresh(result: CommandResult): boolean {
     return result.status !== 'applied' && result.error?.refreshProjection === true
+  }
+
+  private commandResultIsCatchingUp(result: CommandResult): boolean {
+    return result.status !== 'applied' && result.error?.code === 'server_catching_up'
   }
 
   private rejectedFromError(
@@ -1406,11 +1531,18 @@ export class RemoteRepository {
     pending: PendingCommand | null,
     result: CommandResult | null,
     resync: 'none' | 'cache' | 'authority',
+    awaitFinalReady = false,
   ): void {
     if (pending !== null && result !== null) {
       this.pendingCommandRefresh = { pending, result }
     }
     this.projectionRefreshPending = true
+    this.projectionRefreshAwaitingReady = awaitFinalReady
+    if (awaitFinalReady) {
+      const authority = this.authority ?? this.projection?.authority ?? null
+      this.armExpectedSnapshot(authority, this.cursor.revision, this.cursor.eventSeq)
+      this.catchingUpSeen = true
+    }
     this.setState('catching_up')
     if (resync === 'authority') this.requestResyncInternal(true)
     else if (resync === 'cache') this.requestResyncInternal(false)
@@ -1419,6 +1551,7 @@ export class RemoteRepository {
 
   private finishProjectionRefresh(onlineAfter: boolean): void {
     this.projectionRefreshPending = false
+    this.projectionRefreshAwaitingReady = false
     const refresh = this.pendingCommandRefresh
     this.pendingCommandRefresh = null
     if (refresh !== null && this.pendingCommand === refresh.pending) {
@@ -1447,6 +1580,8 @@ export class RemoteRepository {
     this.pendingResync = false
     this.expectedSnapshot = false
     this.expectedReplay = false
+    this.clearWelcomeHandshake()
+    this.clearExpectedSnapshot()
     this.queueProjectionCacheClear()
     this.setState('catching_up')
   }
@@ -1460,6 +1595,9 @@ export class RemoteRepository {
     this.replayInvalid = false
     this.expectedSnapshot = false
     this.expectedReplay = false
+    this.pendingResync = false
+    this.clearWelcomeHandshake()
+    this.clearExpectedSnapshot()
     this.queueProjectionCacheClear()
   }
 
@@ -1473,7 +1611,12 @@ export class RemoteRepository {
       && pending.requestId === frame.requestId
     ) {
       if (this.commandResultNeedsRefresh(result)) {
-        this.beginProjectionRefresh(pending, result, 'none')
+        this.beginProjectionRefresh(
+          pending,
+          result,
+          'none',
+          this.commandResultIsCatchingUp(result),
+        )
         return
       }
       this.settlePendingCommand(pending, result)
@@ -1482,7 +1625,12 @@ export class RemoteRepository {
     // Preserve the refresh barrier even when the late/duplicate result no longer
     // has a pending waiter: no new command may race the authoritative projection.
     if (this.commandResultNeedsRefresh(result)) {
-      this.beginProjectionRefresh(null, null, 'none')
+      this.beginProjectionRefresh(
+        null,
+        null,
+        'none',
+        this.commandResultIsCatchingUp(result),
+      )
       return
     }
     this.emitCommandResult(result)
@@ -1510,7 +1658,12 @@ export class RemoteRepository {
     }
     const result = toCommandResult(source)
     if (this.commandResultNeedsRefresh(result)) {
-      this.beginProjectionRefresh(pending, result, 'cache')
+      this.beginProjectionRefresh(
+        pending,
+        result,
+        'cache',
+        this.commandResultIsCatchingUp(result),
+      )
       return
     }
     this.settlePendingCommand(pending, result)
@@ -1533,7 +1686,7 @@ export class RemoteRepository {
       state: 'active',
     }
     this.prepareAuthorityReset(authority)
-    this.requestResyncInternal(true)
+    this.requestResyncInternal(true, authority)
   }
 
   private terminalFailure(message: string, notice?: string): void {
@@ -1548,6 +1701,7 @@ export class RemoteRepository {
   private rejectPendingWork(error: Error): void {
     this.pendingCommandRefresh = null
     this.projectionRefreshPending = false
+    this.projectionRefreshAwaitingReady = false
     if (this.pendingCommand !== null) {
       const pending = this.pendingCommand
       this.pendingCommand = null
@@ -1567,7 +1721,22 @@ export class RemoteRepository {
     const commandMatched = pending !== null
       && frame.requestId !== undefined
       && pending.requestId === frame.requestId
+
+    // Authentication/protocol failures are terminal regardless of the
+    // refreshProjection hint. Opening the refresh gate first would hide the
+    // permanent failure behind a connection that can never become ready.
+    if (frame.code === 'auth_failed' || frame.code === 'protocol_mismatch') {
+      this.terminalFailure(frame.message)
+      this.disconnect()
+      return
+    }
+
     const exportMatched = this.rejectMatchingExport(frame)
+    if (frame.code === 'unauthorized' && commandMatched === false && exportMatched === false) {
+      this.terminalFailure(frame.message)
+      this.disconnect()
+      return
+    }
 
     if (frame.code === 'authority_reset_required') this.prepareAuthorityReset()
 
@@ -1578,14 +1747,11 @@ export class RemoteRepository {
           pending,
           result,
           frame.code === 'authority_reset_required' ? 'authority' : 'none',
+          frame.code === 'server_catching_up',
         )
       } else {
         this.settlePendingCommand(pending, result)
         if (frame.code === 'authority_reset_required') this.requestResyncInternal(true)
-      }
-      if (frame.code !== 'authority_reset_required' && (frame.code === 'auth_failed' || frame.code === 'protocol_mismatch')) {
-        this.terminalFailure(frame.message)
-        this.disconnect()
       }
       return
     }
@@ -1595,19 +1761,11 @@ export class RemoteRepository {
         null,
         null,
         frame.code === 'authority_reset_required' ? 'authority' : 'none',
+        frame.code === 'server_catching_up',
       )
       return
     }
 
-    if (
-      frame.code === 'auth_failed'
-      || frame.code === 'protocol_mismatch'
-      || (frame.code === 'unauthorized' && exportMatched === false)
-    ) {
-      this.terminalFailure(frame.message)
-      this.disconnect()
-      return
-    }
     if (frame.code === 'server_catching_up') {
       this.setState('catching_up')
       return
@@ -1633,20 +1791,35 @@ export class RemoteRepository {
     }
   }
 
-  private requestResyncInternal(discardCachedAuthority: boolean): void {
+  private requestResyncInternal(
+    discardCachedAuthority: boolean,
+    expectedAuthority?: WireAuthority | null,
+  ): void {
     if (this.stopped || this.connection === null || this.pendingResync) return
+    const preservedRevision = this.cursor.revision
+    const preservedEventSeq = this.cursor.eventSeq
+    const snapshotAuthority = expectedAuthority !== undefined
+      ? expectedAuthority
+      : discardCachedAuthority
+        ? null
+        : this.authority ?? this.projection?.authority ?? null
     this.pendingResync = true
     this.syncMode = discardCachedAuthority ? 'authority_reset' : 'resync'
-    this.expectedSnapshot = true
     this.expectedReplay = false
     this.replaySeen = false
     this.replayInvalid = false
     this.replayEvents = []
+    this.clearWelcomeHandshake()
     if (discardCachedAuthority) {
       this.projection = null
       this.cursor = { revision: 0, eventSeq: 0 }
       this.queueProjectionCacheClear()
     }
+    this.armExpectedSnapshot(
+      snapshotAuthority,
+      discardCachedAuthority ? 0 : preservedRevision,
+      discardCachedAuthority ? 0 : preservedEventSeq,
+    )
     this.setState('catching_up')
     const frame: ResyncRequest = {
       t: 'resync',
@@ -1654,7 +1827,7 @@ export class RemoteRepository {
       requestId: this.newRequestId(),
       ...(discardCachedAuthority
         ? { discardCachedAuthority: true }
-        : { lastRevision: this.cursor.revision, lastEventSeq: this.cursor.eventSeq }),
+        : { lastRevision: preservedRevision, lastEventSeq: preservedEventSeq }),
     }
     this.sendJson(frame)
   }

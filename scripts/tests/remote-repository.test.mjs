@@ -1779,3 +1779,591 @@ test('archived owner can issue the detach/resume handoff commands through Remote
     ['admin.exportForDetach', 'admin.resumeServer'],
   )
 })
+
+test('fatal auth/protocol errors with refreshProjection reject start waiters without opening the refresh gate', async t => {
+  for (const code of ['auth_failed', 'protocol_mismatch']) {
+    await t.test(code, async t => {
+      const server = new FakeServer()
+      let resyncs = 0
+      const transport = new FakeTransport((_connection, frame) => {
+        if (frame.t === 'resync') resyncs += 1
+      })
+      const { repository } = await makeRepository(server, { transport })
+      t.after(() => repository.stop())
+      const starting = repository.start()
+      await until(
+        () => transport.connections.length === 1
+          && transport.connections[0].sent.some(frame => frame.t === 'hello'),
+        'hello before fatal error',
+      )
+      const connection = transport.connections[0]
+      connection.emit({
+        t: 'error',
+        v: PROTOCOL_VERSION,
+        requestId: 'fatal-start-' + code,
+        code,
+        message: code + ' while starting',
+        refreshProjection: true,
+      })
+      await assert.rejects(starting, new RegExp(code))
+      assert.equal(resyncs, 0, 'a fatal error must not open a refresh/resync gate')
+      assert.equal(repository.getStatus().state, 'error')
+      assert.equal(repository.getStatus().connection, 'error')
+      assert.equal(connection.closed, true)
+    })
+  }
+})
+
+test('fatal auth/protocol errors with refreshProjection reject pending commands before terminal disconnect', async t => {
+  for (const code of ['auth_failed', 'protocol_mismatch']) {
+    await t.test(code, async t => {
+      const server = new FakeServer()
+      let commandFrame = null
+      let resyncs = 0
+      const transport = new FakeTransport((connection, frame) => {
+        if (frame.t === 'hello') {
+          server.handle(connection, frame)
+          return
+        }
+        if (frame.t === 'command') {
+          commandFrame = frame
+          return
+        }
+        if (frame.t === 'resync') {
+          resyncs += 1
+          return
+        }
+        server.handle(connection, frame)
+      })
+      const { repository } = await makeRepository(server, { transport })
+      t.after(() => repository.stop())
+      await repository.start()
+      const pending = repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-fatal-' + code })
+      const observed = pending.then(
+        value => value,
+        error => { throw error },
+      )
+      await until(() => commandFrame !== null, 'pending command frame')
+      const connection = transport.connections[0]
+      connection.emit({
+        t: 'error',
+        v: PROTOCOL_VERSION,
+        requestId: commandFrame.requestId,
+        code,
+        message: code + ' while a command is pending',
+        refreshProjection: true,
+      })
+      await assert.rejects(observed, new RegExp(code))
+      await until(() => repository.getStatus().state === 'error', 'terminal error state')
+      assert.equal(resyncs, 0, 'the fatal error must not be converted into a refresh resync')
+      assert.equal(repository.getStatus().readOnly, true)
+      assert.equal(connection.closed, true)
+    })
+  }
+})
+
+test('completed welcome metadata does not force later snapshot resyncs to repeat against a stale head', async t => {
+  const server = new FakeServer()
+  const targetRevision = server.revision + 2
+  const targetEventSeq = server.eventSeq + 2
+  let resyncCount = 0
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'hello') {
+      server.handle(connection, frame)
+      return
+    }
+    if (frame.t === 'resync') {
+      resyncCount += 1
+      connection.emit(snapshotFrame(server.shared, targetRevision, targetEventSeq, AUTHORITY))
+      connection.emit(readyFrame(targetRevision, targetEventSeq, AUTHORITY))
+      return
+    }
+    server.handle(connection, frame)
+  })
+  const { repository } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  await repository.start()
+  const connection = transport.connections[0]
+  const initial = repository.getProjection()
+
+  const welcome = welcomeFrame(OWNER_DEVICE_ID, 'none')
+  welcome.headRevision = initial.revision
+  welcome.headEventSeq = initial.eventSeq
+  connection.emit(welcome)
+  connection.emit(readyFrame(initial.revision, initial.eventSeq, initial.authority))
+  await until(() => repository.getStatus().state === 'online', 'delivery-none handshake')
+
+  connection.emit({
+    t: 'projection',
+    v: PROTOCOL_VERSION,
+    revision: targetRevision,
+    eventSeq: targetEventSeq,
+    gameTimeMs: GAME_TIME_MS + targetRevision * 60_000,
+    timeZone: initial.timeZone,
+    advanceWhileEmpty: initial.advanceWhileEmpty,
+    weatherLocation: WEATHER_LOCATION,
+    authority: clone(initial.authority),
+    save: clone(server.shared),
+    events: [{
+      eventSeq: targetEventSeq,
+      revision: targetRevision,
+      commandSeq: targetRevision,
+      gameTimeMs: GAME_TIME_MS + targetRevision * 60_000,
+      type: 'reward.granted',
+      payload: { amount: 1 },
+    }],
+  })
+
+  await until(
+    () => repository.getStatus().state === 'online'
+      && repository.getProjection()?.revision === targetRevision,
+    'single resync recovery',
+  )
+  await new Promise(resolve => setTimeout(resolve, 25))
+  assert.equal(resyncCount, 1, 'stale welcome head metadata must not trigger an endless resync')
+  assert.equal(repository.getProjection().eventSeq, targetEventSeq)
+  assert.deepEqual(repository.getProjection().shared, server.shared)
+})
+
+test('same-cursor projection cannot swap authority while retaining the cached save', async t => {
+  const server = new FakeServer()
+  let resyncFrame = null
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'hello') {
+      server.handle(connection, frame)
+      return
+    }
+    if (frame.t === 'resync') {
+      resyncFrame = frame
+      return
+    }
+    server.handle(connection, frame)
+  })
+  const { repository, store } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  await repository.start()
+  await repository.flush()
+  const initial = repository.getProjection()
+  const writesBefore = store.cacheWrites.length
+  const connection = transport.connections[0]
+
+  connection.emit({
+    t: 'projection',
+    v: PROTOCOL_VERSION,
+    revision: initial.revision,
+    eventSeq: initial.eventSeq,
+    gameTimeMs: initial.gameTimeMs,
+    timeZone: initial.timeZone,
+    advanceWhileEmpty: initial.advanceWhileEmpty,
+    weatherLocation: WEATHER_LOCATION,
+    authority: clone(RESET_AUTHORITY),
+    save: clone(server.shared),
+    events: [],
+  })
+
+  await until(() => resyncFrame !== null, 'authority-change resync')
+  assert.equal(resyncFrame.discardCachedAuthority, true)
+  await repository.flush()
+  assert.equal(repository.getProjection(), null, 'the old save must not survive under the new authority')
+  assert.equal(store.projectionCache, null)
+  assert.equal(store.cacheWrites.length, writesBefore, 'no mismatched save may be cached')
+  assert.equal(repository.getStatus().state, 'catching_up')
+  assert.equal(repository.getStatus().readOnly, true)
+
+  const recoveryRevision = initial.revision + 1
+  const recoveryEventSeq = initial.eventSeq + 1
+  const recoveredShared = sharedWithYb(server.shared.petInfo.yb + 1)
+  connection.emit(snapshotFrame(recoveredShared, recoveryRevision, recoveryEventSeq, RESET_AUTHORITY))
+  connection.emit(readyFrame(recoveryRevision, recoveryEventSeq, RESET_AUTHORITY))
+  await until(
+    () => repository.getStatus().state === 'online'
+      && repository.getProjection()?.authority.authorityId === RESET_AUTHORITY.authorityId,
+    'full-snapshot authority recovery',
+  )
+  assert.deepEqual(repository.getProjection().shared, recoveredShared)
+  assert.equal(repository.getProjection().revision, recoveryRevision)
+  assert.equal(repository.getProjection().eventSeq, recoveryEventSeq)
+})
+
+test('welcome authority mismatch discards the cached projection before a new full snapshot', async t => {
+  const server = new FakeServer()
+  const first = await makeRepository(server)
+  t.after(() => first.repository.stop())
+  await first.repository.start()
+  await first.repository.flush()
+  assert.ok(first.store.projectionCache, 'initial cache exists')
+  await first.repository.stop()
+
+  let resyncFrame = null
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'hello') {
+      const welcome = welcomeFrame(OWNER_DEVICE_ID, 'snapshot')
+      welcome.authority = clone(RESET_AUTHORITY)
+      welcome.headRevision = 6
+      welcome.headEventSeq = 6
+      connection.emit(welcome)
+      return
+    }
+    if (frame.t === 'resync') {
+      resyncFrame = frame
+    }
+  })
+  const restored = await makeRepository(server, {
+    store: first.store,
+    config: first.store.config,
+    transport,
+  })
+  t.after(() => restored.repository.stop())
+  const starting = restored.repository.start()
+  await until(() => resyncFrame !== null, 'welcome mismatch discard resync')
+  assert.equal(resyncFrame.discardCachedAuthority, true, 'a changed welcome lineage must discard the cached authority')
+  await restored.repository.flush()
+  assert.equal(restored.repository.getProjection(), null)
+  assert.equal(restored.store.projectionCache, null)
+
+  const connection = transport.connections[0]
+  const recoveredShared = sharedWithYb(server.shared.petInfo.yb + 2)
+  connection.emit(snapshotFrame(recoveredShared, 6, 6, RESET_AUTHORITY))
+  connection.emit(readyFrame(6, 6, RESET_AUTHORITY))
+  await starting
+  assert.equal(restored.repository.getStatus().state, 'online')
+  assert.equal(restored.repository.getProjection().authority.authorityId, RESET_AUTHORITY.authorityId)
+  assert.equal(restored.repository.getProjection().authority.epoch, RESET_AUTHORITY.epoch)
+  assert.deepEqual(restored.repository.getProjection().shared, recoveredShared)
+})
+
+test('validated projection cache device overlay wins over the archived local seed', async t => {
+  const server = new FakeServer()
+  const cacheSeed = clone(fixtures.device)
+  cacheSeed.localDeviceId = 'cache-device-identity'
+  cacheSeed.settings.zoom = 1.25
+  cacheSeed.settings.petDisplayId = 4
+  cacheSeed.settings.aiKey = 'sk-cache-overlay'
+  cacheSeed.petInfo.lastX = 111
+  const first = await makeRepository(server, { deviceOverlay: cacheSeed })
+  t.after(() => first.repository.stop())
+  await first.repository.start()
+  await first.repository.flush()
+  const cachedDevice = clone(first.store.projectionCache.device)
+  assert.deepEqual(cachedDevice, cacheSeed)
+  await first.repository.stop()
+
+  const archivedSeed = clone(fixtures.device)
+  archivedSeed.localDeviceId = 'archived-local-identity'
+  archivedSeed.settings.zoom = 2.5
+  archivedSeed.settings.petDisplayId = 9
+  archivedSeed.settings.aiKey = 'sk-archived-overlay'
+  archivedSeed.petInfo.lastX = 999
+
+  const transport = new FakeTransport(() => {})
+  const restored = await makeRepository(server, {
+    store: first.store,
+    config: first.store.config,
+    transport,
+    deviceOverlay: archivedSeed,
+  })
+  t.after(() => restored.repository.stop())
+  const starting = restored.repository.start()
+  await until(
+    () => transport.connections.length === 1
+      && transport.connections[0].sent.some(frame => frame.t === 'hello'),
+    'cache restore hello',
+  )
+  assert.equal(restored.repository.hasProjectionCache(), true)
+  assert.deepEqual(restored.repository.getDeviceOverlay(), cachedDevice)
+  assert.deepEqual(restored.repository.getProjection().device, cachedDevice)
+  assert.notEqual(restored.repository.getDeviceOverlay().localDeviceId, archivedSeed.localDeviceId)
+  assert.equal(restored.repository.getDeviceOverlay().settings.zoom, cacheSeed.settings.zoom)
+  await restored.repository.stop()
+  await starting
+
+  const freshStore = new MemoryTokenStore()
+  const freshTransport = new FakeTransport(() => {})
+  const fresh = await makeRepository(server, {
+    store: freshStore,
+    transport: freshTransport,
+    deviceOverlay: archivedSeed,
+  })
+  t.after(() => fresh.repository.stop())
+  const freshStarting = fresh.repository.start()
+  await until(
+    () => freshTransport.connections.length === 1
+      && freshTransport.connections[0].sent.some(frame => frame.t === 'hello'),
+    'seed-only hello',
+  )
+  assert.equal(fresh.repository.hasProjectionCache(), false)
+  assert.deepEqual(fresh.repository.getDeviceOverlay(), archivedSeed, 'the local seed applies only when no cache restores')
+  await fresh.repository.stop()
+  await freshStarting
+})
+
+test('expected resync snapshots older than the preserved cursor are retried without resolving refresh', async t => {
+  const server = new FakeServer()
+  let current = null
+  let commandFrame = null
+  let commandSettled = false
+  const resyncs = []
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'hello') {
+      server.handle(connection, frame)
+      return
+    }
+    if (frame.t === 'command') {
+      commandFrame = frame
+      return
+    }
+    if (frame.t === 'resync') {
+      resyncs.push(frame)
+      if (resyncs.length === 1) {
+        connection.emit(snapshotFrame(server.shared, 0, 0, AUTHORITY))
+      }
+      return
+    }
+    server.handle(connection, frame)
+  })
+  const { repository, store } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  await repository.start()
+  await repository.flush()
+  current = repository.getProjection()
+  const writesBefore = store.cacheWrites.length
+  const cachedBefore = clone(store.projectionCache)
+
+  const pending = repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-stale-resync' })
+  const observed = pending.then(
+    value => {
+      commandSettled = true
+      return value
+    },
+    error => {
+      commandSettled = true
+      throw error
+    },
+  )
+  await until(() => commandFrame !== null, 'refresh command request')
+  const connection = transport.connections[0]
+  connection.emit({
+    t: 'error',
+    v: PROTOCOL_VERSION,
+    requestId: commandFrame.requestId,
+    code: 'internal',
+    message: 'refresh the authoritative projection',
+    refreshProjection: true,
+  })
+  await until(
+    () => repository.getStatus().state === 'catching_up' && repository.getStatus().readOnly === true,
+    'refresh gate before resync',
+  )
+  assert.equal(commandSettled, false)
+
+  repository.requestResync()
+  await until(() => resyncs.length >= 1, 'first resync')
+  await until(() => resyncs.length >= 2, 'retry after stale snapshot')
+  assert.equal(resyncs[1].lastRevision, current.revision)
+  assert.equal(resyncs[1].lastEventSeq, current.eventSeq)
+  assert.equal(commandSettled, false, 'a stale snapshot must not resolve the pending refresh')
+  assert.equal(repository.getStatus().state, 'catching_up')
+  assert.equal(repository.getProjection().revision, current.revision)
+  assert.equal(repository.getProjection().eventSeq, current.eventSeq)
+  assert.deepEqual(store.projectionCache, cachedBefore)
+  assert.equal(store.cacheWrites.length, writesBefore)
+
+  const recoveryRevision = current.revision + 1
+  const recoveryEventSeq = current.eventSeq + 1
+  connection.emit(snapshotFrame(server.shared, recoveryRevision, recoveryEventSeq, AUTHORITY))
+  connection.emit(readyFrame(recoveryRevision, recoveryEventSeq, AUTHORITY))
+  const result = await observed
+  assert.equal(result.status, 'rejected')
+  assert.equal(result.error.code, 'internal')
+  assert.equal(result.error.refreshProjection, true)
+  await until(() => repository.getStatus().state === 'online', 'refresh completion after valid snapshot')
+  assert.equal(repository.getProjection().revision, recoveryRevision)
+  assert.equal(repository.getProjection().eventSeq, recoveryEventSeq)
+})
+
+test('expected snapshot authority mismatch discards cached authority before applying the save', async t => {
+  const server = new FakeServer()
+  let current = null
+  const resyncs = []
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'hello') {
+      server.handle(connection, frame)
+      return
+    }
+    if (frame.t === 'resync') {
+      resyncs.push(frame)
+      if (resyncs.length === 1) {
+        connection.emit(snapshotFrame(
+          server.shared,
+          current.revision + 1,
+          current.eventSeq + 1,
+          RESET_AUTHORITY,
+        ))
+      }
+      return
+    }
+    server.handle(connection, frame)
+  })
+  const { repository, store } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  await repository.start()
+  await repository.flush()
+  current = repository.getProjection()
+  const writesBefore = store.cacheWrites.length
+
+  repository.requestResync()
+  await until(() => resyncs.length >= 1, 'first expected-snapshot resync')
+  await until(() => resyncs.length >= 2, 'discard resync after snapshot authority mismatch')
+  assert.equal(resyncs[1].discardCachedAuthority, true)
+  await repository.flush()
+  assert.equal(repository.getProjection(), null, 'the mismatched snapshot must not be materialized')
+  assert.equal(store.projectionCache, null)
+  assert.equal(store.cacheWrites.length, writesBefore)
+
+  const connection = transport.connections[0]
+  const recoveryRevision = current.revision + 1
+  const recoveryEventSeq = current.eventSeq + 1
+  connection.emit(snapshotFrame(server.shared, recoveryRevision, recoveryEventSeq, RESET_AUTHORITY))
+  connection.emit(readyFrame(recoveryRevision, recoveryEventSeq, RESET_AUTHORITY))
+  await until(
+    () => repository.getStatus().state === 'online'
+      && repository.getProjection()?.authority.authorityId === RESET_AUTHORITY.authorityId,
+    'validated authority snapshot recovery',
+  )
+  assert.deepEqual(repository.getProjection().shared, server.shared)
+  assert.equal(repository.getProjection().revision, recoveryRevision)
+  assert.equal(repository.getProjection().eventSeq, recoveryEventSeq)
+})
+
+test('initial snapshot below the welcome head requests resync and keeps start gated', async t => {
+  const server = new FakeServer()
+  const resyncs = []
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'hello') {
+      const welcome = welcomeFrame(OWNER_DEVICE_ID, 'snapshot')
+      welcome.headRevision = 5
+      welcome.headEventSeq = 5
+      connection.emit(welcome)
+      connection.emit(snapshotFrame(server.shared, 4, 4, AUTHORITY))
+      return
+    }
+    if (frame.t === 'resync') {
+      resyncs.push(frame)
+    }
+  })
+  const { repository } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  let settled = false
+  const starting = repository.start().then(value => {
+    settled = true
+    return value
+  })
+  await until(() => resyncs.length >= 1, 'initial-head resync')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(settled, false, 'an undersized initial snapshot must not complete start')
+  assert.equal(repository.getProjection(), null)
+  assert.equal(repository.getStatus().state, 'catching_up')
+
+  const connection = transport.connections[0]
+  connection.emit(snapshotFrame(server.shared, 5, 5, AUTHORITY))
+  connection.emit(readyFrame(5, 5, AUTHORITY))
+  await starting
+  assert.equal(repository.getStatus().state, 'online')
+  assert.equal(repository.getProjection().revision, 5)
+  assert.equal(repository.getProjection().eventSeq, 5)
+})
+
+test('server_catching_up refresh stays read-only until the final snapshot and ready', async t => {
+  const server = new FakeServer()
+  let commandFrame = null
+  let commandSettled = false
+  const transport = new FakeTransport((connection, frame) => {
+    if (frame.t === 'hello') {
+      server.handle(connection, frame)
+      return
+    }
+    if (frame.t === 'command') {
+      commandFrame = frame
+      connection.emit(commandResultFrame({
+        opId: frame.opId,
+        requestId: frame.requestId,
+        commandType: frame.command.type,
+        status: 'rejected',
+        error: {
+          code: 'server_catching_up',
+          message: 'the server is still catching up',
+          refreshProjection: true,
+        },
+      }))
+      return
+    }
+    server.handle(connection, frame)
+  })
+  const { repository } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  await repository.start()
+  const initial = repository.getProjection()
+  const pending = repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-catchup-refresh' })
+  const observed = pending.then(
+    value => {
+      commandSettled = true
+      return value
+    },
+    error => {
+      commandSettled = true
+      throw error
+    },
+  )
+  await until(() => commandFrame !== null, 'catch-up command request')
+  await until(
+    () => repository.getStatus().state === 'catching_up' && repository.getStatus().readOnly === true,
+    'catch-up refresh gate',
+  )
+  assert.equal(commandSettled, false)
+  const blocked = await repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-catchup-blocked' })
+  assert.equal(blocked.status, 'rejected')
+  assert.equal(blocked.error.code, 'server_catching_up')
+
+  const connection = transport.connections[0]
+  const nextRevision = initial.revision + 1
+  const nextEventSeq = initial.eventSeq + 1
+  connection.emit({
+    t: 'projection',
+    v: PROTOCOL_VERSION,
+    revision: nextRevision,
+    eventSeq: nextEventSeq,
+    gameTimeMs: GAME_TIME_MS + nextRevision * 60_000,
+    timeZone: initial.timeZone,
+    advanceWhileEmpty: initial.advanceWhileEmpty,
+    weatherLocation: WEATHER_LOCATION,
+    authority: clone(initial.authority),
+    save: sharedWithYb(server.shared.petInfo.yb + 1),
+    events: [{
+      eventSeq: nextEventSeq,
+      revision: nextRevision,
+      commandSeq: nextRevision,
+      gameTimeMs: GAME_TIME_MS + nextRevision * 60_000,
+      type: 'reward.granted',
+      payload: { amount: 1 },
+    }],
+  })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(commandSettled, false, 'a live projection alone must not reopen a catch-up connection')
+  assert.equal(repository.getStatus().state, 'catching_up')
+  assert.equal(repository.getStatus().readOnly, true)
+
+  connection.emit(readyFrame(nextRevision, nextEventSeq, initial.authority, true))
+  await until(() => repository.getStatus().state === 'catching_up', 'intermediate catch-up ready')
+  assert.equal(commandSettled, false)
+  connection.emit(snapshotFrame(server.shared, nextRevision, nextEventSeq, initial.authority))
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(commandSettled, false, 'the final snapshot must wait for final ready')
+  assert.equal(repository.getStatus().state, 'catching_up')
+  connection.emit(readyFrame(nextRevision, nextEventSeq, initial.authority))
+  const result = await observed
+  assert.equal(result.status, 'rejected')
+  assert.equal(result.error.code, 'server_catching_up')
+  assert.equal(result.error.refreshProjection, true)
+  await until(() => repository.getStatus().state === 'online', 'final catch-up ready')
+  assert.equal(repository.getStatus().readOnly, false)
+})

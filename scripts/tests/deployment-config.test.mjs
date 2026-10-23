@@ -52,7 +52,13 @@ test('Nginx example proxies every documented health and WebSocket route with upg
 
 test('Caddy keeps the same health routes and proxies WebSocket traffic automatically', async () => {
   const caddy = await read('server/deploy/Caddyfile')
-  assert.match(caddy, /@health path \/healthz \/health \/readyz/)
+  const healthMatcher = caddy.match(/^@health path((?: \/[^\s]+)+)$/m)
+  assert.ok(healthMatcher, 'missing Caddy @health route matcher')
+  const healthPaths = healthMatcher[1].trim().split(/\s+/)
+  for (const path of ['/healthz', '/health', '/readyz']) {
+    assert.ok(healthPaths.includes(path), 'Caddy @health matcher is missing ' + path)
+  }
+  assert.match(caddy, /handle @health \{\s+reverse_proxy qqpet-sync:8787\s+\}/)
   assert.match(caddy, /reverse_proxy qqpet-sync:8787/)
 })
 
