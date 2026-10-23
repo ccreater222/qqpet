@@ -319,7 +319,7 @@ async function restore(args: ParsedArgs): Promise<void> {
   try {
     // Validate the entire candidate and its generation fence before the live DB
     // is opened for writing or replaced.
-    const source = inspectRestoreSource(from)
+    const source = inspectRestoreSource(from, { ownerAdminCredential: credential })
     const recorded = readRestoreGenerationRecord(config.restoreGenerationFile)
     const liveGeneration = await readLiveRestoreGeneration(config.dbPath)
     const currentGeneration = Math.max(source.maxRestoreGeneration, recorded ?? 0, liveGeneration ?? 0)
@@ -365,8 +365,13 @@ async function restore(args: ParsedArgs): Promise<void> {
       }
 
       // Re-open and verify the staged result before it can become live.
-      const verified = inspectRestoreSource(stagedPath)
+      const verified = inspectRestoreSource(stagedPath, { ownerAdminCredential: credential })
       requireRestoreCondition(sameStringSet(verified.petIds, source.petIds), 'restored pet set changed unexpectedly')
+      requireRestoreCondition(
+        verified.ownerAdminDevice?.petId === source.ownerAdminDevice?.petId
+          && verified.ownerAdminDevice?.deviceId === source.ownerAdminDevice?.deviceId,
+        'staged restore did not preserve the authorized owner device',
+      )
       requireRestoreCondition(verified.maxRestoreGeneration === nextGeneration, 'staged restore generation was not applied')
       const verifiedAuthorities = new Map(verified.authorities.map(authority => [authority.petId, authority]))
       requireRestoreCondition(verifiedAuthorities.size === source.authorities.length, 'staged restore authority set is incomplete')

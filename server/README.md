@@ -229,7 +229,7 @@ paths. Unknown environment variables are ignored.
 | `QQPET_SYNC_BACKUP_DIR` | sibling `backups/` of DB | Absolute online-backup directory. |
 | `QQPET_SYNC_RESTORE_GENERATION_FILE` | unset | External operator-recorded restore generation. It is never part of a DB backup. Required for rollback-restore fencing. |
 | `QQPET_ADMIN_SOCKET` | sibling `admin-<hostname>.sock` of DB | Reserved local control-socket path. Current CLI control uses the loopback WebSocket path documented above. |
-| `QQPET_OWNER_ADMIN_CREDENTIAL` | unset | Credential file path used by restore/control CLI when the flag is omitted. Keep mode `0600`. |
+| `QQPET_OWNER_ADMIN_CREDENTIAL` | unset | Path to a `0600` file containing the token of a non-revoked owner device. Restore verifies the token against the hashed device row in the source/restored database. |
 | `QQPET_SYNC_TIME_ZONE` | host IANA zone | Initial pet timezone. Runtime timezone changes are persisted per pet. |
 | `QQPET_SYNC_WEATHER_LOCATION` | empty | Initial canonical server weather city. Empty means deterministic fallback/automatic behavior. |
 | `QQPET_SYNC_ADVANCE_WHILE_EMPTY` | `1` | Seeds the initial `advanceWhileEmpty` setting. The runtime setting is persisted in SQLite afterwards. |
@@ -297,10 +297,12 @@ interpolation and a missing file fails `docker compose config`/`up`.
 cd server
 cp .env.example .env
 # Edit .env: set QQPET_DOMAIN to a DNS name pointing at this host.
-# Generate a random owner credential, never a checked-in placeholder.
+# The file must contain the token of a non-revoked owner device paired to
+# this authority. A fresh random string is not an owner credential and is
+# rejected by restore/control authentication.
 umask 077
 mkdir -p deploy
-openssl rand -hex 32 > deploy/owner-admin-credential
+printf '%s\n' '<existing-owner-device-token>' > deploy/owner-admin-credential
 chmod 0600 deploy/owner-admin-credential
 export QQPET_OWNER_ADMIN_CREDENTIAL_FILE="$PWD/deploy/owner-admin-credential"
 # Fail closed if the variable or file is absent.
@@ -312,10 +314,15 @@ curl --fail http://127.0.0.1:8787/readyz
 
 The exact Compose variable/path used above is
 `QQPET_OWNER_ADMIN_CREDENTIAL_FILE=./deploy/owner-admin-credential` (resolved
-by Compose relative to `server/`). The file is mounted read-only at
-`/run/secrets/owner_admin_credential`; inside the container the matching setting
-is `QQPET_OWNER_ADMIN_CREDENTIAL=/run/secrets/owner_admin_credential`. Keep the
-host file mode `0600` and out of version control.
+by Compose relative to `server/`). Compose mounts the file through its secret
+store at `/run/secrets/owner_admin_credential`. Because file secrets can retain
+the host owner/mode on bind-backed engines, the root entrypoint copies this one
+file into the `/run/qqpet-secrets` tmpfs as uid 1000 mode `0400`, then drops to
+the non-root `node` user. Inside the container the runtime setting is
+`QQPET_OWNER_ADMIN_CREDENTIAL=/run/qqpet-secrets/owner_admin_credential` and the
+secret source setting is
+`QQPET_OWNER_ADMIN_CREDENTIAL_SOURCE=/run/secrets/owner_admin_credential`.
+Keep the host file mode `0600` and out of version control.
 
 `docker-compose.yml` uses:
 
@@ -428,8 +435,10 @@ sudo install -m 0600 /dev/null /etc/qqpet-sync.env
 ```
 
 Put non-secret configuration in `/etc/qqpet-sync.env`; use the reference in
-`server/.env.example`. Put the owner credential in a separate `0600` file. The
-unit sets `StateDirectory=qqpet-sync`, `ProtectSystem=strict`,
+`server/.env.example`. Put the owner credential in
+`/etc/qqpet-sync/owner-admin-credential` with mode `0600`; it must contain the
+token of a non-revoked owner device in the database. The unit sets
+`StateDirectory=qqpet-sync`, `ProtectSystem=strict`,
 `ProtectHome=true`, `PrivateTmp=true`, `NoNewPrivileges=true`, and write access
 only to `/var/lib/qqpet-sync`.
 
@@ -512,7 +521,10 @@ that stale clients cannot keep reading or writing an old lineage.
    external restore-generation file.
 
 4. Run restore from a verified backup. `--accept-rollback` is mandatory and the
-   requested generation must be greater than the current/recorded generation:
+   requested generation must be greater than the current/recorded generation.
+   The credential file must contain the token of a non-revoked owner device in
+   the backup; the CLI hashes it and checks the matching device row before it
+   touches the live DB:
 
    ```bash
    sudo -u qqpet-sync /usr/bin/node /opt/qqpet-sync/dist/server/src/index.js restore \

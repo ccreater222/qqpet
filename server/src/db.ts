@@ -1632,17 +1632,32 @@ export function openDatabaseReadOnly(path: string): DatabaseStore {
   return new DatabaseStore(path, { readOnly: true })
 }
 
+export interface RestoreOwnerDevice {
+  petId: string
+  deviceId: string
+}
+
 export interface RestoreSourceInfo {
   petIds: string[]
   authorities: AuthorityRecord[]
   maxRestoreGeneration: number
+  ownerAdminDevice?: RestoreOwnerDevice
+}
+
+export interface InspectRestoreSourceOptions {
+  ownerAdminCredential?: string
 }
 
 /**
  * Validate a restore candidate without modifying it. SQLite is opened through
  * an immutable read-only URI so validation cannot create WAL/SHM sidecars.
+ * When an operator credential is supplied, it must hash to an active owner
+ * device in this exact database; a non-empty token by itself is never enough.
  */
-export function inspectRestoreSource(path: string): RestoreSourceInfo {
+export function inspectRestoreSource(
+  path: string,
+  options: InspectRestoreSourceOptions = {},
+): RestoreSourceInfo {
   const store = openDatabaseReadOnly(path)
   try {
     const foreignKeyViolations = store.db.prepare('PRAGMA foreign_key_check').all()
@@ -1666,7 +1681,26 @@ export function inspectRestoreSource(path: string): RestoreSourceInfo {
     if (Number.isSafeInteger(maxRestoreGeneration) === false || maxRestoreGeneration < 0) {
       throw new Error('restore generation is invalid')
     }
-    return { petIds: pets.map(pet => pet.id), authorities, maxRestoreGeneration }
+    let ownerAdminDevice: RestoreOwnerDevice | undefined
+    if (options.ownerAdminCredential !== undefined) {
+      if (typeof options.ownerAdminCredential !== 'string' || options.ownerAdminCredential.length === 0) {
+        throw new Error('owner-admin credential is empty')
+      }
+      const owner = store.getDeviceByTokenGlobal(options.ownerAdminCredential)
+      if (owner === undefined || owner.role !== 'owner' || owner.revokedAtMs !== null) {
+        throw new Error('owner-admin credential does not match a non-revoked owner device')
+      }
+      if (owner.tokenHash.byteLength !== 32) {
+        throw new Error('owner-admin credential hash is invalid')
+      }
+      ownerAdminDevice = { petId: owner.petId, deviceId: owner.deviceId }
+    }
+    return {
+      petIds: pets.map(pet => pet.id),
+      authorities,
+      maxRestoreGeneration,
+      ...(ownerAdminDevice === undefined ? {} : { ownerAdminDevice }),
+    }
   } finally {
     store.close()
   }

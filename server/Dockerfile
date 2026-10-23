@@ -21,7 +21,9 @@ WORKDIR /opt/qqpet-sync
 COPY --from=build --chown=node:node /build/server/package.json ./package.json
 COPY --from=build --chown=node:node /build/server/node_modules ./node_modules
 COPY --from=build --chown=node:node /build/server/dist ./dist
-RUN install -d -o node -g node -m 0700 /var/lib/qqpet-sync /var/lib/qqpet-sync/backups
+COPY --chown=root:root server/docker-entrypoint.sh /usr/local/bin/qqpet-docker-entrypoint.sh
+RUN install -d -o node -g node -m 0700 /var/lib/qqpet-sync /var/lib/qqpet-sync/backups \
+    && chmod 0755 /usr/local/bin/qqpet-docker-entrypoint.sh
 USER node:node
 EXPOSE 8787
 VOLUME ["/var/lib/qqpet-sync"]

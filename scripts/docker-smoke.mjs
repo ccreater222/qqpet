@@ -2,12 +2,12 @@
  * Real Docker release smoke.
  *
  * Builds the production image, initializes and serves a temporary volume,
- * proves readiness/WAL/FULL/non-root runtime, then runs an online backup,
- * mutates the live DB, restores the backup and asserts the original content and
- * restore-generation fence. It writes machine-readable evidence for the gate.
+ * proves readiness/WAL/FULL/non-root runtime plus uid-1000 readability of a
+ * hashed owner credential, then runs an online backup, mutates the live DB,
+ * restores the backup and asserts the original content and restore-generation
+ * fence. It writes machine-readable evidence for the gate.
  */
 import { execFileSync, spawn } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -30,10 +30,14 @@ const CONTAINER = 'qqpet-docker-smoke-' + SUFFIX
 const VOLUME = 'qqpet-docker-smoke-' + SUFFIX
 const DB_PATH = '/var/lib/qqpet-sync/qqpet.sqlite'
 const BACKUP_PATH = '/var/lib/qqpet-sync/smoke-backup.sqlite'
-const CREDENTIAL_PATH = '/run/secrets/owner_admin_credential'
+const CREDENTIAL_SOURCE_PATH = '/run/secrets/owner_admin_credential'
+const CREDENTIAL_RUNTIME_PATH = '/run/qqpet-secrets/owner_admin_credential'
+const CREDENTIAL_RUNTIME_DIR = '/run/qqpet-secrets'
+const SECRET_ENTRYPOINT = '/usr/local/bin/qqpet-docker-entrypoint.sh'
 const RESTORE_GENERATION_PATH = '/var/lib/qqpet-sync/restore-generation.txt'
 const MAX_OUTPUT_CHARS = 12_000
 let credentialFile = ''
+let ownerAdminCredential = ''
 
 function gitRevision() {
   try {
@@ -140,6 +144,41 @@ try {
 }
 `
 
+const CREATE_OWNER_SCRIPT = `
+import { openDatabase } from './dist/server/src/db.js'
+const store = openDatabase(process.env.QQPET_SMOKE_DB)
+try {
+  const created = store.createDevice(process.env.QQPET_SMOKE_PET_ID, 'docker-smoke-owner', 'owner')
+  const row = store.db.prepare('SELECT length(token_hash) AS hash_bytes, hex(token_hash) AS hash_hex FROM devices WHERE pet_id = ? AND device_id = ?').get(process.env.QQPET_SMOKE_PET_ID, created.device.deviceId)
+  if (row === undefined) throw new Error('created owner device is missing')
+  if (Number(row.hash_bytes) !== 32) throw new Error('owner token hash is not 32 bytes')
+  if (String(row.hash_hex) === created.token) throw new Error('owner credential was stored in plaintext')
+  console.log(JSON.stringify({ ok: true, token: created.token, deviceId: created.device.deviceId, tokenHashBytes: Number(row.hash_bytes) }))
+} finally {
+  store.close()
+}
+`
+
+const PROCESS_UID_SCRIPT = `
+const fs = require('node:fs')
+const status = fs.readFileSync('/proc/1/status', 'utf8')
+const match = /^Uid:[^0-9]*([0-9]+)/m.exec(status)
+if (match === null) throw new Error('runtime uid is missing from /proc/1/status')
+console.log(match[1])
+`
+
+const READ_CREDENTIAL_SCRIPT = `
+const fs = require('node:fs')
+const path = process.env.QQPET_OWNER_ADMIN_CREDENTIAL
+if (path === undefined || path.length === 0) throw new Error('runtime owner credential path is not configured')
+const info = fs.statSync(path)
+const value = fs.readFileSync(path, 'utf8').trim()
+if (value.length === 0) throw new Error('runtime owner credential is empty')
+if (info.uid !== process.getuid()) throw new Error('runtime owner credential owner uid mismatch')
+if ((info.mode & 0o077) !== 0) throw new Error('runtime owner credential is group/world accessible')
+console.log(JSON.stringify({ readable: true, uid: process.getuid(), mode: info.mode & 0o777, bytes: Buffer.byteLength(value) }))
+`
+
 const MUTATE_DB_SCRIPT = `
 const { DatabaseSync } = require('node:sqlite')
 const db = new DatabaseSync(process.env.QQPET_SMOKE_DB)
@@ -152,9 +191,9 @@ try {
 }
 `
 
-async function inspectRunning(containerId, dbPath = DB_PATH) {
+async function inspectRunning(containerId, uid, dbPath = DB_PATH) {
   const result = await run(DOCKER, [
-    'exec', '-e', 'QQPET_SMOKE_DB=' + dbPath, containerId,
+    'exec', '--user', String(uid), '-e', 'QQPET_SMOKE_DB=' + dbPath, containerId,
     'node', '-e', INSPECT_DB_SCRIPT,
   ])
   return parseJsonOutput(result.stdout)
@@ -200,19 +239,35 @@ async function startContainer(port) {
   const result = await run(DOCKER, [
     'run', '-d', '--name', CONTAINER,
     '--read-only',
+    '--user', '0:0',
     '--security-opt', 'no-new-privileges:true',
     '--tmpfs', '/tmp:rw,noexec,nosuid,size=32m',
+    '--tmpfs', CREDENTIAL_RUNTIME_DIR + ':rw,noexec,nosuid,size=64k,mode=0700',
     '-v', VOLUME + ':/var/lib/qqpet-sync',
-    '-v', credentialFile + ':' + CREDENTIAL_PATH + ':ro',
+    '-v', credentialFile + ':' + CREDENTIAL_SOURCE_PATH + ':ro',
     '-e', 'QQPET_SYNC_DB=' + DB_PATH,
     '-e', 'QQPET_SYNC_BACKUP_DIR=/var/lib/qqpet-sync/backups',
     '-e', 'QQPET_SYNC_RESTORE_GENERATION_FILE=' + RESTORE_GENERATION_PATH,
-    '-e', 'QQPET_OWNER_ADMIN_CREDENTIAL=' + CREDENTIAL_PATH,
+    '-e', 'QQPET_OWNER_ADMIN_CREDENTIAL=' + CREDENTIAL_RUNTIME_PATH,
+    '-e', 'QQPET_OWNER_ADMIN_CREDENTIAL_SOURCE=' + CREDENTIAL_SOURCE_PATH,
     '-e', 'QQPET_SYNC_ADVANCE_WHILE_EMPTY=0',
     '-p', '127.0.0.1:' + port + ':8787',
-    IMAGE,
+    '--entrypoint', '/bin/sh',
+    IMAGE, SECRET_ENTRYPOINT, 'start',
   ])
   return result.stdout.trim()
+}
+
+async function runtimeProcessUid(containerId) {
+  const result = await run(DOCKER, ['exec', containerId, 'node', '-e', PROCESS_UID_SCRIPT])
+  return Number(result.stdout.trim())
+}
+
+async function assertRuntimeCredentialReadable(containerId, uid) {
+  const result = await run(DOCKER, [
+    'exec', '--user', String(uid), containerId, 'node', '-e', READ_CREDENTIAL_SCRIPT,
+  ])
+  return parseJsonOutput(result.stdout)
 }
 
 async function main() {
@@ -230,6 +285,8 @@ async function main() {
       synchronous: 'unknown',
       nonRoot: false,
       uid: 0,
+      ownerAdminCredentialHashed: false,
+      credentialReadableByRuntime: false,
       backupCreated: false,
       backupContentAsserted: false,
       restoreSucceeded: false,
@@ -248,7 +305,6 @@ async function main() {
     await mkdir(join(ROOT, 'out'), { recursive: true })
     tempDir = await mkdtemp(join(ROOT, 'out/docker-smoke-'))
     credentialFile = join(tempDir, 'owner-admin-credential')
-    await writeFile(credentialFile, 'docker-smoke-' + randomBytes(32).toString('hex') + '\n', { mode: 0o600 })
 
     if (process.env.QQPET_SMOKE_IMAGE?.trim()) {
       report.evidence.imageBuilt = true
@@ -273,33 +329,68 @@ async function main() {
     if (initialized.ok === true) { /* expected */ } else { throw new Error('init did not return ok:true') }
     report.evidence.initializedPetId = String(initialized.petId)
     report.evidence.initialAuthorityId = String(initialized.authority?.authorityId ?? '')
-    process.stdout.write('[docker-smoke] image built and volume initialized\n')
+    const owner = await run(DOCKER, [
+      'run', '--rm', '--read-only',
+      '--tmpfs', '/tmp:rw,noexec,nosuid,size=32m',
+      '-v', VOLUME + ':/var/lib/qqpet-sync',
+      '-e', 'QQPET_SMOKE_DB=' + DB_PATH,
+      '-e', 'QQPET_SMOKE_PET_ID=default',
+      '--entrypoint', 'node', IMAGE, '--input-type=module', '-e', CREATE_OWNER_SCRIPT,
+    ])
+    const createdOwner = parseJsonOutput(owner.stdout)
+    if (createdOwner.ok !== true || typeof createdOwner.token !== 'string' || createdOwner.token.length < 43) {
+      throw new Error('could not create a real hashed owner credential in the smoke database')
+    }
+    if (createdOwner.tokenHashBytes !== 32) {
+      throw new Error('smoke owner credential hash is not 32 bytes')
+    }
+    ownerAdminCredential = createdOwner.token
+    await writeFile(credentialFile, ownerAdminCredential + '\n', { mode: 0o600 })
+    report.evidence.ownerAdminDeviceId = String(createdOwner.deviceId)
+    report.evidence.ownerAdminCredentialHashed = true
+    process.stdout.write('[docker-smoke] image built, volume initialized and owner credential hashed\n')
 
     const port = await freePort()
     containerId = await startContainer(port)
     report.evidence.containerStarted = true
-    const health = await waitForReady(port, 30_000)
+    const readyz = await waitForReady(port, 30_000)
+    report.evidence.readyzReady = readyz.ready === true
+    // Public /readyz intentionally omits operational PRAGMA detail. Prove it
+    // through the owner-authenticated detailed-health route using the same
+    // hashed owner credential that will authorize restore.
+    const healthResponse = await fetch('http://127.0.0.1:' + port + '/health/detail', {
+      headers: { authorization: 'Bearer ' + ownerAdminCredential },
+    })
+    const health = await healthResponse.json()
+    if (healthResponse.ok === false || health.ready !== true) {
+      throw new Error('owner-authenticated detailed health is not ready: status ' + healthResponse.status)
+    }
     if (health.journalMode !== 'wal') throw new Error('readiness journalMode is not wal: ' + String(health.journalMode))
     if (health.synchronous !== 'full') throw new Error('readiness synchronous is not full: ' + String(health.synchronous))
-    report.evidence.readyzReady = health.ready === true
     report.evidence.journalMode = String(health.journalMode)
     report.evidence.synchronous = String(health.synchronous)
 
-    const uidOutput = await run(DOCKER, ['exec', containerId, 'id', '-u'])
-    const uid = Number(uidOutput.stdout.trim())
+    const uid = await runtimeProcessUid(containerId)
     if (Number.isSafeInteger(uid) === false || uid === 0) {
-      throw new Error('container runtime uid is not a non-root integer: ' + uidOutput.stdout.trim())
+      throw new Error('container runtime uid is not a non-root integer: ' + uid)
     }
     report.evidence.uid = uid
     report.evidence.nonRoot = true
+    const credentialRead = await assertRuntimeCredentialReadable(containerId, uid)
+    if (credentialRead.readable !== true || credentialRead.uid !== uid) {
+      throw new Error('container runtime could not read the owner credential as its own uid')
+    }
+    report.evidence.credentialReadableByRuntime = true
+    report.evidence.credentialRuntimeUid = credentialRead.uid
+    report.evidence.credentialRuntimeMode = credentialRead.mode
 
-    const before = await inspectRunning(containerId)
+    const before = await inspectRunning(containerId, uid)
     if (before.quickCheck !== 'ok') throw new Error('live database quick_check is ' + before.quickCheck)
     if (before.saveObjectKeys.length === 0) throw new Error('canonical save has no content keys')
     process.stdout.write('[docker-smoke] ready: wal/full, uid=' + uid + ', revision=' + before.revision + '\n')
 
     const backup = await run(DOCKER, [
-      'exec', containerId, 'node', 'dist/server/src/index.js', 'backup',
+      'exec', '--user', String(uid), containerId, 'node', 'dist/server/src/index.js', 'backup',
       '--db', DB_PATH, '--pet-id', 'default', '--output', BACKUP_PATH,
     ])
     const backupJson = parseJsonOutput(backup.stdout)
@@ -308,7 +399,7 @@ async function main() {
     } else {
       throw new Error('backup did not return ok:true')
     }
-    const backupInspect = await inspectRunning(containerId, BACKUP_PATH)
+    const backupInspect = await inspectRunning(containerId, uid, BACKUP_PATH)
     assertContent('backup copy', backupInspect, before)
     report.evidence.backupContentAsserted = true
     report.evidence.backupRevision = backupInspect.revision
@@ -334,15 +425,18 @@ async function main() {
     report.evidence.postBackupRevision = changed.revision
 
     const restore = await run(DOCKER, [
-      'run', '--rm', '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=32m',
+      'run', '--rm', '--read-only', '--user', '0:0',
+      '--tmpfs', '/tmp:rw,noexec,nosuid,size=32m',
+      '--tmpfs', CREDENTIAL_RUNTIME_DIR + ':rw,noexec,nosuid,size=64k,mode=0700',
       '-v', VOLUME + ':/var/lib/qqpet-sync',
-      '-v', credentialFile + ':' + CREDENTIAL_PATH + ':ro',
+      '-v', credentialFile + ':' + CREDENTIAL_SOURCE_PATH + ':ro',
       '-e', 'QQPET_SYNC_RESTORE_GENERATION_FILE=' + RESTORE_GENERATION_PATH,
-      '-e', 'QQPET_OWNER_ADMIN_CREDENTIAL=' + CREDENTIAL_PATH,
-      '--entrypoint', 'node', IMAGE,
-      'dist/server/src/index.js', 'restore',
+      '-e', 'QQPET_OWNER_ADMIN_CREDENTIAL=' + CREDENTIAL_RUNTIME_PATH,
+      '-e', 'QQPET_OWNER_ADMIN_CREDENTIAL_SOURCE=' + CREDENTIAL_SOURCE_PATH,
+      '--entrypoint', '/bin/sh', IMAGE, SECRET_ENTRYPOINT,
+      'restore',
       '--db', DB_PATH, '--from', BACKUP_PATH, '--accept-rollback',
-      '--owner-admin-credential', CREDENTIAL_PATH, '--restore-generation', '1',
+      '--owner-admin-credential', CREDENTIAL_RUNTIME_PATH, '--restore-generation', '1',
     ])
     const restoreJson = parseJsonOutput(restore.stdout)
     if (restoreJson.ok === true) {
@@ -363,8 +457,15 @@ async function main() {
     process.stdout.write('[docker-smoke] restore content matched backup; authority generation=1\n')
 
     containerId = await startContainer(port)
-    const postHealth = await waitForReady(port, 30_000)
-    if (postHealth.ready === true) { /* expected */ } else { throw new Error('post-restore readiness did not report ready') }
+    const postReadyz = await waitForReady(port, 30_000)
+    if (postReadyz.ready !== true) throw new Error('post-restore readiness did not report ready')
+    const postHealthResponse = await fetch('http://127.0.0.1:' + port + '/health/detail', {
+      headers: { authorization: 'Bearer ' + ownerAdminCredential },
+    })
+    const postHealth = await postHealthResponse.json()
+    if (postHealthResponse.ok === false || postHealth.ready !== true) {
+      throw new Error('post-restore owner-authenticated detailed health did not report ready')
+    }
     if (postHealth.restoreGeneration !== 1) {
       throw new Error('post-restore readiness generation is ' + String(postHealth.restoreGeneration))
     }

@@ -12,6 +12,9 @@ import { mkdir, rm } from 'node:fs/promises'
 export const E2E_MIN_STEPS = 30
 export const EVIDENCE_MAX_AGE_MS = 30 * 60_000
 export const EVIDENCE_FUTURE_SKEW_MS = 2 * 60_000
+const GENERATED_ACCEPTANCE_EVIDENCE_PREFIX = 'docs/superpowers/acceptance/artifacts/'
+const GENERATED_ACCEPTANCE_REPORT_PATTERN = /^docs\/superpowers\/acceptance\/\d{4}-\d{2}-\d{2}-c12-final-gate\.md$/
+const GENERATED_TEMP_PATH_PATTERN = /^out\/(?:docker-smoke-|compose-smoke-|proxy-smoke-|acceptance-gate-)/
 export const REQUIRED_E2E_SCENARIO_NAMES = Object.freeze([
   'two-renderer competing actions reject exactly one canonical mutation',
   'game diudiule exam island-quiz session token abuse is rejected without answer keys',
@@ -53,6 +56,8 @@ export const REQUIRED_DOCKER_EVIDENCE_FLAGS = [
   'containerStarted',
   'readyzReady',
   'nonRoot',
+  'ownerAdminCredentialHashed',
+  'credentialReadableByRuntime',
   'backupCreated',
   'backupContentAsserted',
   'restoreSucceeded',
@@ -73,6 +78,85 @@ export const REQUIRED_PROXY_EVIDENCE_FLAGS = [
   'v1SyncRoute',
   'syncRoute',
 ]
+
+/**
+ * Parse `git status --porcelain=v1 -z --untracked-files=all`. Rename/copy
+ * records carry the previous path in the following NUL-delimited token.
+ */
+export function parseGitStatusPorcelain(output) {
+  if (typeof output !== 'string') throw new Error('git status output must be a string')
+  const tokens = output.split('\0')
+  const entries = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (token.length === 0) continue
+    if (token.length < 4 || token[2] !== ' ') {
+      throw new Error('malformed git status porcelain record')
+    }
+    const status = token.slice(0, 2)
+    const entry = { status, path: token.slice(3) }
+    if (status.includes('R') || status.includes('C')) {
+      const previousPath = tokens[index + 1]
+      if (previousPath === undefined || previousPath.length === 0) {
+        throw new Error('malformed git status rename record')
+      }
+      entry.previousPath = previousPath
+      index += 1
+    }
+    entries.push(entry)
+  }
+  return entries
+}
+
+/**
+ * Generated acceptance output is the only dirt allowed around the gate. In
+ * particular, source/config/test/script changes are always release-blocking.
+ */
+export function isGeneratedAcceptancePath(path) {
+  if (typeof path !== 'string') return false
+  const normalized = path.replaceAll('\\', '/').replace(/^\.\//, '')
+  return (normalized.startsWith(GENERATED_ACCEPTANCE_EVIDENCE_PREFIX)
+      && normalized.length > GENERATED_ACCEPTANCE_EVIDENCE_PREFIX.length)
+    || GENERATED_ACCEPTANCE_REPORT_PATTERN.test(normalized)
+    || GENERATED_TEMP_PATH_PATTERN.test(normalized)
+}
+
+function workingTreeInputPaths(entries) {
+  if (Array.isArray(entries) === false) return null
+  const paths = []
+  for (const entry of entries) {
+    if (typeof entry === 'string') {
+      paths.push(entry)
+      continue
+    }
+    if (entry !== null && typeof entry === 'object') {
+      if (typeof entry.path === 'string') paths.push(entry.path)
+      if (typeof entry.previousPath === 'string') paths.push(entry.previousPath)
+      continue
+    }
+    return null
+  }
+  return [...new Set(paths.filter(path => path.length > 0))]
+}
+
+export function evaluateWorkingTree(entries) {
+  const paths = workingTreeInputPaths(entries)
+  if (paths === null) {
+    return {
+      captured: false,
+      clean: false,
+      changedPaths: [],
+      disallowedPaths: [],
+    }
+  }
+  const disallowedPaths = paths.filter(path => isGeneratedAcceptancePath(path) === false)
+  return {
+    captured: true,
+    clean: disallowedPaths.length === 0,
+    changedPaths: paths,
+    disallowedPaths,
+  }
+}
 
 function objectValue(value) {
   return value !== null && typeof value === 'object' && Array.isArray(value) === false ? value : null
@@ -248,6 +332,12 @@ export function validateDockerSmokeReport(report, options = {}) {
     if (Number.isSafeInteger(evidence.uid) === false || evidence.uid === 0) {
       errors.push('Docker smoke evidence must record a non-zero integer runtime uid')
     }
+    if (evidence.credentialRuntimeUid !== evidence.uid) {
+      errors.push('Docker smoke credentialReadableByRuntime must use the server runtime uid')
+    }
+    if (evidence.credentialRuntimeMode !== 0o400) {
+      errors.push('Docker smoke runtime owner credential mode must be 0400')
+    }
   }
   return validationResult(errors)
 }
@@ -283,6 +373,9 @@ export function evaluateAcceptanceGate(options = {}) {
     && results.length === expectedStepCount
     && results.every(result => objectValue(result) !== null && result.code === 0)
   const revisionStable = revision.length > 0 && revisionAfter === revision
+  const workingTreeBefore = evaluateWorkingTree(options.workingTreeBefore)
+  const workingTreeAfter = evaluateWorkingTree(options.workingTreeAfter)
+  const workingTreeClean = workingTreeBefore.clean && workingTreeAfter.clean
   const validationOptions = {
     currentRevision: revision,
     nowMs: options.nowMs,
@@ -298,10 +391,25 @@ export function evaluateAcceptanceGate(options = {}) {
   ]
   if (commandsPassed === false) errors.push('one or more acceptance commands failed or did not run')
   if (revisionStable === false) errors.push('HEAD changed while the acceptance gate was running')
+  if (workingTreeBefore.captured === false) {
+    errors.push('working tree status before the acceptance gate was not captured')
+  } else if (workingTreeBefore.clean === false) {
+    errors.push('working tree before the acceptance gate contains non-generated changes: '
+      + workingTreeBefore.disallowedPaths.join(', '))
+  }
+  if (workingTreeAfter.captured === false) {
+    errors.push('working tree status after the acceptance gate was not captured')
+  } else if (workingTreeAfter.clean === false) {
+    errors.push('working tree after the acceptance gate contains non-generated changes: '
+      + workingTreeAfter.disallowedPaths.join(', '))
+  }
   return {
-    ok: commandsPassed && revisionStable && e2e.ok && docker.ok && proxy.ok,
+    ok: commandsPassed && revisionStable && workingTreeClean && e2e.ok && docker.ok && proxy.ok,
     commandsPassed,
     revisionStable,
+    workingTreeClean,
+    workingTreeBefore,
+    workingTreeAfter,
     e2e,
     docker,
     proxy,

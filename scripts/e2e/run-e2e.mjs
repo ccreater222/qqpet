@@ -397,7 +397,6 @@ async function main() {
     mkdir(playerProfile, { recursive: true }),
     mkdir(backupDir, { recursive: true }),
   ])
-  await writeFile(credentialFile, 'c12-e2e-owner-admin-credential\n', { mode: 0o600 })
 
   const report = {
     schemaVersion: 1,
@@ -511,6 +510,9 @@ async function main() {
       assert.notEqual(ownerProfile, playerProfile)
       ownerToken = (await readFile(join(ownerProfile, 'e2e-device-token.txt'), 'utf8')).trim()
       assert.ok(ownerToken.length >= 43)
+      // The restore CLI authorizes against the owner device's hashed token in
+      // the backup. Persist the real paired token only after pairing succeeds.
+      await writeFile(credentialFile, ownerToken + '\n', { mode: 0o600 })
       const ownerStatus = await owner.request('status')
       const playerStatus = await player.request('status')
       assert.equal(ownerStatus.status.role, 'owner')

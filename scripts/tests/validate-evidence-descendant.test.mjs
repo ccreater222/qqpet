@@ -47,6 +47,10 @@ function dockerReport(codeRevision) {
       synchronous: 'full',
       nonRoot: true,
       uid: 1000,
+      ownerAdminCredentialHashed: true,
+      credentialReadableByRuntime: true,
+      credentialRuntimeUid: 1000,
+      credentialRuntimeMode: 0o400,
       backupCreated: true,
       backupContentAsserted: true,
       restoreSucceeded: true,
@@ -57,8 +61,8 @@ function dockerReport(codeRevision) {
   }
 }
 
-async function writeReport(root, codeRevision) {
-  const reportPath = join(root, REPORT_RELATIVE_PATH)
+async function writeReport(root, codeRevision, relativePath = REPORT_RELATIVE_PATH) {
+  const reportPath = join(root, relativePath)
   await mkdir(dirname(reportPath), { recursive: true })
   await writeFile(reportPath, JSON.stringify(dockerReport(codeRevision), null, 2) + '\n')
   return reportPath
@@ -122,6 +126,46 @@ test('unrelated sibling/branch revision is rejected with the strict revision err
   assert.match(result.stderr, new RegExp('Docker smoke codeRevision ' + testedRevision
     + ' does not match current HEAD ' + headRevision))
   assert.doesNotMatch(result.stderr, /evidence-only descendant accepted/)
+})
+
+test('untracked source file invalidates the evidence-only descendant allowance', async () => {
+  const { root, testedRevision } = await createRepository()
+  const reportPath = await writeReport(root, testedRevision)
+  const headRevision = commitAll(root, 'record acceptance evidence')
+  await writeFile(join(root, 'src/untracked-source.ts'), 'export const bypass = true\n')
+
+  const result = validateDocker(root, reportPath)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, new RegExp('Docker smoke codeRevision ' + testedRevision
+    + ' does not match current HEAD ' + headRevision))
+  assert.doesNotMatch(result.stdout + result.stderr, /evidence-only descendant accepted/)
+})
+
+test('tracked working-tree replacement report invalidates the evidence-only descendant allowance', async () => {
+  const { root, testedRevision } = await createRepository()
+  const reportPath = await writeReport(root, testedRevision)
+  const headRevision = commitAll(root, 'record acceptance evidence')
+  await writeReport(root, testedRevision)
+
+  const result = validateDocker(root, reportPath)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, new RegExp('Docker smoke codeRevision ' + testedRevision
+    + ' does not match current HEAD ' + headRevision))
+  assert.doesNotMatch(result.stdout + result.stderr, /evidence-only descendant accepted/)
+})
+
+test('untracked replacement report invalidates the evidence-only descendant allowance', async () => {
+  const { root, testedRevision } = await createRepository()
+  await writeReport(root, testedRevision)
+  const headRevision = commitAll(root, 'record acceptance evidence')
+  const replacementRelativePath = 'docs/superpowers/acceptance/artifacts/c12-docker/replacement-report.json'
+  const replacementPath = await writeReport(root, testedRevision, replacementRelativePath)
+
+  const result = validateDocker(root, replacementPath)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, new RegExp('Docker smoke codeRevision ' + testedRevision
+    + ' does not match current HEAD ' + headRevision))
+  assert.doesNotMatch(result.stdout + result.stderr, /evidence-only descendant accepted/)
 })
 
 test('missing report revision is still rejected', async () => {

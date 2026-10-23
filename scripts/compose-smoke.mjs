@@ -2,8 +2,9 @@
  * Compose configuration smoke.
  *
  * Proves the checked-in Compose file renders with an explicit 0600 owner
- * credential, rejects an unset/empty credential-file variable, and rejects a
- * named credential file that does not exist.
+ * credential, mounts it as a Compose secret rather than a runtime-host bind,
+ * and rejects an unset/empty or missing credential file. The Docker smoke then
+ * proves the runtime uid can actually read the staged secret.
  */
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
@@ -74,6 +75,22 @@ async function main() {
     if (valid.stdout.includes('owner_admin_credential.example')) {
       throw new Error('Compose config still references the removed checked-in placeholder credential')
     }
+    for (const required of [
+      'QQPET_OWNER_ADMIN_CREDENTIAL: /run/qqpet-secrets/owner_admin_credential',
+      'QQPET_OWNER_ADMIN_CREDENTIAL_SOURCE: /run/secrets/owner_admin_credential',
+      '/usr/local/bin/qqpet-docker-entrypoint.sh',
+    ]) {
+      if (valid.stdout.includes(required) === false) {
+        throw new Error('Compose config is missing required secret staging setting: ' + required)
+      }
+    }
+    if (/^secrets:\s*$/m.test(valid.stdout) === false
+      || /^\s{2}owner_admin_credential:\s*$/m.test(valid.stdout) === false) {
+      throw new Error('Compose config does not declare the owner credential as a top-level secret')
+    }
+    if (valid.stdout.includes('source: ' + credentialFile)) {
+      throw new Error('Compose config still bind-mounts the host credential file directly')
+    }
 
     const unset = runConfig(compose, emptyEnvFile, null)
     if (unset.status === 0) throw new Error('Compose config unexpectedly succeeded without the required credential variable')
@@ -93,6 +110,9 @@ async function main() {
       result: 'PASS',
       command: [compose.command, ...compose.prefix].join(' '),
       validConfig: true,
+      composeSecretMounted: true,
+      hostCredentialNotDirectlyBindMounted: true,
+      containerStagingEntrypoint: true,
       unsetVariableRejected: true,
       missingFileRejectedByCompose: true,
     }) + '\n')

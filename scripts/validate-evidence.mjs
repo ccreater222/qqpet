@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  parseGitStatusPorcelain,
   validateDockerSmokeReport,
   validateE2EReport,
   validateProxySmokeReport,
@@ -53,16 +54,36 @@ function changedTrackedPaths(fromRevision, toRevision) {
   return output.split('\0').filter(path => path.length > 0)
 }
 
+function workingTreeStatusPaths() {
+  const output = execFileSync('git', [
+    'status',
+    '--porcelain=v1',
+    '-z',
+    '--untracked-files=all',
+  ], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  const paths = []
+  for (const entry of parseGitStatusPorcelain(output)) {
+    paths.push(entry.path)
+    if (typeof entry.previousPath === 'string') paths.push(entry.previousPath)
+  }
+  return [...new Set(paths)]
+}
+
 function isAcceptanceEvidencePath(path) {
   return path.startsWith(ACCEPTANCE_EVIDENCE_PREFIX) && path.length > ACCEPTANCE_EVIDENCE_PREFIX.length
 }
 
 /**
  * An evidence report may lag HEAD only by the commit that checked it in. The
- * tested revision must be a real ancestor of HEAD, and both the committed
- * tested..HEAD diff and the actual working tree relative to tested must touch
- * only tracked acceptance evidence/docs. This keeps source/scripts/config/test
- * changes fail-closed while allowing the evidence-only child commit itself.
+ * tested revision must be a real ancestor of HEAD, the working tree must be
+ * clean (tracked modifications and untracked files are both dirty), and the
+ * committed tested..HEAD diff must touch only acceptance evidence/docs. This
+ * keeps source/scripts/config/test changes and uncommitted replacement reports
+ * fail-closed while allowing the evidence-only child commit itself.
  */
 function evidenceOnlyDescendant(testedRevision, currentRevision) {
   if (typeof testedRevision !== 'string'
@@ -86,12 +107,18 @@ function evidenceOnlyDescendant(testedRevision, currentRevision) {
 
   let committedPaths
   let workingTreePaths
+  let dirtyPaths
   try {
     committedPaths = changedTrackedPaths(testedRevision, headRevision)
     workingTreePaths = changedTrackedPaths(testedRevision)
+    dirtyPaths = workingTreeStatusPaths()
   } catch {
     return null
   }
+  // The allowance is commit-based. Any tracked modification or untracked file,
+  // including a replacement report under the acceptance directory, can alter
+  // what the validator reads and therefore invalidates the allowance.
+  if (dirtyPaths.length > 0) return null
   const changedPaths = [...new Set([...committedPaths, ...workingTreePaths])]
   if (changedPaths.every(isAcceptanceEvidencePath) === false) return null
   return { testedRevision, headRevision, changedPaths }

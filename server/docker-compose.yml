@@ -15,7 +15,8 @@ services:
       QQPET_SYNC_DB: /var/lib/qqpet-sync/qqpet.sqlite
       QQPET_SYNC_BACKUP_DIR: /var/lib/qqpet-sync/backups
       QQPET_SYNC_RESTORE_GENERATION_FILE: /var/lib/qqpet-sync/restore-generation.txt
-      QQPET_OWNER_ADMIN_CREDENTIAL: /run/secrets/owner_admin_credential
+      QQPET_OWNER_ADMIN_CREDENTIAL: /run/qqpet-secrets/owner_admin_credential
+      QQPET_OWNER_ADMIN_CREDENTIAL_SOURCE: /run/secrets/owner_admin_credential
       QQPET_SYNC_TIME_ZONE: ${QQPET_SYNC_TIME_ZONE:-Asia/Shanghai}
       QQPET_SYNC_WEATHER_LOCATION: ${QQPET_SYNC_WEATHER_LOCATION:-北京}
       QQPET_SYNC_ADVANCE_WHILE_EMPTY: ${QQPET_SYNC_ADVANCE_WHILE_EMPTY:-1}
@@ -23,20 +24,24 @@ services:
       QQPET_SYNC_LOG_LEVEL: ${QQPET_SYNC_LOG_LEVEL:-info}
     # Compose validates env_file paths at config/up time. The owner credential
     # is a bare token (no KEY= prefix), so Compose ignores it as an assignment;
-    # this entry exists to make a missing credential path fail closed instead of
-    # being auto-created as a directory by the bind mount below.
+    # this entry exists to make a missing credential path fail closed. The
+    # actual secret is declared below and mounted by the Compose secret store.
     env_file:
       - ${QQPET_OWNER_ADMIN_CREDENTIAL_FILE:?QQPET_OWNER_ADMIN_CREDENTIAL_FILE is required and must point to a 0600 owner credential file}
+    # File secrets retain the host owner/mode on bind-backed engines. Start the
+    # entrypoint as root only long enough to copy this one secret into a
+    # node-owned tmpfs, then exec the server as the non-root node user.
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/usr/local/bin/qqpet-docker-entrypoint.sh"]
+    command: ["start"]
+    secrets:
+      - source: owner_admin_credential
+        target: owner_admin_credential
     volumes:
       - qqpet-data:/var/lib/qqpet-sync
-      # Required, checked-in-default-free credential mount. Generate with
-      # `openssl rand -hex 32` and chmod 0600.
-      - type: bind
-        source: ${QQPET_OWNER_ADMIN_CREDENTIAL_FILE:?QQPET_OWNER_ADMIN_CREDENTIAL_FILE is required and must point to a 0600 owner credential file}
-        target: /run/secrets/owner_admin_credential
-        read_only: true
     tmpfs:
       - /tmp:size=32m,noexec,nosuid
+      - /run/qqpet-secrets:size=64k,mode=0700,noexec,nosuid
     # Keep the authority port off the public interface. Caddy is the only
     # public TLS/WebSocket ingress.
     ports:
@@ -69,3 +74,7 @@ volumes:
   qqpet-data:
   caddy-data:
   caddy-config:
+
+secrets:
+  owner_admin_credential:
+    file: ${QQPET_OWNER_ADMIN_CREDENTIAL_FILE:?QQPET_OWNER_ADMIN_CREDENTIAL_FILE is required and must point to a 0600 owner credential file}

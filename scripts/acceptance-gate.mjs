@@ -5,6 +5,8 @@
  * to docs/superpowers/acceptance/. A zero command exit status is not enough:
  * fresh E2E, Docker backup/restore and TLS/WSS proxy reports are parsed and must
  * independently prove their required evidence at the exact current revision.
+ * The tree must also remain free of non-generated changes before and after the
+ * commands; only acceptance artifacts and explicit smoke temp paths are exempt.
  */
 import { spawn } from 'node:child_process'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -13,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import {
   cleanEvidenceDirectory,
   evaluateAcceptanceGate,
+  parseGitStatusPorcelain,
 } from './lib/acceptance-evidence.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -30,15 +33,28 @@ const PROXY_ARTIFACT_DIR = join(ACCEPTANCE_DIR, 'artifacts/c12-proxy')
 const PROXY_REPORT_PATH = join(PROXY_ARTIFACT_DIR, 'proxy-smoke-report.json')
 const FAILURE_TAIL_CHARS = 4000
 
-function runGit(args) {
+function runGit(args, options = {}) {
   return new Promise(resolveRun => {
     const child = spawn('git', args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', chunk => { stdout += String(chunk) })
     child.stderr.on('data', chunk => { stderr += String(chunk) })
-    child.once('close', code => resolveRun({ code, stdout: stdout.trim(), stderr: stderr.trim() }))
+    child.once('close', code => resolveRun({
+      code,
+      stdout: options.trim === false ? stdout : stdout.trim(),
+      stderr: stderr.trim(),
+    }))
   })
+}
+
+function gitStatusEntries(result) {
+  if (result.code !== 0) return null
+  try {
+    return parseGitStatusPorcelain(result.stdout)
+  } catch {
+    return null
+  }
 }
 
 function runCommand(label, command, args, options = {}) {
@@ -121,11 +137,17 @@ function validationLine(label, validation) {
 }
 
 async function main() {
-  await mkdir(ACCEPTANCE_DIR, { recursive: true })
   const revision = await runGit(['rev-parse', 'HEAD'])
   const branch = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'])
-  // Capture cleanliness before clearing tracked historical evidence files.
-  const dirtyBefore = await runGit(['status', '--porcelain'])
+  // Capture cleanliness before creating directories or clearing tracked
+  // historical evidence files.
+  // Untracked files are included so an evidence-only bypass cannot hide a
+  // source, config, test or replacement-report change.
+  const dirtyBefore = await runGit(
+    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    { trim: false },
+  )
+  await mkdir(ACCEPTANCE_DIR, { recursive: true })
   // Always start from empty evidence directories. A failed or skipped smoke
   // command must never leave an older PASS report available for the gate.
   await Promise.all([
@@ -186,12 +208,20 @@ async function main() {
   // Keep the concise machine-readable evidence, not multi-process debug logs.
   await rm(join(E2E_ARTIFACT_DIR, 'c12-server.log'), { force: true })
   await rm(join(E2E_ARTIFACT_DIR, 'c12-owner-harness.log'), { force: true })
+  // Capture the post-command tree before writing this gate's own report. The
+  // report/artifact paths are the only explicitly allowed generated output.
+  const dirtyAfter = await runGit(
+    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    { trim: false },
+  )
 
   const gateEvaluation = evaluateAcceptanceGate({
     results,
     expectedStepCount: steps.length,
     revision: revision.stdout,
     revisionAfter: revisionAfter.stdout,
+    workingTreeBefore: gitStatusEntries(dirtyBefore),
+    workingTreeAfter: gitStatusEntries(dirtyAfter),
     e2eReport,
     dockerReport,
     proxyReport,
@@ -210,9 +240,16 @@ async function main() {
   lines.push('- Generated at: `' + STAMP + '`')
   lines.push('- Branch: `' + branch.stdout + '`')
   lines.push('- Code revision under test: `' + revision.stdout + '`')
-  lines.push('- Working tree before gate: ' + (dirtyBefore.stdout.length === 0
-    ? 'clean'
-    : 'dirty (evidence reflects the checked-out working tree, not a tagged release)'))
+  lines.push('- Working tree before gate: **'
+    + (gateEvaluation.workingTreeBefore.clean ? 'CLEAN' : 'FAIL') + '**'
+    + (gateEvaluation.workingTreeBefore.disallowedPaths.length === 0
+      ? ''
+      : ' (non-generated: `' + gateEvaluation.workingTreeBefore.disallowedPaths.join('`, `') + '`)'))
+  lines.push('- Working tree after commands: **'
+    + (gateEvaluation.workingTreeAfter.clean ? 'CLEAN' : 'FAIL') + '**'
+    + (gateEvaluation.workingTreeAfter.disallowedPaths.length === 0
+      ? ''
+      : ' (non-generated: `' + gateEvaluation.workingTreeAfter.disallowedPaths.join('`, `') + '`)'))
   lines.push('- Runtime: Node `' + process.version + '`, `' + process.platform + '/' + process.arch + '`')
   lines.push('- Renderer/GUI coverage: **required and asserted**. The E2E launches two real'
     + ' Electron applications and drives window.qqpet from real BrowserWindow/preload'
@@ -255,13 +292,10 @@ async function main() {
   lines.push(validationLine('Docker smoke report', dockerValidation))
   lines.push(validationLine('TLS/WSS proxy smoke report', proxyValidation))
   lines.push('- HEAD unchanged during gate: **' + (revisionStable ? 'PASS' : 'FAIL') + '**')
+  lines.push('- Non-generated working tree before/after commands: **'
+    + (gateEvaluation.workingTreeClean ? 'PASS' : 'FAIL') + '**')
   lines.push('- Current HEAD after commands: `' + revisionAfter.stdout + '`')
-  const validationErrors = [
-    ...e2eValidation.errors.map(error => 'E2E: ' + error),
-    ...dockerValidation.errors.map(error => 'Docker: ' + error),
-    ...proxyValidation.errors.map(error => 'Proxy: ' + error),
-    ...(revisionStable ? [] : ['HEAD changed while the acceptance gate was running']),
-  ]
+  const validationErrors = gateEvaluation.errors
   if (validationErrors.length > 0) {
     lines.push('')
     lines.push('Validation errors:')

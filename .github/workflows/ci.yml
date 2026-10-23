@@ -115,7 +115,7 @@ jobs:
         run: |
           umask 077
           mkdir -p server/deploy
-          openssl rand -hex 32 > server/deploy/owner-admin-credential
+          printf '%s\n' 'ci-compose-config-placeholder-not-a-runtime-credential' > server/deploy/owner-admin-credential
           chmod 0600 server/deploy/owner-admin-credential
           credential="$PWD/server/deploy/owner-admin-credential"
           QQPET_OWNER_ADMIN_CREDENTIAL_FILE="$credential" docker compose -f server/docker-compose.yml config >/dev/null

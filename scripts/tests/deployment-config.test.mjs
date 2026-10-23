@@ -13,25 +13,42 @@ function locationBlock(nginx, path) {
   return nginx.slice(start, end + 6)
 }
 
-test('Compose requires an explicit owner credential file and never falls back to a checked-in placeholder', async () => {
+test('Compose requires an explicit owner token secret and stages it for the non-root runtime', async () => {
   const compose = await read('server/docker-compose.yml')
   assert.match(compose, /env_file:\s*\n\s*- \$\{QQPET_OWNER_ADMIN_CREDENTIAL_FILE:\?[^}]+\}/)
-  assert.match(compose, /source: \$\{QQPET_OWNER_ADMIN_CREDENTIAL_FILE:\?[^}]+\}/)
+  assert.match(compose, /^secrets:\s*\n\s{2}owner_admin_credential:\s*\n\s{4}file: \$\{QQPET_OWNER_ADMIN_CREDENTIAL_FILE:\?[^}]+\}/m)
+  assert.match(compose, /secrets:\s*\n\s*- source: owner_admin_credential\s*\n\s*target: owner_admin_credential/)
+  assert.match(compose, /QQPET_OWNER_ADMIN_CREDENTIAL: \/run\/qqpet-secrets\/owner_admin_credential/)
+  assert.match(compose, /QQPET_OWNER_ADMIN_CREDENTIAL_SOURCE: \/run\/secrets\/owner_admin_credential/)
+  assert.match(compose, /entrypoint: \["\/bin\/sh", "\/usr\/local\/bin\/qqpet-docker-entrypoint\.sh"\]/)
+  assert.match(compose, /user: "0:0"/)
+  assert.equal(compose.includes('source: ${QQPET_OWNER_ADMIN_CREDENTIAL_FILE:?'), false)
   assert.equal(compose.includes('${QQPET_OWNER_ADMIN_CREDENTIAL_FILE:-'), false)
   assert.equal(compose.includes('owner_admin_credential.example'), false)
   await assert.rejects(read('server/deploy/owner_admin_credential.example'))
 })
 
-test('README documents the exact required credential variable, path and 0600 random generation', async () => {
+test('README documents the existing owner token, 0600 host file and container secret staging', async () => {
   const readme = await read('server/README.md')
   const envExample = await read('server/.env.example')
   assert.match(readme, /QQPET_OWNER_ADMIN_CREDENTIAL_FILE=\.\/deploy\/owner-admin-credential/)
-  assert.match(readme, /openssl rand -hex 32 > deploy\/owner-admin-credential/)
+  assert.match(readme, /must contain the token of a non-revoked owner device/)
   assert.match(readme, /chmod 0600 deploy\/owner-admin-credential/)
-  assert.match(readme, /QQPET_OWNER_ADMIN_CREDENTIAL=\/run\/secrets\/owner_admin_credential/)
+  assert.match(readme, /QQPET_OWNER_ADMIN_CREDENTIAL=\/run\/qqpet-secrets\/owner_admin_credential/)
+  assert.match(readme, /QQPET_OWNER_ADMIN_CREDENTIAL_SOURCE=\/run\/secrets\/owner_admin_credential/)
+  assert.equal(readme.includes('openssl rand -hex 32 > deploy/owner-admin-credential'), false)
   assert.match(envExample, /QQPET_OWNER_ADMIN_CREDENTIAL_FILE=\.\/deploy\/owner-admin-credential/)
   assert.equal(envExample.includes('owner_admin_credential.example'), false)
   assert.equal(readme.includes('owner_admin_credential.example'), false)
+})
+
+test('container entrypoint copies the secret with node ownership and then drops root', async () => {
+  const entrypoint = await read('server/docker-entrypoint.sh')
+  const dockerfile = await read('server/Dockerfile')
+  assert.match(entrypoint, /install -d -o "\$NODE_UID" -g "\$NODE_GID" -m 0700 "\$TARGET_DIR"/)
+  assert.match(entrypoint, /install -m 0400 -o "\$NODE_UID" -g "\$NODE_GID" "\$SOURCE_PATH" "\$TARGET_PATH"/)
+  assert.match(entrypoint, /exec setpriv --reuid="\$NODE_UID" --regid="\$NODE_GID" --clear-groups node dist\/server\/src\/index\.js/)
+  assert.match(dockerfile, /COPY --chown=root:root server\/docker-entrypoint\.sh \/usr\/local\/bin\/qqpet-docker-entrypoint\.sh/)
 })
 
 test('Nginx example proxies every documented health and WebSocket route with upgrade headers', async () => {

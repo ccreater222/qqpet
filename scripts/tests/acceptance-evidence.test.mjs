@@ -7,6 +7,8 @@ import test from 'node:test'
 import {
   cleanEvidenceDirectory,
   evaluateAcceptanceGate,
+  evaluateWorkingTree,
+  parseGitStatusPorcelain,
   REQUIRED_E2E_SCENARIO_NAMES,
   validateDockerSmokeReport,
   validateE2EReport,
@@ -94,6 +96,10 @@ function dockerReport() {
       synchronous: 'full',
       nonRoot: true,
       uid: 1000,
+      ownerAdminCredentialHashed: true,
+      credentialReadableByRuntime: true,
+      credentialRuntimeUid: 1000,
+      credentialRuntimeMode: 0o400,
       backupCreated: true,
       backupContentAsserted: true,
       restoreSucceeded: true,
@@ -237,6 +243,10 @@ test('Docker smoke evidence requires boot, WAL/FULL, non-root and backup/restore
     ['wrong journal mode', report => { report.evidence.journalMode = 'delete' }, /journalMode/],
     ['not synchronous full', report => { report.evidence.synchronous = 'normal' }, /synchronous/],
     ['root uid', report => { report.evidence.uid = 0 }, /uid/],
+    ['unhashed owner credential', report => { report.evidence.ownerAdminCredentialHashed = false }, /ownerAdminCredentialHashed/],
+    ['unreadable runtime credential', report => { report.evidence.credentialReadableByRuntime = false }, /credentialReadableByRuntime/],
+    ['credential read by the wrong uid', report => { report.evidence.credentialRuntimeUid = 1001 }, /runtime uid/],
+    ['credential readable through group/world bits', report => { report.evidence.credentialRuntimeMode = 0o644 }, /mode must be 0400/],
     ['missing backup assertion', report => { report.evidence.backupContentAsserted = false }, /backupContentAsserted/],
     ['restore content mismatch', report => { report.evidence.restoreContentMatched = false }, /restoreContentMatched/],
     ['tea down not proven', report => { report.evidence.teardown = false }, /teardown/],
@@ -267,6 +277,47 @@ test('TLS/WSS proxy evidence requires every documented Nginx route and authentic
   }
 })
 
+test('git status parsing includes untracked paths and both sides of renames', () => {
+  const entries = parseGitStatusPorcelain(
+    '?? src/new-source.ts\0'
+    + ' M docs/superpowers/acceptance/artifacts/c12-e2e/report.json\0'
+    + 'R  src/new-name.ts\0src/old-name.ts\0',
+  )
+  assert.deepEqual(entries, [
+    { status: '??', path: 'src/new-source.ts' },
+    { status: ' M', path: 'docs/superpowers/acceptance/artifacts/c12-e2e/report.json' },
+    { status: 'R ', path: 'src/new-name.ts', previousPath: 'src/old-name.ts' },
+  ])
+})
+
+test('only explicit acceptance artifacts and generated temp paths are allowed gate dirt', () => {
+  assert.deepEqual(evaluateWorkingTree([]), {
+    captured: true,
+    clean: true,
+    changedPaths: [],
+    disallowedPaths: [],
+  })
+  const generated = evaluateWorkingTree([
+    { status: ' M', path: 'docs/superpowers/acceptance/artifacts/c12-docker/docker-smoke-report.json' },
+    'docs/superpowers/acceptance/2026-10-23-c12-final-gate.md',
+    'out/docker-smoke-123/credential',
+  ])
+  assert.equal(generated.clean, true)
+  const disallowed = evaluateWorkingTree([
+    'src/main.ts',
+    'docs/superpowers/acceptance/operator-notes.md',
+    'server/docker-compose.yml',
+    'scripts/replacement.mjs',
+  ])
+  assert.equal(disallowed.clean, false)
+  assert.deepEqual(disallowed.disallowedPaths, [
+    'src/main.ts',
+    'docs/superpowers/acceptance/operator-notes.md',
+    'server/docker-compose.yml',
+    'scripts/replacement.mjs',
+  ])
+})
+
 test('the gate clears old evidence before writing fresh artifacts', async () => {
   const root = await mkdtemp(join(tmpdir(), 'qqpet-gate-evidence-'))
   const evidence = join(root, 'c12-e2e')
@@ -287,6 +338,8 @@ function gateInput(overrides = {}) {
     e2eReport: e2eReport(),
     dockerReport: dockerReport(),
     proxyReport: proxyReport(),
+    workingTreeBefore: [],
+    workingTreeAfter: [],
     nowMs: NOW,
     notBeforeMs: NOW - 180_000,
     ...overrides,
@@ -294,11 +347,41 @@ function gateInput(overrides = {}) {
 }
 
 test('the pure acceptance decision fails closed for every command/evidence condition', () => {
-  assert.equal(evaluateAcceptanceGate(gateInput()).ok, true)
+  const cleanGate = evaluateAcceptanceGate(gateInput())
+  assert.equal(cleanGate.ok, true)
+  assert.equal(cleanGate.workingTreeClean, true)
+  const generatedTree = gateInput({
+    workingTreeBefore: [{ status: ' M', path: 'docs/superpowers/acceptance/2026-10-23-c12-final-gate.md' }],
+    workingTreeAfter: [{ status: '??', path: 'docs/superpowers/acceptance/artifacts/c12-e2e/report.json' }],
+  })
+  const generatedResult = evaluateAcceptanceGate(generatedTree)
+  assert.equal(generatedResult.ok, true)
+  assert.equal(generatedResult.workingTreeClean, true)
+  const dirtyResult = evaluateAcceptanceGate(gateInput({
+    workingTreeAfter: [{ status: '??', path: 'src/untracked.ts' }],
+  }))
+  assert.equal(dirtyResult.ok, false)
+  assert.equal(dirtyResult.workingTreeClean, false)
+  assert.match(dirtyResult.errors.join('\n'), /after the acceptance gate contains non-generated changes: src\/untracked\.ts/)
   const cases = [
     ['failed command', gate => { gate.results[1].code = 1 }, /commands failed/],
     ['short command list', gate => { gate.results.pop() }, /commands failed/],
     ['changed HEAD', gate => { gate.revisionAfter = 'b'.repeat(40) }, /HEAD changed/],
+    ['dirty source before gate', gate => {
+      gate.workingTreeBefore = [{ status: ' M', path: 'src/main.ts' }]
+    }, /before the acceptance gate contains non-generated changes: src\/main.ts/],
+    ['dirty script after gate', gate => {
+      gate.workingTreeAfter = [{ status: '??', path: 'scripts/replacement.mjs' }]
+    }, /after the acceptance gate contains non-generated changes: scripts\/replacement.mjs/],
+    ['unexpected acceptance note is not generated evidence', gate => {
+      gate.workingTreeBefore = ['docs/superpowers/acceptance/operator-notes.md']
+    }, /operator-notes\.md/],
+    ['before status capture missing', gate => {
+      delete gate.workingTreeBefore
+    }, /status before the acceptance gate was not captured/],
+    ['after status capture missing', gate => {
+      delete gate.workingTreeAfter
+    }, /status after the acceptance gate was not captured/],
     ['missing E2E report', gate => { gate.e2eReport = null }, /report is missing/],
     ['missing Docker report', gate => { gate.dockerReport = null }, /Docker: .*report is missing/],
     ['missing proxy report', gate => { gate.proxyReport = null }, /TLS\/WSS proxy smoke report is missing/],

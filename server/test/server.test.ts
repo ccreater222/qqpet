@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -835,6 +836,21 @@ async function runCliFailure(args: string[], env: NodeJS.ProcessEnv = {}): Promi
   assert.fail('expected CLI command to fail')
 }
 
+async function issueOwnerCredential(
+  dbPath: string,
+  credentialFile: string,
+  petId = 'restore-pet',
+): Promise<{ token: string; device: { deviceId: string } }> {
+  const store = openDatabase(dbPath)
+  try {
+    const created = store.createDevice(petId, 'Restore operator owner', 'owner')
+    await writeFile(credentialFile, created.token + '\n', { mode: 0o600 })
+    return created
+  } finally {
+    store.close()
+  }
+}
+
 function rawConnect(url: string): Promise<WebSocket> {
   const ws = new WebSocket(url, { perMessageDeflate: false })
   return new Promise((resolve, reject) => {
@@ -1248,12 +1264,23 @@ test('successful restore atomically replaces the DB and advances authority/resto
   const generationFile = join(directory, 'restore-generation.txt')
   const credentialFile = join(directory, 'credential.txt')
   await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
-  await writeFile(credentialFile, 'operator-credential\n', { mode: 0o600 })
+  const credentialOwner = await issueOwnerCredential(dbPath, credentialFile)
   await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
+  assert.equal((await readFile(backupPath)).includes(Buffer.from(credentialOwner.token)), false)
 
   const before = openDatabase(dbPath)
   const original = before.getAuthority('restore-pet')
   assert.ok(original)
+  const storedCredential = before.db.prepare(
+    'SELECT token_hash FROM devices WHERE pet_id = ? AND device_id = ?',
+  ).get('restore-pet', credentialOwner.device.deviceId) as { token_hash: Uint8Array }
+  const storedCredentialHash = Buffer.from(storedCredential.token_hash)
+  assert.equal(storedCredentialHash.byteLength, 32)
+  assert.equal(
+    storedCredentialHash.toString('hex'),
+    createHash('sha256').update(credentialOwner.token).digest('hex'),
+  )
+  assert.notEqual(storedCredentialHash.toString('hex'), credentialOwner.token)
   before.close()
   const beforeBytes = await readFile(dbPath)
 
@@ -1277,6 +1304,10 @@ test('successful restore atomically replaces the DB and advances authority/resto
   assert.equal(authority.restoreGeneration, 1)
   assert.equal(authority.epoch, original.epoch + 1)
   assert.equal(authority.state, 'active')
+  const restoredOwner = after.getDeviceByToken('restore-pet', credentialOwner.token)
+  assert.ok(restoredOwner)
+  assert.equal(restoredOwner.role, 'owner')
+  assert.equal(restoredOwner.revokedAtMs, null)
   assert.equal(after.verifyRestoreGeneration(generationFile), 1)
   after.close()
 
@@ -1284,6 +1315,90 @@ test('successful restore atomically replaces the DB and advances authority/resto
   const stale = openDatabase(dbPath)
   assert.throws(() => stale.verifyRestoreGeneration(generationFile), /older than the recorded restore generation/)
   stale.close()
+})
+
+test('restore rejects a non-empty credential that does not match an active owner device', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-c12-restore-wrong-credential-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const dbPath = join(directory, 'restore.sqlite')
+  const backupPath = join(directory, 'backup.sqlite')
+  const generationFile = join(directory, 'restore-generation.txt')
+  const credentialFile = join(directory, 'credential.txt')
+  await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
+  await issueOwnerCredential(dbPath, credentialFile)
+  await writeFile(credentialFile, 'operator-credential-that-is-not-a-device-token\n', { mode: 0o600 })
+  await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
+  const beforeBytes = await readFile(dbPath)
+
+  const failure = await runCliFailure([
+    'restore', '--from', backupPath, '--accept-rollback',
+    '--db', dbPath, '--restore-generation', '1',
+    '--owner-admin-credential', credentialFile,
+  ], { QQPET_SYNC_RESTORE_GENERATION_FILE: generationFile })
+  assert.match(failure.stderr, /owner-admin credential does not match a non-revoked owner device/)
+  assert.deepEqual(await readFile(dbPath), beforeBytes)
+  await assert.rejects(readFile(generationFile), /ENOENT/)
+})
+
+test('restore rejects a valid player device token as an owner-admin credential', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-c12-restore-player-credential-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const dbPath = join(directory, 'restore.sqlite')
+  const backupPath = join(directory, 'backup.sqlite')
+  const generationFile = join(directory, 'restore-generation.txt')
+  const credentialFile = join(directory, 'credential.txt')
+  await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
+  const store = openDatabase(dbPath)
+  let playerToken: string
+  try {
+    const player = store.createDevice('restore-pet', 'Not an owner', 'player')
+    playerToken = player.token
+  } finally {
+    store.close()
+  }
+  await writeFile(credentialFile, playerToken + '\n', { mode: 0o600 })
+  await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
+  const beforeBytes = await readFile(dbPath)
+
+  const failure = await runCliFailure([
+    'restore', '--from', backupPath, '--accept-rollback',
+    '--db', dbPath, '--restore-generation', '1',
+    '--owner-admin-credential', credentialFile,
+  ], { QQPET_SYNC_RESTORE_GENERATION_FILE: generationFile })
+  assert.match(failure.stderr, /owner-admin credential does not match a non-revoked owner device/)
+  assert.deepEqual(await readFile(dbPath), beforeBytes)
+  await assert.rejects(readFile(generationFile), /ENOENT/)
+})
+
+test('restore rejects a valid token whose owner device is revoked', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'qqpet-c12-restore-revoked-owner-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const dbPath = join(directory, 'restore.sqlite')
+  const backupPath = join(directory, 'backup.sqlite')
+  const generationFile = join(directory, 'restore-generation.txt')
+  const credentialFile = join(directory, 'credential.txt')
+  await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
+  const revokedOwner = await issueOwnerCredential(dbPath, credentialFile)
+  const store = openDatabase(dbPath)
+  try {
+    store.createDevice('restore-pet', 'Remaining active owner', 'owner')
+    const revokedAt = store.revokeDevice('restore-pet', revokedOwner.device.deviceId)
+    assert.equal(typeof revokedAt, 'number')
+  } finally {
+    store.close()
+  }
+  await writeFile(credentialFile, revokedOwner.token + '\n', { mode: 0o600 })
+  await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
+  const beforeBytes = await readFile(dbPath)
+
+  const failure = await runCliFailure([
+    'restore', '--from', backupPath, '--accept-rollback',
+    '--db', dbPath, '--restore-generation', '1',
+    '--owner-admin-credential', credentialFile,
+  ], { QQPET_SYNC_RESTORE_GENERATION_FILE: generationFile })
+  assert.match(failure.stderr, /owner-admin credential does not match a non-revoked owner device/)
+  assert.deepEqual(await readFile(dbPath), beforeBytes)
+  await assert.rejects(readFile(generationFile), /ENOENT/)
 })
 
 test('stale restore generation is rejected before the live DB changes', async t => {
@@ -1294,7 +1409,7 @@ test('stale restore generation is rejected before the live DB changes', async t 
   const generationFile = join(directory, 'restore-generation.txt')
   const credentialFile = join(directory, 'credential.txt')
   await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
-  await writeFile(credentialFile, 'operator-credential\n', { mode: 0o600 })
+  await issueOwnerCredential(dbPath, credentialFile)
   await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
 
   const beforeStore = openDatabase(dbPath)
@@ -1329,7 +1444,7 @@ test('corrupt backup is rejected before the live DB changes', async t => {
   const generationFile = join(directory, 'restore-generation.txt')
   const credentialFile = join(directory, 'credential.txt')
   await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
-  await writeFile(credentialFile, 'operator-credential\n', { mode: 0o600 })
+  await issueOwnerCredential(dbPath, credentialFile)
   await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
 
   const beforeStore = openDatabase(dbPath)
@@ -1368,7 +1483,7 @@ test('restore failure after the swap rolls back to the prior live DB', async t =
   const backupPath = join(directory, 'backup.sqlite')
   const credentialFile = join(directory, 'credential.txt')
   await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
-  await writeFile(credentialFile, 'operator-credential\n', { mode: 0o600 })
+  await issueOwnerCredential(dbPath, credentialFile)
   await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
 
   const beforeStore = openDatabase(dbPath)
@@ -1407,7 +1522,7 @@ test('restore is refused while a running server holds the database and succeeds 
   const generationFile = join(directory, 'restore-generation.txt')
   const credentialFile = join(directory, 'credential.txt')
   await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
-  await writeFile(credentialFile, 'operator-credential\n', { mode: 0o600 })
+  await issueOwnerCredential(dbPath, credentialFile)
   await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
 
   const config = createServerConfig({
@@ -1502,7 +1617,7 @@ test('restore failure after fence publication rolls the external fence back', as
   const generationFile = join(directory, 'restore-generation.txt')
   const credentialFile = join(directory, 'credential.txt')
   await runCli(['init', '--db', dbPath, '--pet-id', 'restore-pet', '--time-zone', 'UTC'])
-  await writeFile(credentialFile, 'operator-credential\n', { mode: 0o600 })
+  await issueOwnerCredential(dbPath, credentialFile)
   await runCli(['backup', '--db', dbPath, '--pet-id', 'restore-pet', '--output', backupPath])
   await writeFile(generationFile, '0')
 
