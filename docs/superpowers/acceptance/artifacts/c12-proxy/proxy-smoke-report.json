@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "startedAt": "2026-10-23T00:56:38.257Z",
-  "codeRevision": "baf968389fbe1bb1111edd32c43bc87fb0337844",
+  "startedAt": "2026-10-23T01:46:26.048Z",
+  "codeRevision": "bd6fc16f295e20e2307fce05607f84381c51fa45",
   "result": "PASS",
-  "serverImage": "qqpet-server:proxy-smoke-28479-1792716998257",
+  "serverImage": "qqpet-server:proxy-smoke-79654-1792719986048",
   "nginxImage": "nginx:1.27-alpine",
   "evidence": {
     "tlsTerminated": true,
@@ -23,8 +23,8 @@
     "upstreamJournalMode": "wal",
     "upstreamSynchronous": "full",
     "tlsProtocol": "TLSv1.3",
-    "syncAliasDeviceId": "64f00720-365f-4a0b-ad3e-f873c7830cc0",
+    "syncAliasDeviceId": "304311cf-2793-48f9-890b-279ea1ccc301",
     "teardown": true
   },
-  "finishedAt": "2026-10-23T00:56:45.963Z"
+  "finishedAt": "2026-10-23T01:46:33.700Z"
 }
