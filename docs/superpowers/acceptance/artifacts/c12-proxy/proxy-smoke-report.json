@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "startedAt": "2026-10-23T02:44:49.590Z",
-  "codeRevision": "3fa293d414d6b4596289fa5ef8c5ac14a99d736d",
+  "startedAt": "2026-10-23T12:53:52.270Z",
+  "codeRevision": "6f985f4a07662ea53cf1be1bea0ffbe28e8c90a9",
   "result": "PASS",
-  "serverImage": "qqpet-server:proxy-smoke-95577-1792723489590",
+  "serverImage": "qqpet-server:proxy-smoke-81489-1792760032270",
   "nginxImage": "nginx:1.27-alpine",
   "evidence": {
     "tlsTerminated": true,
@@ -20,11 +20,10 @@
     "imageBuilt": true,
     "initializedPetId": "default",
     "containerStarted": true,
-    "upstreamJournalMode": "wal",
-    "upstreamSynchronous": "full",
+    "upstreamPublicHealthSchema": true,
     "tlsProtocol": "TLSv1.3",
-    "syncAliasDeviceId": "237beb00-6fa3-4380-b6fb-cebc0879e35e",
+    "syncAliasDeviceId": "f5c5e19e-17cf-44bd-b3ef-b9502bdbc32c",
     "teardown": true
   },
-  "finishedAt": "2026-10-23T02:44:57.344Z"
+  "finishedAt": "2026-10-23T12:54:02.811Z"
 }

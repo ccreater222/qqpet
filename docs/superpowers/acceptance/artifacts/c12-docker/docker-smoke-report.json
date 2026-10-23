@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "startedAt": "2026-10-23T02:44:40.749Z",
-  "codeRevision": "3fa293d414d6b4596289fa5ef8c5ac14a99d736d",
+  "startedAt": "2026-10-23T12:53:39.708Z",
+  "codeRevision": "6f985f4a07662ea53cf1be1bea0ffbe28e8c90a9",
   "result": "PASS",
-  "image": "qqpet-server:smoke-94591-1792723480749",
+  "image": "qqpet-server:smoke-80283-1792760019708",
   "evidence": {
     "imageBuilt": true,
     "containerStarted": true,
@@ -12,6 +12,8 @@
     "synchronous": "full",
     "nonRoot": true,
     "uid": 1000,
+    "ownerAdminCredentialHashed": true,
+    "credentialReadableByRuntime": true,
     "backupCreated": true,
     "backupContentAsserted": true,
     "restoreSucceeded": true,
@@ -19,14 +21,17 @@
     "postRestoreReadyz": true,
     "teardown": true,
     "initializedPetId": "default",
-    "initialAuthorityId": "e62dabe8-2419-474f-85fe-a23ec01c9a50",
+    "initialAuthorityId": "2ad9d38c-4ad1-44a3-91de-19a5b42baeb6",
+    "ownerAdminDeviceId": "ed7e7711-849c-4238-8b19-ac23dbf271a8",
+    "credentialRuntimeUid": 1000,
+    "credentialRuntimeMode": 256,
     "backupRevision": 0,
     "backupSaveSha256": "cc82c3fb95be5a1e4e61cb6a0514d62dc70c0363c7e9e1fc046b401d8ea55d26",
     "postBackupRevision": 1000,
-    "restoredAuthorityId": "e4d41670-70c9-4da3-986a-0e4eea74abeb",
+    "restoredAuthorityId": "bb831605-0b00-455d-8a41-10429d45932e",
     "restoreGeneration": 1,
     "postRestoreJournalMode": "wal",
     "postRestoreSynchronous": "full"
   },
-  "finishedAt": "2026-10-23T02:44:49.480Z"
+  "finishedAt": "2026-10-23T12:53:52.148Z"
 }
