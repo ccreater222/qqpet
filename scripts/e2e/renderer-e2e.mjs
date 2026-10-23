@@ -46,6 +46,8 @@ const [
   SCENARIO_ADVANCE_RANDOM_RECONNECT,
   SCENARIO_MUTATION_BLOCKED,
   SCENARIO_SECRET_BOUNDARY,
+  SCENARIO_TIMED_BOTH_RENDERERS,
+  SCENARIO_SESSION_GRADING,
 ] = REQUIRED_E2E_SCENARIO_NAMES
 
 if (process.platform === 'linux' && process.env.DISPLAY === undefined && process.env.QQPET_E2E_XVFB === undefined) {
@@ -60,6 +62,14 @@ if (process.platform === 'linux' && process.env.DISPLAY === undefined && process
 
 const sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms))
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue)
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableValue(value[key])]))
+  }
+  return value
+}
+const stableHash = value => createHash('sha256').update(JSON.stringify(stableValue(value))).digest('hex')
 
 async function freePort() {
   return await new Promise((resolvePort, reject) => {
@@ -258,12 +268,15 @@ async function seedIslandQuizErrand(dbPath, petId = 'default') {
         took: false,
       })
       index = island.errands.length - 1
-      save.saveJsonData.island = JSON.stringify(island)
-      const engine = JSON.parse(String(row.engine_json))
-      engine.save = save
-      db.prepare('UPDATE pets SET save_json = ?, engine_json = ?, updated_at_ms = ? WHERE id = ?')
-        .run(JSON.stringify(save), JSON.stringify(engine), Date.now(), petId)
+    } else {
+      // The fixture must be usable more than once after a prior settlement.
+      island.errands[index] = { ...island.errands[index], got: 0, took: false }
     }
+    save.saveJsonData.island = JSON.stringify(island)
+    const engine = JSON.parse(String(row.engine_json))
+    engine.save = save
+    db.prepare('UPDATE pets SET save_json = ?, engine_json = ?, updated_at_ms = ? WHERE id = ?')
+      .run(JSON.stringify(save), JSON.stringify(engine), Date.now(), petId)
     return { quizIndex: index, errand: island.errands[index], seeded: index >= 0 }
   })
 }
@@ -278,6 +291,51 @@ async function expireSessionToken(dbPath, sessionToken, petId = 'default') {
     ).run(expiredAtGameMs, petId, sessionToken, 'active')
     if (Number(result.changes) !== 1) throw new Error('session token row was not updated exactly once')
     return expiredAtGameMs
+  })
+}
+
+/**
+ * Seeds a valid, non-empty per-day environment into the temporary canonical
+ * SQLite fixture. Weather is generated with the same compiled fallback used by
+ * the production runtime and is persisted before restart/import assertions.
+ */
+async function seedCanonicalEnvironment(dbPath, sourceLabel, petId = 'default') {
+  const oracle = await loadRuntimeOracle()
+  return await withDatabase(dbPath, true, db => {
+    const row = db.prepare('SELECT engine_json, game_time_ms FROM pets WHERE id = ?').get(petId)
+    if (row === undefined) throw new Error('pet row is missing for environment fixture')
+    const engine = JSON.parse(String(row.engine_json))
+    const gameTimeMs = Number(row.game_time_ms)
+    const seedHex = String(engine.rng?.seedHex ?? '')
+    assert.match(seedHex, /^[0-9a-f]{32}$/)
+    const dayKey = oracle.dayKeyAt(gameTimeMs, engine.timeZone)
+    const weather = oracle.fallbackWeatherForDay(seedHex, dayKey, {
+      fetchedAtMs: gameTimeMs,
+      sourceLabel,
+    })
+    engine.environment = {
+      calendarByDay: {
+        ...(engine.environment?.calendarByDay ?? {}),
+        [dayKey]: {
+          date: dayKey,
+          lunar: 'C12 fixture',
+          term: null,
+          holiday: { name: 'C12 fixture day', off: false },
+        },
+      },
+      weatherByDay: {
+        ...(engine.environment?.weatherByDay ?? {}),
+        [dayKey]: weather,
+      },
+    }
+    db.prepare('UPDATE pets SET engine_json = ?, updated_at_ms = ? WHERE id = ?')
+      .run(JSON.stringify(engine), Date.now(), petId)
+    return {
+      dayKey,
+      weatherKeys: Object.keys(engine.environment.weatherByDay),
+      calendarKeys: Object.keys(engine.environment.calendarByDay),
+      weatherHash: hash(weather),
+    }
   })
 }
 
@@ -312,6 +370,21 @@ async function readScheduledJobRows(dbPath, petId = 'default') {
     createdCommandSeq: row.created_command_seq === null ? null : Number(row.created_command_seq),
     completedCommandSeq: row.completed_command_seq === null ? null : Number(row.completed_command_seq),
   })))
+}
+
+async function readSessionPayload(dbPath, sessionToken, petId = 'default') {
+  const row = await withDatabase(dbPath, false, db => db.prepare(
+    `SELECT session_kind, status, started_at_game_ms, expires_at_game_ms, payload_json
+     FROM game_sessions WHERE pet_id = ? AND session_token = ?`,
+  ).get(petId, sessionToken))
+  if (row === undefined) throw new Error('game session row is missing')
+  return {
+    kind: String(row.session_kind),
+    status: String(row.status),
+    startedAtGameMs: Number(row.started_at_game_ms),
+    expiresAtGameMs: Number(row.expires_at_game_ms),
+    payload: JSON.parse(String(row.payload_json)),
+  }
 }
 
 async function readEventRows(dbPath, options = {}) {
@@ -435,6 +508,50 @@ function localDocumentPath(userDataPath) {
 
 async function readLocalDocument(userDataPath) {
   return JSON.parse(await readFile(localDocumentPath(userDataPath), 'utf8'))
+}
+
+/**
+ * Seeds a valid per-day environment into a stopped LocalRepository document.
+ * This is fixture input only: the resulting bundle is exported by the real
+ * renderer and then imported by the real server.
+ */
+async function seedLocalDocumentEnvironment(userDataPath, sourceLabel) {
+  const path = localDocumentPath(userDataPath)
+  const document = JSON.parse(await readFile(path, 'utf8'))
+  const engine = document?.bundle?.engine
+  assert.notEqual(engine, undefined, 'local document engine must exist before seeding')
+  const oracle = await loadRuntimeOracle()
+  const seedHex = String(engine.rng?.seedHex ?? '')
+  assert.match(seedHex, /^[0-9a-f]{32}$/)
+  const dayKey = oracle.dayKeyAt(engine.gameTimeMs, engine.timeZone)
+  const weather = oracle.fallbackWeatherForDay(seedHex, dayKey, {
+    fetchedAtMs: engine.gameTimeMs,
+    sourceLabel,
+  })
+  engine.environment = {
+    calendarByDay: {
+      ...(engine.environment?.calendarByDay ?? {}),
+      [dayKey]: {
+        date: dayKey,
+        lunar: 'C12 import fixture',
+        term: null,
+        holiday: { name: 'C12 import fixture day', off: false },
+      },
+    },
+    weatherByDay: {
+      ...(engine.environment?.weatherByDay ?? {}),
+      [dayKey]: weather,
+    },
+  }
+  const temporary = path + '.' + process.pid + '.' + Date.now() + '.tmp'
+  await writeFile(temporary, JSON.stringify(document, null, 2))
+  await rename(temporary, path)
+  return {
+    dayKey,
+    weatherKeys: Object.keys(engine.environment.weatherByDay),
+    calendarKeys: Object.keys(engine.environment.calendarByDay),
+    weatherHash: hash(weather),
+  }
 }
 
 async function fileSha256(path) {
@@ -718,6 +835,36 @@ function taskCounter(save, counter) {
   } catch {
     return 0
   }
+}
+
+function taskCounterSnapshot(save) {
+  return {
+    GameRound: taskCounter(save, 'GameRound'),
+    Game: taskCounter(save, 'Game'),
+    Work: taskCounter(save, 'Work'),
+    Study: taskCounter(save, 'Study'),
+  }
+}
+
+function inventoryCount(save, type, id) {
+  const entries = save?.selfGoodDatas?.[type]
+  if (Array.isArray(entries) === false) return 0
+  const prefix = '_' + id + '*'
+  for (const entry of entries) {
+    if (typeof entry === 'string' && entry.startsWith(prefix)) return Number(entry.slice(prefix.length))
+  }
+  return 0
+}
+
+function normalizeScheduledJobs(jobs) {
+  return [...(jobs ?? [])].sort((left, right) =>
+    Number(left.dueAtGameMs) - Number(right.dueAtGameMs) || Number(left.id) - Number(right.id))
+}
+
+function normalizeGameSessions(sessions) {
+  return [...(sessions ?? [])].sort((left, right) =>
+    Number(left.startedAtGameMs) - Number(right.startedAtGameMs)
+    || String(left.sessionToken).localeCompare(String(right.sessionToken)))
 }
 
 function sharedBlob(save, key, fallback = {}) {
@@ -1169,6 +1316,40 @@ class RendererApp {
     }))
   }
 
+  /**
+   * Captures the production preload's ordered projection/event deliveries from
+   * this real renderer. The canned event stream is the only way a renderer can
+   * observe a scheduled job's server-owned deadline without reading SQLite.
+   */
+  async installProjectionEventCapture() {
+    await this.page.evaluate(() => {
+      const capture = { deliveries: 0, events: [], last: null }
+      globalThis.__QQPET_C12_PROJECTION_CAPTURE__ = capture
+      const record = (projection, events) => {
+        capture.deliveries += 1
+        capture.last = {
+          revision: projection?.revision ?? null,
+          eventSeq: projection?.eventSeq ?? null,
+          gameTimeMs: projection?.gameTimeMs ?? null,
+        }
+        if (Array.isArray(events)) capture.events.push(...events)
+      }
+      window.qqpet.onProjection(record)
+      window.qqpet.onResync(record)
+    })
+  }
+
+  async projectionEventCapture() {
+    return await this.page.evaluate(() => {
+      const capture = globalThis.__QQPET_C12_PROJECTION_CAPTURE__
+      return capture === undefined ? null : {
+        deliveries: capture.deliveries,
+        events: capture.events,
+        last: capture.last,
+      }
+    })
+  }
+
   /** SIGKILLs the real Electron process; the server must observe a real socket loss. */
   async kill() {
     if (this.closed) return
@@ -1569,7 +1750,8 @@ async function main() {
       'Renderer automation drives the production contextBridge API inside real BrowserWindows; it does not perform pixel/OCR visual assertions or click through every UI pane.',
       'Linux CI runs Electron under xvfb, so GPU compositing and platform-specific window-manager behavior are not asserted.',
       'Exam/island prerequisites and token-expiry setup use direct writes to the temporary canonical SQLite fixture; all session starts, settlements, rejections, projections and server authority logic still execute through the real standalone server and renderer WebSocket APIs.',
-      'The deterministic restart scenario rewinds the persisted scheduler anchor only while the real server process is stopped, so the real runtime executes an exact two-tick catch-up; the expected state/events are derived with the same compiled canonical runtime as an independent oracle.',
+      'The deterministic restart scenario creates its non-empty jobs and sessions through real renderer commands, directly seeds a valid per-day environment into the stopped temporary SQLite fixture, and rewinds the persisted scheduler anchor only while the real server process is stopped. The expected engine/job/session/RNG/environment state is derived with the same compiled canonical runtime as an independent oracle; the live scheduler may advance the wall anchor without another game tick after catch-up.',
+      'The fresh-host import source seeds its non-empty local jobs/sessions through the real local runtime, then inserts a valid per-day environment into the stopped temporary LocalRepository document before the real renderer exports it. The fresh server uses a frozen test clock, and the temporary restore-generation fence is written from the reported import generation before the no-double-catch-up restart.',
       'Startup crash repair deliberately SIGSTOPs the real server for 32 seconds so the persisted heartbeat + 30 second grace bound is observably earlier than restart wall time.',
       'Revoked-reconnect testing relaunches a fresh Electron process from a copied userData directory after removing copied Chromium singleton lock files; the same persisted revoked device token is presented to the real server.',
       'Timed-work, advance-while-empty and online/sign-in coverage scenarios run the real standalone SyncServer, SQLite store, command queue and scheduler with a test-only injected wall clock read from an atomically replaced file; this removes real-minute waits without changing server rules or canonical data.',
@@ -1618,6 +1800,10 @@ async function main() {
   const rawSessionTokens = []
   let rendererProof = null
   let teardownComplete = false
+  let timedBothRendererEvidence = null
+  let sessionGradingEvidence = null
+  let restartEngineStateEvidence = null
+  let importEngineStateEvidence = null
 
   try {
     await mkdir(ownerProfile, { recursive: true })
@@ -2306,6 +2492,364 @@ async function main() {
       }
     })
 
+    await step(SCENARIO_SESSION_GRADING, async () => {
+      const fixture = await createClockedServerFixture(root, 'session-grading-authority', baseEnv, {
+        clockMs: TIME_FIXTURE_CLOCK_MS,
+        advanceWhileEmpty: true,
+        withPlayer: true,
+      })
+      try {
+        const owner = fixture.app
+        const player = fixture.player
+        const dbPath = fixture.dbPath
+        const answerKeyOnly = new Set(['answerIndex', 'answerKey', 'correctAnswer', 'correctIndex', 'rewardKey'])
+        const sessionTokens = []
+        const frozenTaskCounters = save => hash(taskCounterSnapshot(save))
+        const eventsFor = async (type, predicate = () => true) =>
+          (await readEventRows(dbPath, { type })).filter(predicate)
+        const assertRejectedUnchanged = async (before, label) => {
+          const after = await waitConverged(owner, player, before.revision)
+          assert.equal(after.left.revision, before.revision, label + ': rejection must not change revision')
+          assert.equal(after.left.eventSeq, before.eventSeq, label + ': rejection must not change eventSeq')
+          assert.equal(projectionHash(after.left), projectionHash(before), label + ': rejection must not mutate projection')
+          assert.equal(projectionHash(after.right), projectionHash(before), label + ': rejection must not mutate player projection')
+          return after
+        }
+        const advanceClockAndConverge = async (deltaMs, label) => {
+          const healthBefore = await fixture.server.health()
+          const targetWallMs = healthBefore.gameTimeMs + deltaMs
+          await fixture.setClock(targetWallMs)
+          return await waitFor(async () => {
+            const [health, left, right] = await Promise.all([
+              fixture.server.health(),
+              owner.projection(),
+              player.projection(),
+            ])
+            if (left === null || right === null) return null
+            return health.gameTimeMs >= targetWallMs
+              && left.gameTimeMs === health.gameTimeMs
+              && right.gameTimeMs === health.gameTimeMs
+              && sameProjection(left, right)
+              ? { health, left, right, targetWallMs }
+              : null
+          }, label, 30_000)
+        }
+        const assertSessionProjectionHygiene = async (label, tokens) => {
+          return assertRendererProjectionHygiene(
+            { owner: await owner.projection(), player: await player.projection() },
+            tokens,
+            label,
+          )
+        }
+
+        await ensureWorkReady(owner, 'session-grading')
+        await waitConverged(owner, player, 0, 20_000)
+        let hygieneChecks = 0
+
+        // Game: advance the canonical clock before settlement, then prove the
+        // GameRound/Game counters and yuanbao delta land exactly once.
+        const gameBefore = await waitConverged(owner, player, 0)
+        const gameYbBefore = Number(gameBefore.left.shared.petInfo.yb)
+        const gameGrowthBefore = Number(gameBefore.left.shared.petInfo.growth)
+        const gameTaskBefore = taskCounterSnapshot(gameBefore.left.shared)
+        const gameSettledEventBefore = await eventsFor('game.sessionSettled')
+        const gameStart = await owner.command(
+          { type: 'game.startSession', payload: { gameId: 'c12-grading-game', kind: 'small' } },
+          'c12-grading-game-start',
+        )
+        assert.equal(gameStart.status, 'applied', 'graded game start rejected: ' + JSON.stringify(gameStart.error))
+        const gameToken = gameStart.result.sessionToken
+        sessionTokens.push(gameToken)
+        await waitConverged(owner, player, gameStart.revision, 20_000)
+        hygieneChecks += await assertSessionProjectionHygiene('graded game start', [gameToken])
+        const gameTokenRow = await withDatabase(dbPath, false, db => db.prepare(
+          'SELECT status, actor_device_id FROM game_sessions WHERE pet_id = ? AND session_token = ?',
+        ).get('default', gameToken))
+        assert.equal(gameTokenRow?.status, 'active')
+        assert.equal(typeof gameTokenRow?.actor_device_id, 'string')
+
+        const gameClock = await advanceClockAndConverge(2 * 60_000, 'graded game clock advance')
+        assert.equal(gameClock.targetWallMs - gameClock.health.gameTimeMs, 0)
+        const gameBeforeSettle = await waitConverged(owner, player, 0)
+        const gameReward = await owner.command(
+          { type: 'game.reward', payload: { sessionToken: gameToken } },
+          'c12-grading-game-reward',
+        )
+        assert.equal(gameReward.status, 'applied', 'graded game reward rejected: ' + JSON.stringify(gameReward.error))
+        assert.equal(gameReward.result.minutes, 2)
+        assert.equal(gameReward.result.gameRound, 1)
+        assert.ok(Number.isSafeInteger(gameReward.result.yb) && gameReward.result.yb > 0)
+        assert.ok(Number(gameReward.result.growth) > 0)
+        const gameSettled = await waitConverged(owner, player, gameReward.revision, 20_000)
+        const gameTaskAfter = taskCounterSnapshot(gameSettled.left.shared)
+        assert.equal(gameTaskAfter.GameRound, gameTaskBefore.GameRound + 1, 'game reward must increment GameRound once')
+        assert.equal(gameTaskAfter.Game, gameTaskBefore.Game + 2, 'game reward must increment Game by elapsed minutes')
+        assert.equal(Number(gameSettled.left.shared.petInfo.yb), gameYbBefore + Number(gameReward.result.yb))
+        assert.equal(Number(gameSettled.right.shared.petInfo.yb), gameYbBefore + Number(gameReward.result.yb))
+        const gameGrowthDelta = Number(gameSettled.left.shared.petInfo.growth) - gameGrowthBefore
+        const tickGrowthDelta = Number(gameBeforeSettle.left.shared.petInfo.growth) - gameGrowthBefore
+        assert.ok(Math.abs((gameGrowthDelta - tickGrowthDelta) - Number(gameReward.result.growth)) < 1e-6)
+        const gameSettledEvents = await eventsFor('game.sessionSettled', event => event.payload.gameId === 'c12-grading-game')
+        assert.equal(gameSettledEvents.length, gameSettledEventBefore.filter(event => event.payload.gameId === 'c12-grading-game').length + 1)
+        assert.equal(gameSettledEvents.at(-1).gameTimeMs, gameClock.health.gameTimeMs)
+        hygieneChecks += await assertSessionProjectionHygiene('graded game settled', [gameToken])
+        const gameReplay = await owner.command(
+          { type: 'game.reward', payload: { sessionToken: gameToken } },
+          'c12-grading-game-replay',
+        )
+        assert.equal(gameReplay.status, 'rejected')
+        assert.equal(gameReplay.error?.code, 'already_claimed')
+        await assertRejectedUnchanged(gameSettled.right, 'graded game replay')
+        const gameEventsAfterReplay = await eventsFor('game.sessionSettled', event => event.payload.gameId === 'c12-grading-game')
+        assert.equal(gameEventsAfterReplay.length, gameSettledEvents.length, 'game replay must not emit a second settle event')
+        assert.equal(hash(taskCounterSnapshot(gameSettled.right.shared)), frozenTaskCounters(gameSettled.right.shared))
+
+        // Diudiule: exact +1 yb and one settle event; no task-counter drift.
+        const diudiuleBefore = await waitConverged(owner, player, gameSettled.right.revision)
+        const diudiuleYbBefore = Number(diudiuleBefore.left.shared.petInfo.yb)
+        const diudiuleTaskBefore = taskCounterSnapshot(diudiuleBefore.left.shared)
+        const diudiuleSettleEventsBefore = await eventsFor('game.sessionSettled', event => event.payload.gameId === 'diudiule')
+        const diudiuleStart = await owner.command(
+          { type: 'diudiule.startSession', payload: {} },
+          'c12-grading-diudiule-start',
+        )
+        assert.equal(diudiuleStart.status, 'applied', 'diudiule start rejected: ' + JSON.stringify(diudiuleStart.error))
+        const diudiuleToken = diudiuleStart.result.sessionToken
+        sessionTokens.push(diudiuleToken)
+        await waitConverged(owner, player, diudiuleStart.revision)
+        hygieneChecks += await assertSessionProjectionHygiene('graded diudiule start', [diudiuleToken])
+        const diudiuleClock = await advanceClockAndConverge(60_000, 'graded diudiule clock advance')
+        const diudiuleBeforeSettle = await waitConverged(owner, player, 0)
+        const diudiuleReward = await owner.command(
+          { type: 'diudiule.reward', payload: { sessionToken: diudiuleToken } },
+          'c12-grading-diudiule-reward',
+        )
+        assert.equal(diudiuleReward.status, 'applied', 'diudiule reward rejected: ' + JSON.stringify(diudiuleReward.error))
+        assert.equal(diudiuleReward.result.yb, 1)
+        const diudiuleSettled = await waitConverged(owner, player, diudiuleReward.revision)
+        assert.equal(Number(diudiuleSettled.left.shared.petInfo.yb), diudiuleYbBefore + 1)
+        assert.equal(Number(diudiuleSettled.right.shared.petInfo.yb), diudiuleYbBefore + 1)
+        assert.equal(hash(taskCounterSnapshot(diudiuleSettled.left.shared)), hash(diudiuleTaskBefore), 'diudiule must not change task counters')
+        const diudiuleSettleEventsAfter = await eventsFor('game.sessionSettled', event => event.payload.gameId === 'diudiule')
+        assert.equal(diudiuleSettleEventsAfter.length, diudiuleSettleEventsBefore.length + 1)
+        assert.equal(diudiuleSettleEventsAfter.at(-1).gameTimeMs, diudiuleClock.health.gameTimeMs)
+        const diudiuleReplay = await owner.command(
+          { type: 'diudiule.reward', payload: { sessionToken: diudiuleToken } },
+          'c12-grading-diudiule-replay',
+        )
+        assert.equal(diudiuleReplay.status, 'rejected')
+        assert.equal(diudiuleReplay.error?.code, 'already_claimed')
+        await assertRejectedUnchanged(diudiuleSettled.right, 'graded diudiule replay')
+        assert.equal((await eventsFor('game.sessionSettled', event => event.payload.gameId === 'diudiule')).length, diudiuleSettleEventsAfter.length)
+        assert.equal(Number((await owner.projection()).shared.petInfo.yb), diudiuleYbBefore + 1)
+
+        // Exam: the answer key must be read back from the temporary SQlite
+        // session payload, then graded correct through the real renderer.
+        await seedExamLessons(dbPath, 9)
+        const examBeforeEngine = await readCanonicalEngine(dbPath)
+        const examTaskBefore = taskCounterSnapshot(examBeforeEngine.save)
+        const examStudyBefore = Number(examBeforeEngine.save.studyInfo.chinese ?? 0)
+        const examYbBefore = Number(examBeforeEngine.save.petInfo.yb)
+        const examCompletedBefore = await eventsFor('activity.completed', event =>
+          event.payload.kind === 'exam' && event.payload.subject === 'xx-chinese')
+        const examStart = await owner.command(
+          { type: 'exam.start', payload: { subject: 'xx-chinese' } },
+          'c12-grading-exam-start',
+        )
+        assert.equal(examStart.status, 'applied', 'graded exam start rejected: ' + JSON.stringify(examStart.error))
+        const examToken = examStart.result.sessionToken
+        sessionTokens.push(examToken)
+        assert.equal(examStart.result.questions.length, 3)
+        assert.deepEqual(findKeys(examStart.result, answerKeyOnly), [], 'exam start result must not expose answer keys')
+        await waitConverged(owner, player, examStart.revision)
+        hygieneChecks += await assertSessionProjectionHygiene('graded exam start', [examToken])
+        const storedExam = await readSessionPayload(dbPath, examToken)
+        assert.equal(storedExam.kind, 'exam')
+        assert.equal(storedExam.status, 'active')
+        assert.equal(storedExam.payload.kind, 'exam')
+        assert.equal(storedExam.payload.questions.length, 3)
+        const examAnswers = storedExam.payload.questions.map((question, index) => {
+          assert.ok(Number.isSafeInteger(question.answerIndex), 'stored exam answer must be an integer at question ' + String(index))
+          assert.ok(question.answerIndex >= 0 && question.answerIndex < question.options.length)
+          return question.answerIndex
+        })
+        const expectedExamProjection = storedExam.payload.questions.map(question => ({
+          questionId: question.questionId,
+          prompt: question.prompt,
+          options: question.options,
+        }))
+        assert.equal(hash(examStart.result.questions), hash(expectedExamProjection), 'exam projection must match the persisted session questions')
+        const examClock = await advanceClockAndConverge(2 * 60_000, 'graded exam clock advance')
+        const examBeforeSettle = await waitConverged(owner, player, 0)
+        const examSubmit = await owner.command(
+          { type: 'exam.submit', payload: { sessionToken: examToken, answers: examAnswers } },
+          'c12-grading-exam-submit-correct',
+        )
+        assert.equal(examSubmit.status, 'applied', 'graded exam submit rejected: ' + JSON.stringify(examSubmit.error))
+        assert.equal(examSubmit.result.passed, true)
+        assert.equal(examSubmit.result.correctCount, 3)
+        assert.equal(examSubmit.result.total, 3)
+        assert.deepEqual(findKeys(examSubmit.result, answerKeyOnly), [], 'exam grading result must not expose answer keys')
+        const examSettled = await waitConverged(owner, player, examSubmit.revision)
+        assert.equal(Number(examSettled.left.shared.studyInfo.chinese), examStudyBefore + 1)
+        assert.equal(Number(examSettled.right.shared.studyInfo.chinese), examStudyBefore + 1)
+        assert.equal(Number(examSettled.left.shared.petInfo.yb), examYbBefore, 'passing an exam must not invent a yuanbao reward')
+        assert.equal(hash(taskCounterSnapshot(examSettled.left.shared)), hash(examTaskBefore), 'exam settlement must not change task counters')
+        const examCompletedAfter = await eventsFor('activity.completed', event =>
+          event.payload.kind === 'exam' && event.payload.subject === 'xx-chinese')
+        assert.equal(examCompletedAfter.length, examCompletedBefore.length + 1)
+        assert.equal(examCompletedAfter.at(-1).gameTimeMs, examClock.health.gameTimeMs)
+        assert.equal(examCompletedAfter.at(-1).payload.correctCount, 3)
+        assert.equal(examCompletedAfter.at(-1).payload.total, 3)
+        assert.equal(examCompletedAfter.at(-1).payload.passed, true)
+        hygieneChecks += await assertSessionProjectionHygiene('graded exam settled', [examToken])
+        const examReplay = await owner.command(
+          { type: 'exam.submit', payload: { sessionToken: examToken, answers: examAnswers } },
+          'c12-grading-exam-replay',
+        )
+        assert.equal(examReplay.status, 'rejected')
+        assert.equal(examReplay.error?.code, 'already_claimed')
+        await assertRejectedUnchanged(examSettled.right, 'graded exam replay')
+        assert.equal(Number((await owner.projection()).shared.studyInfo.chinese), examStudyBefore + 1)
+        assert.equal((await eventsFor('activity.completed', event =>
+          event.payload.kind === 'exam' && event.payload.subject === 'xx-chinese')).length, examCompletedAfter.length)
+
+        // Island quiz: read the server-only option index from SQLite, answer
+        // correctly, and assert every granted good is added exactly once.
+        let islandStart = null
+        let quizIndex = -1
+        let quizErrand = null
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await seedIslandQuizErrand(dbPath)
+          const canonical = await readCanonicalEngine(dbPath)
+          const islandState = JSON.parse(String(canonical.save.saveJsonData.island ?? '{}'))
+          quizIndex = Array.isArray(islandState.errands)
+            ? islandState.errands.findIndex(errand => errand.kind === 'quiz')
+            : -1
+          assert.ok(quizIndex >= 0, 'island grading fixture must expose a quiz errand')
+          quizErrand = islandState.errands[quizIndex]
+          islandStart = await owner.command(
+            { type: 'island.startQuiz', payload: { npcId: quizErrand.from, errandId: String(quizIndex) } },
+            'c12-grading-island-start-' + String(attempt),
+          )
+          if (islandStart.status === 'applied') break
+          assert.equal(islandStart.error?.code, 'not_available', 'unexpected island start rejection: ' + JSON.stringify(islandStart.error))
+          await sleep(150)
+        }
+        assert.equal(islandStart.status, 'applied', 'graded island quiz start rejected: ' + JSON.stringify(islandStart.error))
+        const islandToken = islandStart.result.sessionToken
+        sessionTokens.push(islandToken)
+        assert.deepEqual(findKeys(islandStart.result, answerKeyOnly), [], 'island quiz start must not expose answer keys')
+        await waitConverged(owner, player, islandStart.revision)
+        hygieneChecks += await assertSessionProjectionHygiene('graded island start', [islandToken])
+        const storedIsland = await readSessionPayload(dbPath, islandToken)
+        assert.equal(storedIsland.kind, 'island_quiz')
+        assert.equal(storedIsland.status, 'active')
+        assert.equal(storedIsland.payload.kind, 'island_quiz')
+        assert.equal(islandStart.result.recordId, storedIsland.payload.recordId)
+        assert.equal(islandStart.result.quizKind, storedIsland.payload.quizKind)
+        assert.equal(islandStart.result.prompt, storedIsland.payload.prompt)
+        assert.equal(hash(islandStart.result.options), hash(storedIsland.payload.options))
+        const islandAnswerIndex = storedIsland.payload.answerIndex
+        assert.ok(Number.isSafeInteger(islandAnswerIndex))
+        assert.ok(islandAnswerIndex >= 0 && islandAnswerIndex < storedIsland.payload.options.length)
+        const islandBeforeEngine = await readCanonicalEngine(dbPath)
+        const islandGoodsBefore = new Map()
+        for (const type of ['nums', 'food', 'toy', 'clean', 'medicine', 'background', 'service']) {
+          if (Array.isArray(islandBeforeEngine.save.selfGoodDatas?.[type])) {
+            for (const entry of islandBeforeEngine.save.selfGoodDatas[type]) {
+              const match = typeof entry === 'string' ? /^_(.+)\*(\d+)$/.exec(entry) : null
+              if (match !== null) islandGoodsBefore.set(type + '/' + match[1], Number(match[2]))
+            }
+          }
+        }
+        const islandRewardEventsBefore = await eventsFor('island.rewardGranted')
+        const islandPassedEventsBefore = await eventsFor('island.errandChanged', event => event.payload.status === 'quiz_passed')
+        const islandClock = await advanceClockAndConverge(60_000, 'graded island clock advance')
+        const islandBeforeSettle = await waitConverged(owner, player, 0)
+        const islandAnswer = await owner.command(
+          { type: 'island.answerQuiz', payload: { sessionToken: islandToken, optionIndex: islandAnswerIndex } },
+          'c12-grading-island-answer-correct',
+        )
+        assert.equal(islandAnswer.status, 'applied', 'graded island answer rejected: ' + JSON.stringify(islandAnswer.error))
+        assert.equal(islandAnswer.result.correct, true)
+        assert.ok(Array.isArray(islandAnswer.result.goods) && islandAnswer.result.goods.length >= 1)
+        assert.deepEqual(findKeys(islandAnswer.result, answerKeyOnly), [], 'island answer result must not expose answer keys')
+        const islandSettled = await waitConverged(owner, player, islandAnswer.revision)
+        for (const good of islandAnswer.result.goods) {
+          const key = String(good.type) + '/' + String(good.id)
+          const expected = (islandGoodsBefore.get(key) ?? 0) + Number(good.num)
+          assert.equal(inventoryCount(islandSettled.left.shared, String(good.type), String(good.id)), expected, 'island reward good must be credited exactly once: ' + key)
+          assert.equal(inventoryCount(islandSettled.right.shared, String(good.type), String(good.id)), expected, 'player projection must receive island reward exactly once: ' + key)
+        }
+        const islandStateAfter = JSON.parse(String(islandSettled.left.shared.saveJsonData.island ?? '{}'))
+        const islandErrandAfter = islandStateAfter.errands?.[quizIndex]
+        assert.notEqual(islandErrandAfter, undefined)
+        assert.equal(islandErrandAfter.got, 1)
+        assert.equal(islandErrandAfter.took, true)
+        const islandRewardEventsAfter = await eventsFor('island.rewardGranted')
+        const islandPassedEventsAfter = await eventsFor('island.errandChanged', event => event.payload.status === 'quiz_passed')
+        assert.equal(islandRewardEventsAfter.length, islandRewardEventsBefore.length + 1)
+        assert.equal(islandPassedEventsAfter.length, islandPassedEventsBefore.length + 1)
+        assert.equal(islandRewardEventsAfter.at(-1).gameTimeMs, islandClock.health.gameTimeMs)
+        hygieneChecks += await assertSessionProjectionHygiene('graded island settled', [islandToken])
+        const islandReplay = await owner.command(
+          { type: 'island.answerQuiz', payload: { sessionToken: islandToken, optionIndex: islandAnswerIndex } },
+          'c12-grading-island-replay',
+        )
+        assert.equal(islandReplay.status, 'rejected')
+        assert.equal(islandReplay.error?.code, 'already_claimed')
+        await assertRejectedUnchanged(islandSettled.right, 'graded island replay')
+        assert.equal((await eventsFor('island.rewardGranted')).length, islandRewardEventsAfter.length, 'island replay must not grant a second reward')
+        for (const good of islandAnswer.result.goods) {
+          const key = String(good.type) + '/' + String(good.id)
+          const expected = (islandGoodsBefore.get(key) ?? 0) + Number(good.num)
+          assert.equal(inventoryCount((await owner.projection()).shared, String(good.type), String(good.id)), expected)
+        }
+
+        const finalProjection = await waitConverged(owner, player, islandSettled.right.revision)
+        const activeSessions = await withDatabase(dbPath, false, db => db.prepare(
+          "SELECT COUNT(*) AS count FROM game_sessions WHERE pet_id = ? AND status = 'active'",
+        ).get('default'))
+        assert.equal(Number(activeSessions.count), 0, 'all graded sessions must be settled')
+        sessionGradingEvidence = {
+          sessionKinds: ['game', 'diudiule', 'exam', 'island_quiz'],
+          clockAdvancedBeforeEverySettlement: true,
+          gameElapsedGameMinutes: Number(gameReward.result.minutes),
+          gameYbDelta: Number(gameSettled.left.shared.petInfo.yb) - gameYbBefore,
+          gameRoundDelta: gameSettled.left.shared ? taskCounterSnapshot(gameSettled.left.shared).GameRound - gameTaskBefore.GameRound : 0,
+          gameCounterDelta: taskCounterSnapshot(gameSettled.left.shared).Game - gameTaskBefore.Game,
+          gameSettleEventCount: gameSettledEvents.length,
+          gameReplayEventCount: gameEventsAfterReplay.length,
+          diudiuleYbDelta: Number(diudiuleSettled.left.shared.petInfo.yb) - diudiuleYbBefore,
+          diudiuleSettleEventCount: diudiuleSettleEventsAfter.length,
+          examStoredAnswerKeyHash: hash(examAnswers),
+          examCorrectCount: Number(examSubmit.result.correctCount),
+          examTotal: Number(examSubmit.result.total),
+          examPassed: examSubmit.result.passed === true,
+          examStudyDelta: Number(examSettled.left.shared.studyInfo.chinese) - examStudyBefore,
+          examCompletedEventCount: examCompletedAfter.length,
+          examTaskCountersUnchanged: hash(taskCounterSnapshot(examSettled.left.shared)) === hash(examTaskBefore),
+          islandStoredAnswerKeyHash: hash(islandAnswerIndex),
+          islandCorrect: islandAnswer.result.correct === true,
+          islandGoodKinds: islandAnswer.result.goods.map(good => String(good.type) + '/' + String(good.id)),
+          islandGoodCount: islandAnswer.result.goods.length,
+          islandRewardEventCount: islandRewardEventsAfter.length,
+          islandPassEventCount: islandPassedEventsAfter.length,
+          islandReplayRewardEventCount: (await eventsFor('island.rewardGranted')).length,
+          answerKeyProjectionChecks: hygieneChecks,
+          answerKeysProjected: false,
+          answerKeysStoredServerSide: true,
+          activeSessionsAfter: Number(activeSessions.count),
+          bothRenderersConverged: projectionHash(finalProjection.left) === projectionHash(finalProjection.right),
+          sessionTokenHashes: sessionTokens.map(token => hash(token)),
+        }
+        return sessionGradingEvidence
+      } finally {
+        await fixture.cleanup()
+      }
+    })
+
     await step(SCENARIO_COVERAGE_REOPEN, async () => {
       const before = await waitConverged(owner, player, 0)
       assert.equal(before.left.shared.havePet, true)
@@ -2368,6 +2912,8 @@ async function main() {
       const freshCredentialFile = join(freshRoot, 'owner-admin-credential.txt')
       const freshOwnerProfile = join(freshRoot, 'electron-owner')
       const freshPlayerProfile = join(freshRoot, 'electron-player')
+      const freshClockFile = join(freshRoot, 'clock.txt')
+      const freshClockMs = Date.now()
       const freshPort = await freePort()
       const freshServerUrl = 'ws://127.0.0.1:' + freshPort + '/v1/sync'
       const freshEnv = {
@@ -2378,19 +2924,26 @@ async function main() {
         QQPET_ADMIN_SOCKET: freshAdminSocket,
         QQPET_OWNER_ADMIN_CREDENTIAL: freshCredentialFile,
         QQPET_SYNC_PORT: String(freshPort),
+        QQPET_E2E_CLOCK_FILE: freshClockFile,
       }
       await mkdir(freshOwnerProfile, { recursive: true })
       await mkdir(freshPlayerProfile, { recursive: true })
       await mkdir(freshBackupDir, { recursive: true })
       await writeFile(freshCredentialFile, 'c12-fresh-host-owner-admin-credential\n', { mode: 0o600 })
-      const initialized = runCli(freshEnv, [
-        'init', '--db', freshDbPath, '--pet-id', 'default', '--time-zone', 'Asia/Shanghai', '--weather-city', '北京',
+      await writeClockedNow(freshClockFile, freshClockMs)
+      const initialized = runClockedCli(freshEnv, [
+        'init', '--pet-id', 'default', '--time-zone', 'Asia/Shanghai', '--weather-city', '北京',
       ])
       assert.equal(initialized.ok, true)
-      const pairedPlayer = runCli(freshEnv, ['pair', '--db', freshDbPath, '--pet-id', 'default', '--role', 'player'])
+      const pairedPlayer = runClockedCli(freshEnv, ['pair', '--pet-id', 'default', '--role', 'player'])
       freshOwnerPairingCode = initialized.pairingCode
       freshPlayerPairingCode = pairedPlayer.pairingCode
-      freshServer = await new ServerProcess({ port: freshPort, env: freshEnv }).start()
+      freshServer = await new ServerProcess({
+        port: freshPort,
+        env: freshEnv,
+        entry: CLOCKED_SERVER_ENTRY,
+        args: ['serve'],
+      }).start()
 
       freshHostOwner = await new RendererApp({
         label: 'fresh-host-owner-renderer',
@@ -2410,11 +2963,68 @@ async function main() {
         return projection?.shared?.havePet === true ? projection : null
       }, 'fresh local source projection', 10_000)
       assert.equal(localProjection.authority.owner, 'local')
+      await ensureWorkReady(freshHostOwner, 'fresh-source-local')
+      const sourceGame = await freshHostOwner.command(
+        { type: 'game.startSession', payload: { gameId: 'c12-import-game', kind: 'small' } },
+        'c12-fresh-source-game-start',
+      )
+      assert.equal(sourceGame.status, 'applied', 'local source game start rejected: ' + JSON.stringify(sourceGame.error))
+      rawSessionTokens.push(sourceGame.result.sessionToken)
+      const sourceDiudiule = await freshHostOwner.command(
+        { type: 'diudiule.startSession', payload: {} },
+        'c12-fresh-source-diudiule-start',
+      )
+      assert.equal(sourceDiudiule.status, 'applied', 'local source diudiule start rejected: ' + JSON.stringify(sourceDiudiule.error))
+      rawSessionTokens.push(sourceDiudiule.result.sessionToken)
+      const sourceWork = await freshHostOwner.command(
+        { type: 'job.startWork', payload: { jobId: 'bz' } },
+        'c12-fresh-source-work-start',
+      )
+      assert.equal(sourceWork.status, 'applied', 'local source work start rejected: ' + JSON.stringify(sourceWork.error))
+      const sourceWorkJobId = Number(sourceWork.result.jobId)
+      const sourceWorkDueAtGameMs = Number(sourceWork.result.dueAtGameMs)
+      await waitFor(async () => {
+        const projection = await freshHostOwner.projection()
+        return projection?.shared?.activeOption?.work === 'bz' ? projection : null
+      }, 'fresh local source timed work projection', 10_000)
+
+      await freshHostOwner.close()
+      freshHostOwner = null
+      const localEnvironmentSeed = await seedLocalDocumentEnvironment(freshOwnerProfile, 'c12-fresh-import')
+      freshHostOwner = await new RendererApp({
+        label: 'fresh-host-owner-renderer',
+        userData: freshOwnerProfile,
+        serverUrl: freshServerUrl,
+      }).launch()
+      const relaunchedLocalStatus = await freshHostOwner.storageStatus()
+      assert.equal(relaunchedLocalStatus.mode, 'local')
+      const localRestartProjection = await waitFor(async () => {
+        const projection = await freshHostOwner.projection()
+        return projection?.shared?.havePet === true
+          && projection.shared?.activeOption?.work === 'bz'
+          ? projection
+          : null
+      }, 'fresh local source projection after environment seed', 20_000)
+      assert.equal(localRestartProjection.authority.owner, 'local')
       const exported = await freshHostOwner.exportBundle()
       assert.equal(exported.mode, 'local')
       const bundle = JSON.parse(exported.json)
       assert.equal(bundle.authority.owner, 'local')
       assert.equal(bundle.shared.havePet, true)
+      assert.ok(bundle.engine.scheduledJobs.length >= 3, 'source bundle must contain scheduled jobs')
+      assert.ok(bundle.engine.gameSessions.length >= 2, 'source bundle must contain game sessions')
+      assert.ok(bundle.engine.scheduledJobs.some(job => job.id === sourceWorkJobId && job.status === 'pending' && job.dueAtGameMs === sourceWorkDueAtGameMs))
+      assert.match(String(bundle.engine.rng?.seedHex ?? ''), /^[0-9a-f]{32}$/)
+      assert.match(String(bundle.engine.rng?.stateHex ?? ''), /^[0-9a-f]{32}$/)
+      assert.ok(Number.isSafeInteger(bundle.engine.rng?.draws))
+      assert.ok(Object.keys(bundle.engine.environment?.weatherByDay ?? {}).includes(localEnvironmentSeed.dayKey), 'source bundle must contain the seeded per-day weather')
+      assert.ok(Object.keys(bundle.engine.environment?.calendarByDay ?? {}).includes(localEnvironmentSeed.dayKey), 'source bundle must contain the seeded per-day calendar')
+      assert.ok(typeof bundle.engine.lastProcessedDayBoundaryKey === 'string' && bundle.engine.lastProcessedDayBoundaryKey.length > 0)
+      assert.ok(Number.isSafeInteger(bundle.engine.nextDailyBoundaryMs) && bundle.engine.nextDailyBoundaryMs > bundle.engine.gameTimeMs)
+      assert.ok(Number.isSafeInteger(bundle.engine.lastSchedulerWallMs))
+      const sourceActiveSessions = bundle.engine.gameSessions.filter(session => session.status === 'active')
+      assert.ok(sourceActiveSessions.length >= 2)
+      assert.ok(sourceActiveSessions.every(session => session.actorDeviceId === bundle.originLocalDeviceId), 'local source sessions must be bound to the source local device')
 
       const pairedOwner = await freshHostOwner.pair(freshOwnerPairingCode, 'C12 fresh host owner')
       assert.equal(pairedOwner.paired, true)
@@ -2453,7 +3063,7 @@ async function main() {
       assert.equal(activeBefore.activeClientCount, 2)
 
       const staleBundle = structuredClone(bundle)
-      staleBundle.engine.lastSchedulerWallMs = Date.now() + 6 * 60_000
+      staleBundle.engine.lastSchedulerWallMs = freshClockMs + 6 * 60_000
       const rejectedWithoutClamp = await freshHostOwner.importBundle({
         json: JSON.stringify(staleBundle),
         allowClamp: false,
@@ -2472,9 +3082,9 @@ async function main() {
       })
       assert.equal(imported.status, 'applied')
       assert.equal(imported.mode, 'server')
-      assert.equal(imported.importClamped, true, 'future-anchor import must report a clamp; report=' + JSON.stringify(imported) + ' staleAnchor=' + String(staleBundle.engine.lastSchedulerWallMs) + ' now=' + String(Date.now()))
+      assert.equal(imported.importClamped, true, 'future-anchor import must report a clamp; report=' + JSON.stringify(imported) + ' staleAnchor=' + String(staleBundle.engine.lastSchedulerWallMs) + ' now=' + String(freshClockMs))
       assert.ok(Number(imported.clockSkippedMs) < 0, 'future-anchor clamp must report the negative clock correction')
-      assert.ok(Number.isSafeInteger(imported.effectiveAnchorWallMs))
+      assert.equal(imported.effectiveAnchorWallMs, freshClockMs, 'clamped import must anchor exactly at the frozen wall clock')
       assert.ok(Number.isSafeInteger(imported.restoreGenerationBefore) && imported.restoreGenerationBefore >= 0)
       assert.equal(imported.restoreGenerationAfter, bundle.authority.restoreGeneration)
       assert.equal(
@@ -2507,6 +3117,60 @@ async function main() {
       assert.equal(freshStatus.authority.authorityId, bundle.authority.authorityId)
       assert.notEqual(freshStatus.authority.authorityId, authorityIdBefore)
 
+      const { dayKeyAt, nextDailyBoundaryMs } = await loadRuntimeOracle()
+      const expectedImportedEngine = structuredClone(bundle.engine)
+      expectedImportedEngine.gameTimeMs += imported.clockSkippedMs
+      expectedImportedEngine.lastSchedulerWallMs = imported.effectiveAnchorWallMs
+      expectedImportedEngine.importClamped = true
+      expectedImportedEngine.clockSkippedMs = imported.clockSkippedMs
+      expectedImportedEngine.save.nowTimeLine = Math.floor(expectedImportedEngine.gameTimeMs / 1000)
+      expectedImportedEngine.lastProcessedDayBoundaryKey = dayKeyAt(expectedImportedEngine.gameTimeMs, expectedImportedEngine.timeZone)
+      expectedImportedEngine.nextDailyBoundaryMs = nextDailyBoundaryMs(expectedImportedEngine.gameTimeMs, expectedImportedEngine.timeZone)
+      for (const job of expectedImportedEngine.scheduledJobs) {
+        job.dueAtGameMs += imported.clockSkippedMs
+        if (typeof job.payload?.startedAtGameMs === 'number') job.payload.startedAtGameMs += imported.clockSkippedMs
+      }
+      for (const session of expectedImportedEngine.gameSessions) {
+        session.startedAtGameMs += imported.clockSkippedMs
+        session.expiresAtGameMs += imported.clockSkippedMs
+        if (session.status === 'active' && session.actorDeviceId === bundle.originLocalDeviceId) {
+          session.actorDeviceId = freshOwnerDeviceId
+        }
+      }
+      const importedEngine = await readCanonicalEngine(freshDbPath)
+      assert.equal(importedEngine.gameTimeMs, expectedGameTimeMs)
+      assert.equal(importedEngine.lastSchedulerWallMs, imported.effectiveAnchorWallMs, 'imported anchor must equal the reported effective wall anchor')
+      assert.equal(importedEngine.gameTimeMs, expectedImportedEngine.gameTimeMs)
+      assert.equal(importedEngine.timeZone, bundle.engine.timeZone)
+      assert.equal(importedEngine.advanceWhileEmpty, bundle.engine.advanceWhileEmpty)
+      assert.equal(importedEngine.weatherLocation, bundle.engine.weatherLocation)
+      assert.equal(importedEngine.lastProcessedDayBoundaryKey, expectedImportedEngine.lastProcessedDayBoundaryKey, 'imported day-boundary key must match the clamped source')
+      assert.equal(importedEngine.nextDailyBoundaryMs, expectedImportedEngine.nextDailyBoundaryMs, 'imported next day boundary must match the clamped source')
+      assert.equal(stableHash(importedEngine.rng), stableHash(bundle.engine.rng), 'imported RNG state must match the source bundle')
+      assert.equal(stableHash(importedEngine.environment), stableHash(bundle.engine.environment), 'imported per-day environment must match the source bundle')
+      assert.equal(
+        stableHash(normalizeScheduledJobs(importedEngine.scheduledJobs)),
+        stableHash(normalizeScheduledJobs(expectedImportedEngine.scheduledJobs)),
+        'imported jobs must match the clamped source deadlines',
+      )
+      assert.equal(
+        stableHash(normalizeGameSessions(importedEngine.gameSessions)),
+        stableHash(normalizeGameSessions(expectedImportedEngine.gameSessions)),
+        'imported sessions must match the clamped and rebound source sessions',
+      )
+      assert.equal(importedEngine.scheduledJobs.length, bundle.engine.scheduledJobs.length)
+      assert.equal(importedEngine.gameSessions.length, bundle.engine.gameSessions.length)
+      assert.ok(importedEngine.scheduledJobs.length >= 3)
+      assert.ok(importedEngine.gameSessions.length >= 2)
+      assert.ok(importedEngine.gameSessions.filter(session => session.status === 'active')
+        .every(session => session.actorDeviceId === freshOwnerDeviceId), 'imported local sessions must be rebound to the destination owner device')
+      assert.ok(importedEngine.gameSessions.filter(session => session.payload.kind === 'exam').length === 0)
+      const importedCountsBeforeRestart = await readPersistedCounts(freshDbPath)
+      const importedHealthBeforeRestart = await freshServer.health()
+      assert.equal(importedHealthBeforeRestart.gameTimeMs, expectedGameTimeMs)
+      assert.equal(importedHealthBeforeRestart.revision, importedConverged.left.revision)
+      assert.equal(importedHealthBeforeRestart.eventSeq, importedConverged.left.eventSeq)
+
       const freshHealth = await freshServer.health()
       assert.equal(freshHealth.activeClientCount, 2)
       const operation = await readLatestCoverageOperation(freshDbPath)
@@ -2524,7 +3188,62 @@ async function main() {
       const openRows = await readOpenCoverageRows(freshDbPath)
       assert.equal(openRows.length, 2, 'import must not backfill or leave extra survivor rows')
       assert.deepEqual(new Set(openRows.map(row => row.coverageId)), new Set(rows.map(row => row.coverageId)))
-      const detail = {
+
+      // Restart the fresh host at the same frozen wall clock. The import anchor
+      // must not replay consumed time or duplicate jobs/sessions/events.
+      // The imported authority carries a non-zero restore generation, so an
+      // operator fence file must record that exact generation before restart.
+      await writeFile(freshRestoreGenerationFile, String(imported.restoreGenerationAfter) + '\n')
+      const freshHealthToken = freshServer.authToken
+      await freshServer.crash()
+      freshServer = await new ServerProcess({
+        port: freshPort,
+        env: freshEnv,
+        entry: CLOCKED_SERVER_ENTRY,
+        args: ['serve'],
+        authToken: freshHealthToken,
+      }).start()
+      const restartedFreshHealth = await freshServer.health()
+      assert.equal(restartedFreshHealth.ready, true)
+      assert.equal(restartedFreshHealth.gameTimeMs, importedHealthBeforeRestart.gameTimeMs, 'fresh import restart must not catch up the same interval again')
+      assert.equal(restartedFreshHealth.revision, importedHealthBeforeRestart.revision, 'fresh import restart must not commit a duplicate revision')
+      assert.equal(restartedFreshHealth.eventSeq, importedHealthBeforeRestart.eventSeq, 'fresh import restart must not commit duplicate events')
+      const importedEngineAfterRestart = await readCanonicalEngine(freshDbPath)
+      const importedCountsAfterRestart = await readPersistedCounts(freshDbPath)
+      assert.equal(stableHash(normalizeScheduledJobs(importedEngineAfterRestart.scheduledJobs)), stableHash(normalizeScheduledJobs(importedEngine.scheduledJobs)))
+      assert.equal(stableHash(normalizeGameSessions(importedEngineAfterRestart.gameSessions)), stableHash(normalizeGameSessions(importedEngine.gameSessions)))
+      assert.equal(stableHash(importedEngineAfterRestart.rng), stableHash(importedEngine.rng))
+      assert.equal(stableHash(importedEngineAfterRestart.environment), stableHash(importedEngine.environment))
+      assert.equal(importedEngineAfterRestart.lastSchedulerWallMs, importedEngine.lastSchedulerWallMs)
+      assert.equal(importedEngineAfterRestart.lastProcessedDayBoundaryKey, importedEngine.lastProcessedDayBoundaryKey)
+      assert.equal(importedEngineAfterRestart.nextDailyBoundaryMs, importedEngine.nextDailyBoundaryMs)
+      assert.equal(importedCountsAfterRestart.commandRows, importedCountsBeforeRestart.commandRows)
+      assert.equal(importedCountsAfterRestart.eventRows, importedCountsBeforeRestart.eventRows)
+      assert.equal(importedCountsAfterRestart.duplicateOpIds, 0)
+      assert.equal(importedCountsAfterRestart.duplicateEventSeqs, 0)
+      await waitFor(async () => {
+        const ownerStatus = await freshHostOwner.storageStatus()
+        const playerStatus = await freshHostPlayer.storageStatus()
+        return ownerStatus.connection === 'online' && playerStatus.connection === 'online' ? true : null
+      }, 'fresh host renderers reconnect after import restart', 30_000)
+      const importedAfterRestart = await waitFor(async () => {
+        const left = await freshHostOwner.projection()
+        const right = await freshHostPlayer.projection()
+        if (left === null || right === null) return null
+        return left.gameTimeMs === expectedGameTimeMs
+          && right.gameTimeMs === expectedGameTimeMs
+          && left.revision === importedConverged.left.revision
+          && right.revision === importedConverged.left.revision
+          && left.eventSeq === importedConverged.left.eventSeq
+          && right.eventSeq === importedConverged.left.eventSeq
+          && sameProjection(left, right)
+          ? { left, right }
+          : null
+      }, 'fresh host exact projection after import restart', 30_000)
+      assert.equal(projectionHash(importedAfterRestart.left), hash(expectedShared))
+      assert.equal(projectionHash(importedAfterRestart.right), hash(expectedShared))
+
+      importEngineStateEvidence = {
         sourceExportMode: exported.mode,
         sourceBundleHash: hash(bundle),
         rejectedWithoutClamp: rejectedWithoutClamp.status,
@@ -2548,11 +3267,44 @@ async function main() {
         expectedGameTimeMs,
         ownerGameTimeMs: importedConverged.left.gameTimeMs,
         playerGameTimeMs: importedConverged.right.gameTimeMs,
+        sourceJobCount: bundle.engine.scheduledJobs.length,
+        importedJobCount: importedEngine.scheduledJobs.length,
+        sourceSessionCount: bundle.engine.gameSessions.length,
+        importedSessionCount: importedEngine.gameSessions.length,
+        sourceRngHash: stableHash(bundle.engine.rng),
+        importedRngHash: stableHash(importedEngine.rng),
+        rngPreserved: stableHash(importedEngine.rng) === stableHash(bundle.engine.rng),
+        sourceEnvironmentHash: stableHash(bundle.engine.environment),
+        importedEnvironmentHash: stableHash(importedEngine.environment),
+        environmentPreserved: stableHash(importedEngine.environment) === stableHash(bundle.engine.environment),
+        weatherKeys: Object.keys(bundle.engine.environment.weatherByDay),
+        calendarKeys: Object.keys(bundle.engine.environment.calendarByDay ?? {}),
+        sourceDayBoundaryKey: bundle.engine.lastProcessedDayBoundaryKey,
+        importedDayBoundaryKey: importedEngine.lastProcessedDayBoundaryKey,
+        expectedDayBoundaryKey: expectedImportedEngine.lastProcessedDayBoundaryKey,
+        dayBoundaryPreserved: importedEngine.lastProcessedDayBoundaryKey === expectedImportedEngine.lastProcessedDayBoundaryKey
+          && importedEngine.nextDailyBoundaryMs === expectedImportedEngine.nextDailyBoundaryMs,
+        sourceAnchorMs: bundle.engine.lastSchedulerWallMs,
+        importedAnchorMs: importedEngine.lastSchedulerWallMs,
+        effectiveAnchorMs: imported.effectiveAnchorWallMs,
+        anchorPreserved: importedEngine.lastSchedulerWallMs === imported.effectiveAnchorWallMs,
+        jobsPreserved: stableHash(normalizeScheduledJobs(importedEngine.scheduledJobs)) === stableHash(normalizeScheduledJobs(expectedImportedEngine.scheduledJobs)),
+        sessionsPreserved: stableHash(normalizeGameSessions(importedEngine.gameSessions)) === stableHash(normalizeGameSessions(expectedImportedEngine.gameSessions)),
+        sessionsReboundToDestination: importedEngine.gameSessions.filter(session => session.status === 'active')
+          .every(session => session.actorDeviceId === freshOwnerDeviceId),
+        noDoubleCatchUp: restartedFreshHealth.gameTimeMs === importedHealthBeforeRestart.gameTimeMs
+          && restartedFreshHealth.revision === importedHealthBeforeRestart.revision
+          && restartedFreshHealth.eventSeq === importedHealthBeforeRestart.eventSeq
+          && importedCountsAfterRestart.eventRows === importedCountsBeforeRestart.eventRows,
+        eventRowsBeforeRestart: importedCountsBeforeRestart.eventRows,
+        eventRowsAfterRestart: importedCountsAfterRestart.eventRows,
         survivorCount: operation.survivors.length,
         reopenedRowCount: rows.length,
         extraOpenRows: openRows.length - rows.length,
         reopenedAtCommitWall: rows.every(row => row.connectedAtMs === operation.commitWallMs),
         activeClientCount: freshHealth.activeClientCount,
+        bothRenderersConvergedAfterImport: projectionHash(importedConverged.left) === projectionHash(importedConverged.right),
+        bothRenderersConvergedAfterRestart: projectionHash(importedAfterRestart.left) === projectionHash(importedAfterRestart.right),
       }
       await freshHostOwner.close()
       await freshHostPlayer.close()
@@ -2560,7 +3312,7 @@ async function main() {
       freshHostOwner = null
       freshHostPlayer = null
       freshServer = null
-      return detail
+      return importEngineStateEvidence
     })
 
     await step('owner detach then resume restores authority and both renderer projections converge', async () => {
@@ -2725,6 +3477,39 @@ async function main() {
           && sameProjection(left, right) ? { left, right, status } : null
       }, 'advance-while-empty convergence before deterministic restart', 20_000)
       assert.equal(beforeProjection.status.advanceWhileEmpty, true)
+
+      await seedCanonicalEnvironment(dbPath, 'c12-deterministic-restart')
+      await ensureWorkReady(owner, 'deterministic-restart')
+      const gameStart = await owner.command(
+        { type: 'game.startSession', payload: { gameId: 'c12-restart-game', kind: 'small' } },
+        'c12-restart-game-start',
+      )
+      assert.equal(gameStart.status, 'applied', 'restart game session start rejected: ' + JSON.stringify(gameStart.error))
+      rawSessionTokens.push(gameStart.result.sessionToken)
+      const diudiuleStart = await owner.command(
+        { type: 'diudiule.startSession', payload: {} },
+        'c12-restart-diudiule-start',
+      )
+      assert.equal(diudiuleStart.status, 'applied', 'restart diudiule session start rejected: ' + JSON.stringify(diudiuleStart.error))
+      rawSessionTokens.push(diudiuleStart.result.sessionToken)
+      const workStart = await owner.command(
+        { type: 'job.startWork', payload: { jobId: 'bz' } },
+        'c12-restart-work-start',
+      )
+      assert.equal(workStart.status, 'applied', 'restart work start rejected: ' + JSON.stringify(workStart.error))
+      const restartWorkJobId = Number(workStart.result.jobId)
+      const restartWorkDueAtGameMs = Number(workStart.result.dueAtGameMs)
+      const prepared = await waitConverged(owner, player, workStart.revision, 20_000)
+      assert.equal(prepared.left.shared.activeOption.work, 'bz')
+      assert.equal(prepared.right.shared.activeOption.work, 'bz')
+
+      const preparedEngine = await readCanonicalEngine(dbPath)
+      assert.ok(preparedEngine.scheduledJobs.length >= 3, 'persisted scheduled jobs must be non-empty before export')
+      assert.ok(preparedEngine.gameSessions.filter(session => session.status === 'active').length >= 2, 'persisted game sessions must be non-empty before export')
+      assert.ok(Object.keys(preparedEngine.environment?.weatherByDay ?? {}).length > 0, 'persisted per-day weather must be non-empty before export')
+      assert.ok(Object.keys(preparedEngine.environment?.calendarByDay ?? {}).length > 0, 'persisted per-day calendar must be non-empty before export')
+      assert.ok(typeof preparedEngine.lastProcessedDayBoundaryKey === 'string' && preparedEngine.lastProcessedDayBoundaryKey.length > 0)
+      assert.ok(Number.isSafeInteger(preparedEngine.nextDailyBoundaryMs) && preparedEngine.nextDailyBoundaryMs > preparedEngine.gameTimeMs)
       const beforeDb = await readPetState(dbPath)
       const beforeExport = await owner.exportBundle()
       const beforeBundle = JSON.parse(beforeExport.json)
@@ -2732,14 +3517,35 @@ async function main() {
       assert.equal(beforeBundle.authority.eventSeq, beforeDb.eventSeq, 'export snapshot must match the canonical eventSeq')
       assert.equal(beforeBundle.engine.gameTimeMs, beforeDb.gameTimeMs, 'export snapshot must match canonical gameTime')
       assert.equal(beforeBundle.engine.advanceWhileEmpty, true)
-      assert.deepEqual(beforeBundle.engine.scheduledJobs, [], 'deterministic restart fixture must start with no scheduled jobs')
-      assert.deepEqual(beforeBundle.engine.gameSessions, [], 'deterministic restart fixture must start with no sessions')
+      assert.ok(beforeBundle.engine.scheduledJobs.length >= 3, 'deterministic restart fixture must start with non-empty scheduled jobs')
+      assert.ok(beforeBundle.engine.gameSessions.length >= 2, 'deterministic restart fixture must start with non-empty game sessions')
+      assert.ok(beforeBundle.engine.scheduledJobs.some(job => job.id === restartWorkJobId && job.status === 'pending' && job.dueAtGameMs === restartWorkDueAtGameMs))
       const beforeOwnerFaults = await owner.websocketFaultState()
       const beforePlayerFaults = await player.websocketFaultState()
-      const expectedTicks = 2
+      assert.ok((await readScheduledJobRows(dbPath)).length >= 3, 'scheduled_jobs table must be non-empty before restart')
+      const activeSessionCountRow = await withDatabase(dbPath, false, db => db.prepare(
+        "SELECT COUNT(*) AS count FROM game_sessions WHERE pet_id = ? AND status = 'active'",
+      ).get('default'))
+      assert.ok(Number(activeSessionCountRow.count) >= 2, 'game_sessions table must be non-empty before restart')
+      const workRewardRowsBeforeRestart = (await readEventRows(dbPath, { type: 'reward.granted' }))
+        .filter(event => event.payload.source === 'work')
+      const workCompletionRowsBeforeRestart = (await readEventRows(dbPath, { type: 'activity.completed' }))
+        .filter(event => event.payload.kind === 'work')
 
+      const expectedTicks = 2
       const healthToken = server.authToken
       await server.crash()
+      const environmentSeed = await seedCanonicalEnvironment(dbPath, 'c12-deterministic-restart')
+      const beforeEngine = await readCanonicalEngine(dbPath)
+      assert.ok(beforeEngine.scheduledJobs.length >= 3, 'persisted engine must retain scheduled jobs before restart')
+      assert.ok(beforeEngine.gameSessions.length >= 2, 'persisted engine must retain game sessions before restart')
+      assert.match(String(beforeEngine.rng?.seedHex ?? ''), /^[0-9a-f]{32}$/)
+      assert.ok(Object.keys(beforeEngine.environment?.weatherByDay ?? {}).includes(environmentSeed.dayKey), 'per-day weather must be persisted')
+      assert.ok(Object.keys(beforeEngine.environment?.calendarByDay ?? {}).includes(environmentSeed.dayKey), 'per-day calendar must be persisted')
+      assert.equal(stableHash(normalizeScheduledJobs(beforeEngine.scheduledJobs)), stableHash(normalizeScheduledJobs(beforeBundle.engine.scheduledJobs)), 'exported jobs must match persisted engine before crash')
+      assert.equal(stableHash(normalizeGameSessions(beforeEngine.gameSessions)), stableHash(normalizeGameSessions(beforeBundle.engine.gameSessions)), 'exported sessions must match persisted engine before crash')
+      assert.equal(stableHash(beforeEngine.rng), stableHash(beforeBundle.engine.rng), 'exported RNG must match persisted engine before crash')
+
       const rewindAnchorMs = Date.now() - expectedTicks * 60_000 - 10_000
       const anchorUpdate = await rewindSchedulerAnchor(dbPath, rewindAnchorMs)
       assert.equal(anchorUpdate.advanceWhileEmpty, true)
@@ -2748,8 +3554,8 @@ async function main() {
       assert.equal(restartHealth.ready, true)
 
       const coverageIntervals = await readCoverageIntervals(dbPath)
-      const { advanceSchedulerChunk } = await loadRuntimeOracle()
-      const oracleEngine = structuredClone(beforeBundle.engine)
+      const { advanceSchedulerChunk, dayKeyAt, nextDailyBoundaryMs } = await loadRuntimeOracle()
+      const oracleEngine = structuredClone(beforeEngine)
       oracleEngine.lastSchedulerWallMs = rewindAnchorMs
       oracleEngine.sessionCoverage = coverageIntervals
       const oracleTargetMs = rewindAnchorMs + expectedTicks * 60_000 + 1
@@ -2763,6 +3569,14 @@ async function main() {
       assert.equal(expected.ok, true)
       assert.equal(expected.ticks, expectedTicks, 'the deterministic oracle must run exactly the expected tick count')
       assert.equal(expected.catchingUp, false)
+      assert.deepEqual(expected.state.scheduledJobs, beforeEngine.scheduledJobs, 'two catch-up ticks must not complete the seeded jobs')
+      assert.deepEqual(expected.state.gameSessions, beforeEngine.gameSessions, 'two catch-up ticks must not settle the seeded sessions')
+      assert.deepEqual(expected.state.environment, beforeEngine.environment, 'two catch-up ticks must preserve the per-day environment')
+      assert.equal(expected.state.lastSchedulerWallMs, oracleTargetMs)
+      assert.equal(expected.state.lastProcessedDayBoundaryKey, beforeEngine.lastProcessedDayBoundaryKey)
+      assert.equal(expected.state.nextDailyBoundaryMs, beforeEngine.nextDailyBoundaryMs)
+      assert.equal(expected.state.lastProcessedDayBoundaryKey, dayKeyAt(expected.state.gameTimeMs, expected.state.timeZone))
+      assert.equal(expected.state.nextDailyBoundaryMs, nextDailyBoundaryMs(expected.state.gameTimeMs, expected.state.timeZone))
       const expectedGameTimeMs = beforeDb.gameTimeMs + expectedTicks * 60_000
       const expectedRevision = beforeDb.revision + 1
       const expectedEventSeq = beforeDb.eventSeq + expected.events.length
@@ -2803,17 +3617,92 @@ async function main() {
       assert.equal(projectionHash(after.right), expectedSharedHash)
       const afterExport = await owner.exportBundle()
       const afterBundle = JSON.parse(afterExport.json)
+      const afterEngine = await readCanonicalEngine(dbPath)
       assert.equal(afterBundle.engine.gameTimeMs, expectedGameTimeMs)
       assert.equal(afterBundle.authority.revision, expectedRevision)
       assert.equal(afterBundle.authority.eventSeq, expectedEventSeq)
-      assert.deepEqual(afterBundle.engine.scheduledJobs, beforeBundle.engine.scheduledJobs, 'scheduled jobs must survive restart unchanged')
-      assert.deepEqual(afterBundle.engine.gameSessions, beforeBundle.engine.gameSessions, 'game sessions must survive restart unchanged')
-      assert.equal(hash(afterBundle.engine.rng), hash(expected.state.rng), 'RNG must match the deterministic post-catch-up oracle')
+      assert.deepEqual(afterBundle.engine.scheduledJobs, expected.state.scheduledJobs, 'scheduled jobs must match the pre-restart oracle')
+      assert.deepEqual(afterBundle.engine.gameSessions, expected.state.gameSessions, 'game sessions must match the pre-restart oracle')
+      assert.deepEqual(afterBundle.engine.environment, expected.state.environment, 'per-day environment must match the pre-restart oracle')
+      assert.equal(afterBundle.engine.lastProcessedDayBoundaryKey, expected.state.lastProcessedDayBoundaryKey)
+      assert.equal(afterBundle.engine.nextDailyBoundaryMs, expected.state.nextDailyBoundaryMs)
+      assert.ok(afterBundle.engine.lastSchedulerWallMs >= expected.state.lastSchedulerWallMs, 'scheduler anchor must reach the oracle target')
+      assert.ok(afterBundle.engine.lastSchedulerWallMs <= Date.now(), 'scheduler anchor must not move into the future')
+      assert.equal(stableHash(afterBundle.engine.rng), stableHash(expected.state.rng), 'RNG must match the deterministic post-catch-up oracle')
+      assert.equal(stableHash(afterEngine.scheduledJobs), stableHash(expected.state.scheduledJobs), 'persisted scheduled_jobs must match the oracle')
+      assert.equal(stableHash(afterEngine.gameSessions), stableHash(expected.state.gameSessions), 'persisted game_sessions must match the oracle')
+      assert.equal(stableHash(afterEngine.rng), stableHash(expected.state.rng), 'persisted RNG must match the oracle')
+      assert.equal(stableHash(afterEngine.environment), stableHash(expected.state.environment), 'persisted environment must match the oracle')
+      assert.equal(afterEngine.lastProcessedDayBoundaryKey, expected.state.lastProcessedDayBoundaryKey)
+      assert.equal(afterEngine.nextDailyBoundaryMs, expected.state.nextDailyBoundaryMs)
+      assert.ok(afterEngine.lastSchedulerWallMs >= expected.state.lastSchedulerWallMs, 'scheduler anchor must advance monotonically past the oracle target')
+      assert.ok(afterEngine.lastSchedulerWallMs <= Date.now(), 'scheduler anchor must not move into the future')
+      assert.equal(afterEngine.gameTimeMs, expectedGameTimeMs, 'anchor-only scheduler passes must not advance game time')
       const activeClients = await waitFor(async () => {
         const health = await server.health()
         return health.activeClientCount === 2 ? health : null
       }, 'two active clients after deterministic restart', 10_000)
-      return {
+
+      const firstRestartCounts = await readPersistedCounts(dbPath)
+      const firstRestartRewardRows = (await readEventRows(dbPath, { type: 'reward.granted' }))
+        .filter(event => event.payload.source === 'work')
+      const firstRestartCompletionRows = (await readEventRows(dbPath, { type: 'activity.completed' }))
+        .filter(event => event.payload.kind === 'work')
+      assert.equal(firstRestartRewardRows.length, workRewardRowsBeforeRestart.length, 'seeded future work must not be rewarded during two-tick catch-up')
+      assert.equal(firstRestartCompletionRows.length, workCompletionRowsBeforeRestart.length, 'seeded future work must not complete during two-tick catch-up')
+      const afterFirstRestartOwnerFaults = await owner.websocketFaultState()
+      const afterFirstRestartPlayerFaults = await player.websocketFaultState()
+
+      // A second restart at the same persisted anchor must not replay the two
+      // committed minutes or duplicate any persisted job/session/event row.
+      await server.crash()
+      server = await new ServerProcess({ port, env: baseEnv, authToken: healthToken }).start()
+      const secondRestartHealth = await server.health()
+      const secondRestartEngine = await readCanonicalEngine(dbPath)
+      const secondRestartCounts = await readPersistedCounts(dbPath)
+      assert.equal(secondRestartHealth.ready, true)
+      assert.equal(secondRestartHealth.gameTimeMs, restartHealth.gameTimeMs, 'second restart must not catch up the same minutes again')
+      assert.equal(secondRestartHealth.revision, restartHealth.revision, 'second restart must not commit a duplicate revision')
+      assert.equal(secondRestartHealth.eventSeq, restartHealth.eventSeq, 'second restart must not commit duplicate events')
+      assert.equal(stableHash(secondRestartEngine.scheduledJobs), stableHash(afterEngine.scheduledJobs))
+      assert.equal(stableHash(secondRestartEngine.gameSessions), stableHash(afterEngine.gameSessions))
+      assert.equal(stableHash(secondRestartEngine.rng), stableHash(afterEngine.rng))
+      assert.equal(stableHash(secondRestartEngine.environment), stableHash(afterEngine.environment))
+      assert.ok(secondRestartEngine.lastSchedulerWallMs >= afterEngine.lastSchedulerWallMs, 'scheduler anchor must be monotonic across restart')
+      assert.equal(secondRestartEngine.gameTimeMs, afterEngine.gameTimeMs, 'second restart must not advance game time')
+      assert.equal(secondRestartCounts.commandRows, firstRestartCounts.commandRows, 'second restart must not duplicate command rows')
+      assert.equal(secondRestartCounts.eventRows, firstRestartCounts.eventRows, 'second restart must not duplicate event rows')
+      assert.equal(secondRestartCounts.duplicateOpIds, 0)
+      assert.equal(secondRestartCounts.duplicateEventSeqs, 0)
+      await waitFor(async () => {
+        const ownerStatus = await owner.storageStatus()
+        const playerStatus = await player.storageStatus()
+        const ownerFaults = await owner.websocketFaultState()
+        const playerFaults = await player.websocketFaultState()
+        return ownerStatus.connection === 'online'
+          && playerStatus.connection === 'online'
+          && ownerFaults.sockets > afterFirstRestartOwnerFaults.sockets
+          && playerFaults.sockets > afterFirstRestartPlayerFaults.sockets
+          ? true
+          : null
+      }, 'renderers reconnect after no-duplicate restart', 45_000)
+      const secondProjection = await waitFor(async () => {
+        const left = await owner.projection()
+        const right = await player.projection()
+        if (left === null || right === null) return null
+        return left.gameTimeMs === expectedGameTimeMs
+          && right.gameTimeMs === expectedGameTimeMs
+          && left.revision === expectedRevision
+          && right.revision === expectedRevision
+          && left.eventSeq === expectedEventSeq
+          && right.eventSeq === expectedEventSeq
+          && sameProjection(left, right)
+          ? { left, right }
+          : null
+      }, 'exact projection after no-duplicate restart', 20_000)
+      assert.equal(projectionHash(secondProjection.left), expectedSharedHash)
+
+      restartEngineStateEvidence = {
         expectedTicks,
         observedTicks,
         gameTimeBefore: beforeDb.gameTimeMs,
@@ -2825,26 +3714,50 @@ async function main() {
         eventSeqBefore: beforeDb.eventSeq,
         eventSeqAfter: restartHealth.eventSeq,
         eventSeqExpected: expectedEventSeq,
-        sharedHashBefore: hash(beforeBundle.engine.save),
+        seededJobRows: (await readScheduledJobRows(dbPath)).length,
+        seededSessionRows: beforeEngine.gameSessions.length,
+        jobsBeforeCount: beforeEngine.scheduledJobs.length,
+        sessionsBeforeCount: beforeEngine.gameSessions.length,
+        jobsAfterHash: stableHash(afterEngine.scheduledJobs),
+        jobsExpectedHash: stableHash(expected.state.scheduledJobs),
+        jobsMatchedOracle: stableHash(afterEngine.scheduledJobs) === stableHash(expected.state.scheduledJobs),
+        sessionsAfterHash: stableHash(afterEngine.gameSessions),
+        sessionsExpectedHash: stableHash(expected.state.gameSessions),
+        sessionsMatchedOracle: stableHash(afterEngine.gameSessions) === stableHash(expected.state.gameSessions),
+        rngBeforeHash: stableHash(beforeEngine.rng),
+        rngAfterHash: stableHash(afterEngine.rng),
+        rngExpectedHash: stableHash(expected.state.rng),
+        rngMatchedDeterministicOracle: stableHash(afterEngine.rng) === stableHash(expected.state.rng),
+        environmentBeforeHash: stableHash(beforeEngine.environment),
+        environmentAfterHash: stableHash(afterEngine.environment),
+        environmentExpectedHash: stableHash(expected.state.environment),
+        environmentMatchedOracle: stableHash(afterEngine.environment) === stableHash(expected.state.environment),
+        weatherKeys: Object.keys(beforeEngine.environment.weatherByDay),
+        calendarKeys: Object.keys(beforeEngine.environment.calendarByDay ?? {}),
+        dayBoundaryBeforeKey: beforeEngine.lastProcessedDayBoundaryKey,
+        dayBoundaryAfterKey: afterEngine.lastProcessedDayBoundaryKey,
+        dayBoundaryExpectedKey: expected.state.lastProcessedDayBoundaryKey,
+        dayBoundaryBeforeMs: beforeEngine.nextDailyBoundaryMs,
+        dayBoundaryAfterMs: afterEngine.nextDailyBoundaryMs,
+        dayBoundaryExpectedMs: expected.state.nextDailyBoundaryMs,
+        anchorBefore: rewindAnchorMs,
+        anchorAfter: afterEngine.lastSchedulerWallMs,
+        anchorExpected: expected.state.lastSchedulerWallMs,
+        anchorAtOrAfterOracle: afterEngine.lastSchedulerWallMs >= expected.state.lastSchedulerWallMs,
+        anchorAdvancedWithoutExtraTicks: afterEngine.gameTimeMs === expectedGameTimeMs,
+        anchorPrevious: anchorUpdate.previousAnchorMs,
+        sharedHashBefore: hash(beforeEngine.save),
         sharedHashAfter: projectionHash(after.left),
         sharedHashExpected: expectedSharedHash,
-        rngBeforeHash: hash(beforeBundle.engine.rng),
-        rngAfterHash: hash(afterBundle.engine.rng),
-        rngExpectedHash: hash(expected.state.rng),
-        rngAdvancedByPublishedTicks: hash(beforeBundle.engine.rng) !== hash(afterBundle.engine.rng),
-        rngMatchedDeterministicOracle: hash(afterBundle.engine.rng) === hash(expected.state.rng),
-        jobsBeforeHash: hash(beforeBundle.engine.scheduledJobs),
-        jobsAfterHash: hash(afterBundle.engine.scheduledJobs),
-        jobsUnchanged: hash(afterBundle.engine.scheduledJobs) === hash(beforeBundle.engine.scheduledJobs),
-        sessionsBeforeHash: hash(beforeBundle.engine.gameSessions),
-        sessionsAfterHash: hash(afterBundle.engine.gameSessions),
-        sessionsUnchanged: hash(afterBundle.engine.gameSessions) === hash(beforeBundle.engine.gameSessions),
-        rewindAnchorMs,
-        previousAnchorMs: anchorUpdate.previousAnchorMs,
-        exactComparisons: true,
+        exactJobsSessionsRngEnvironmentAnchorComparisons: true,
+        noDuplicateCatchUp: secondRestartHealth.gameTimeMs === restartHealth.gameTimeMs
+          && secondRestartHealth.revision === restartHealth.revision
+          && secondRestartHealth.eventSeq === restartHealth.eventSeq
+          && secondRestartCounts.eventRows === firstRestartCounts.eventRows,
         projectionHash: projectionHash(after.left),
         activeClientCount: activeClients.activeClientCount,
       }
+      return restartEngineStateEvidence
     })
 
     await step(SCENARIO_SURVIVOR_RESTART, async () => {
@@ -3355,6 +4268,201 @@ async function main() {
           sharedHashMatchesOracle: hash(afterEngine.save) === hash(expected.state.save),
           zeroAuthenticatedClients: replayHealth.activeClientCount === 0,
         }
+      } finally {
+        await fixture.cleanup()
+      }
+    })
+
+    await step(SCENARIO_TIMED_BOTH_RENDERERS, async () => {
+      const fixture = await createClockedServerFixture(root, 'timed-work-both-renderers', baseEnv, {
+        clockMs: TIME_FIXTURE_CLOCK_MS,
+        advanceWhileEmpty: true,
+        withPlayer: true,
+      })
+      try {
+        const owner = fixture.app
+        const player = fixture.player
+        let server = fixture.server
+        const isStartEvent = event => event?.type === 'activity.started'
+          && event.payload?.kind === 'work'
+          && event.payload?.activityId === 'bz'
+        const isRewardEvent = event => event?.type === 'reward.granted'
+          && event.payload?.source === 'work'
+        const isCompletionEvent = event => event?.type === 'activity.completed'
+          && event.payload?.kind === 'work'
+          && event.payload?.activityId === 'bz'
+        const waitCapturedStart = async (app, label) => await waitFor(async () => {
+          const capture = await app.projectionEventCapture()
+          const matches = capture?.events.filter(isStartEvent) ?? []
+          return matches.length === 1 ? matches[0] : null
+        }, label, 20_000)
+        const waitCapturedCompletion = async (app, label) => await waitFor(async () => {
+          const capture = await app.projectionEventCapture()
+          if (capture === null) return null
+          const starts = capture.events.filter(isStartEvent)
+          const rewards = capture.events.filter(isRewardEvent)
+          const completions = capture.events.filter(isCompletionEvent)
+          if (starts.length !== 1 || rewards.length !== 1 || completions.length !== 1) return null
+          const projection = await app.projection()
+          if (projection === null
+            || projection.gameTimeMs !== dueAtGameMs
+            || projection.shared?.activeOption?.work !== null) return null
+          return {
+            projection,
+            start: starts[0],
+            reward: rewards[0],
+            completion: completions[0],
+            rewardCount: rewards.length,
+            completionCount: completions.length,
+            startCount: starts.length,
+            deliveries: capture.deliveries,
+          }
+        }, label, 30_000)
+
+        await owner.installProjectionEventCapture()
+        await player.installProjectionEventCapture()
+        const beforeWork = await ensureWorkReady(owner, 'timed-work-both-renderers')
+        const taskBefore = taskCounter(beforeWork.shared, 'Work')
+        const ybBefore = Number(beforeWork.shared.petInfo.yb)
+        const started = await owner.command(
+          { type: 'job.startWork', payload: { jobId: 'bz' } },
+          'timed-work-both-renderers-start',
+        )
+        assert.equal(started.status, 'applied', 'timed work start rejected: ' + JSON.stringify(started.error))
+        const jobId = Number(started.result.jobId)
+        const dueAtGameMs = Number(started.result.dueAtGameMs)
+        assert.equal(Number.isSafeInteger(jobId), true)
+        assert.equal(Number.isSafeInteger(dueAtGameMs), true)
+
+        const jobRowsAtStart = (await readScheduledJobRows(fixture.dbPath)).filter(job => job.id === jobId)
+        assert.equal(jobRowsAtStart.length, 1, 'timed work must persist exactly one job row')
+        assert.equal(jobRowsAtStart[0].status, 'pending')
+        assert.equal(jobRowsAtStart[0].dueAtGameMs, dueAtGameMs)
+        assert.equal(jobRowsAtStart[0].payload.activityId, 'bz')
+        assert.equal(jobRowsAtStart[0].payload.startedAtGameMs + 30 * 60_000, dueAtGameMs)
+
+        const ownerStarted = await waitCapturedStart(owner, 'owner renderer observes the server work deadline')
+        const playerStarted = await waitCapturedStart(player, 'player renderer observes the server work deadline')
+        assert.equal(Number(ownerStarted.payload.dueAtGameMs), dueAtGameMs)
+        assert.equal(Number(playerStarted.payload.dueAtGameMs), dueAtGameMs)
+        assert.equal(Number(playerStarted.payload.dueAtGameMs), jobRowsAtStart[0].dueAtGameMs)
+        assert.equal(playerStarted.eventSeq, ownerStarted.eventSeq, 'both renderers must observe the same ordered start event')
+        const active = await waitConverged(owner, player, started.revision, 20_000)
+        assert.equal(active.left.shared.activeOption.work, 'bz')
+        assert.equal(active.right.shared.activeOption.work, 'bz')
+
+        await fixture.setClock(dueAtGameMs)
+        const ownerCompleted = await waitCapturedCompletion(owner, 'owner renderer observes exactly one work completion and reward')
+        const playerCompleted = await waitCapturedCompletion(player, 'player renderer observes exactly one work completion and reward')
+        assert.equal(hash(ownerCompleted.reward.payload), hash(playerCompleted.reward.payload), 'both renderers must observe the same reward payload')
+        assert.equal(hash(ownerCompleted.completion.payload), hash(playerCompleted.completion.payload), 'both renderers must observe the same completion payload')
+        assert.equal(ownerCompleted.reward.eventSeq, playerCompleted.reward.eventSeq)
+        assert.equal(ownerCompleted.completion.eventSeq, playerCompleted.completion.eventSeq)
+        assert.equal(ownerCompleted.completion.gameTimeMs, dueAtGameMs)
+        assert.equal(playerCompleted.completion.gameTimeMs, dueAtGameMs)
+
+        const ybReward = Number(ownerCompleted.reward.payload.yb)
+        assert.ok(Number.isSafeInteger(ybReward) && ybReward > 0)
+        const expectedYb = ybBefore + ybReward
+        const expectedTaskWork = taskBefore + 1
+        for (const [rendererName, state] of [['owner', ownerCompleted], ['player', playerCompleted]]) {
+          assert.equal(Number(state.projection.shared.petInfo.yb), expectedYb, rendererName + ' projection must receive the reward delta exactly once')
+          assert.equal(taskCounter(state.projection.shared, 'Work'), expectedTaskWork, rendererName + ' projection must receive the work counter exactly once')
+          assert.equal(state.projection.shared.activeOption.work, null)
+          assert.equal(state.projection.gameTimeMs, dueAtGameMs)
+        }
+
+        const completedJobRows = (await readScheduledJobRows(fixture.dbPath)).filter(job => job.id === jobId)
+        assert.equal(completedJobRows.length, 1)
+        assert.equal(completedJobRows[0].status, 'completed')
+        const rewardRows = (await readEventRows(fixture.dbPath, { type: 'reward.granted' }))
+          .filter(event => event.payload.source === 'work')
+        const completionRows = (await readEventRows(fixture.dbPath, { type: 'activity.completed' }))
+          .filter(event => event.payload.kind === 'work' && event.payload.activityId === 'bz')
+        assert.equal(rewardRows.length, 1, 'server SQLite must contain exactly one work reward event')
+        assert.equal(completionRows.length, 1, 'server SQLite must contain exactly one work completion event')
+        assert.equal(rewardRows[0].gameTimeMs, dueAtGameMs)
+        assert.equal(completionRows[0].gameTimeMs, dueAtGameMs)
+        const afterEngine = await readCanonicalEngine(fixture.dbPath)
+        assert.equal(Number(afterEngine.save.petInfo.yb), expectedYb)
+        assert.equal(taskCounter(afterEngine.save, 'Work'), expectedTaskWork)
+        assert.equal(afterEngine.save.activeOption.work, null)
+        assert.equal(afterEngine.scheduledJobs.find(job => job.id === jobId)?.status, 'completed')
+
+        // Repeat the catch-up after a real restart. Both renderers must observe
+        // the already-completed state with no second reward, event or job.
+        await owner.close()
+        await player.close()
+        await waitForClients(server, 0, 'timed-work-both-renderers zero clients before restart')
+        await fixture.stopServer()
+        await fixture.setClock(dueAtGameMs + 30 * 60_000)
+        server = await fixture.startServer()
+        const replayHealth = await server.health()
+        assert.equal(replayHealth.ready, true)
+        assert.equal(replayHealth.activeClientCount, 0)
+        const replayRewardRows = (await readEventRows(fixture.dbPath, { type: 'reward.granted' }))
+          .filter(event => event.payload.source === 'work')
+        const replayCompletionRows = (await readEventRows(fixture.dbPath, { type: 'activity.completed' }))
+          .filter(event => event.payload.kind === 'work' && event.payload.activityId === 'bz')
+        const replayJobRows = (await readScheduledJobRows(fixture.dbPath)).filter(job => job.id === jobId)
+        assert.equal(replayRewardRows.length, 1, 'replayed catch-up must not grant work reward twice')
+        assert.equal(replayCompletionRows.length, 1, 'replayed catch-up must not emit a second completion event')
+        assert.equal(replayJobRows.length, 1, 'replayed catch-up must not insert a duplicate job row')
+        assert.equal(replayJobRows[0].status, 'completed')
+
+        await fixture.relaunchApp()
+        await fixture.relaunchPlayerApp()
+        await owner.waitOnline(30_000)
+        await player.waitOnline(30_000)
+        const replayProjection = await waitFor(async () => {
+          const left = await owner.projection()
+          const right = await player.projection()
+          if (left === null || right === null) return null
+          if (Number(left.shared?.petInfo?.yb) !== expectedYb) return null
+          if (Number(right.shared?.petInfo?.yb) !== expectedYb) return null
+          if (taskCounter(left.shared, 'Work') !== expectedTaskWork) return null
+          if (taskCounter(right.shared, 'Work') !== expectedTaskWork) return null
+          if (left.shared?.activeOption?.work !== null || right.shared?.activeOption?.work !== null) return null
+          return sameProjection(left, right) ? { left, right } : null
+        }, 'both renderers observe no duplicate work credit after restart', 30_000)
+        assert.equal(Number(replayProjection.left.shared.petInfo.yb), expectedYb)
+        assert.equal(Number(replayProjection.right.shared.petInfo.yb), expectedYb)
+        assert.equal(taskCounter(replayProjection.left.shared, 'Work'), expectedTaskWork)
+        assert.equal(taskCounter(replayProjection.right.shared, 'Work'), expectedTaskWork)
+        const finalRewardRows = (await readEventRows(fixture.dbPath, { type: 'reward.granted' }))
+          .filter(event => event.payload.source === 'work')
+        const finalCompletionRows = (await readEventRows(fixture.dbPath, { type: 'activity.completed' }))
+          .filter(event => event.payload.kind === 'work' && event.payload.activityId === 'bz')
+        assert.equal(finalRewardRows.length, 1)
+        assert.equal(finalCompletionRows.length, 1)
+
+        timedBothRendererEvidence = {
+          bothRenderersSawServerDeadline: true,
+          ownerDueAtGameMs: Number(ownerStarted.payload.dueAtGameMs),
+          playerDueAtGameMs: Number(playerStarted.payload.dueAtGameMs),
+          jobRowDueAtGameMs: jobRowsAtStart[0].dueAtGameMs,
+          sameStartEventSeq: ownerStarted.eventSeq === playerStarted.eventSeq,
+          ownerStartEventCount: ownerCompleted.startCount,
+          playerStartEventCount: playerCompleted.startCount,
+          ownerRewardEventCount: ownerCompleted.rewardCount,
+          playerRewardEventCount: playerCompleted.rewardCount,
+          ownerCompletionEventCount: ownerCompleted.completionCount,
+          playerCompletionEventCount: playerCompleted.completionCount,
+          exactlyOneCompletionPerRenderer: true,
+          sameRewardPayloadInBothRenderers: hash(ownerCompleted.reward.payload) === hash(playerCompleted.reward.payload),
+          ybBefore,
+          ybReward,
+          ybAfterBothRenderers: Number(replayProjection.left.shared.petInfo.yb),
+          taskWorkBefore: taskBefore,
+          taskWorkAfterBothRenderers: taskCounter(replayProjection.left.shared, 'Work'),
+          serverRewardEventCount: rewardRows.length,
+          serverCompletionEventCount: completionRows.length,
+          replayRewardEventCount: finalRewardRows.length,
+          replayCompletionEventCount: finalCompletionRows.length,
+          duplicateCreditAfterRestart: finalRewardRows.length !== 1 || Number(replayProjection.left.shared.petInfo.yb) !== expectedYb,
+          bothRenderersConvergedAfterRestart: sameProjection(replayProjection.left, replayProjection.right),
+        }
+        return timedBothRendererEvidence
       } finally {
         await fixture.cleanup()
       }
@@ -4777,6 +5885,43 @@ async function main() {
     report.evidence.playerPid = player.pid
     report.evidence.rendererProof = rendererProof
     report.evidence.websocket = websocketEvidence
+    assert.equal(timedBothRendererEvidence?.bothRenderersSawServerDeadline, true, 'timed work must be observed by both renderers')
+    assert.equal(timedBothRendererEvidence?.exactlyOneCompletionPerRenderer, true, 'each renderer must observe exactly one work completion')
+    assert.equal(timedBothRendererEvidence?.ownerStartEventCount, 1, 'owner renderer must observe exactly one work start event')
+    assert.equal(timedBothRendererEvidence?.playerStartEventCount, 1, 'player renderer must observe exactly one work start event')
+    assert.equal(timedBothRendererEvidence?.ownerRewardEventCount, 1, 'owner renderer must observe exactly one work reward event')
+    assert.equal(timedBothRendererEvidence?.playerRewardEventCount, 1, 'player renderer must observe exactly one work reward event')
+    assert.equal(timedBothRendererEvidence?.ownerCompletionEventCount, 1, 'owner renderer must observe exactly one work completion event')
+    assert.equal(timedBothRendererEvidence?.playerCompletionEventCount, 1, 'player renderer must observe exactly one work completion event')
+    assert.equal(timedBothRendererEvidence?.duplicateCreditAfterRestart, false, 'restart must not duplicate work credit')
+    assert.equal(sessionGradingEvidence?.examPassed, true, 'stored exam answer key must grade as passed')
+    assert.equal(sessionGradingEvidence?.examCorrectCount, 3, 'stored exam answer key must grade all three questions correctly')
+    assert.equal(sessionGradingEvidence?.examTotal, 3, 'exam grading must report the source question total')
+    assert.equal(sessionGradingEvidence?.examStudyDelta, 1, 'passing exam must award one study level exactly once')
+    assert.equal(sessionGradingEvidence?.gameRoundDelta, 1, 'game reward must increment GameRound exactly once')
+    assert.equal(sessionGradingEvidence?.gameCounterDelta, 2, 'game reward must increment Game by the elapsed minutes')
+    assert.equal(sessionGradingEvidence?.diudiuleYbDelta, 1, 'diudiule reward must credit exactly one yuanbao')
+    assert.equal(sessionGradingEvidence?.islandCorrect, true, 'stored island answer key must grade as correct')
+    assert.equal(sessionGradingEvidence?.islandRewardEventCount, 1, 'island quiz must grant exactly one reward event')
+    assert.equal(sessionGradingEvidence?.answerKeysProjected, false, 'answer keys must never be projected')
+    assert.equal(sessionGradingEvidence?.answerKeysStoredServerSide, true, 'answer keys must remain server-side for grading')
+    assert.equal(restartEngineStateEvidence?.jobsMatchedOracle, true, 'restart must preserve scheduled jobs exactly')
+    assert.equal(restartEngineStateEvidence?.sessionsMatchedOracle, true, 'restart must preserve game sessions exactly')
+    assert.equal(restartEngineStateEvidence?.rngMatchedDeterministicOracle, true, 'restart must preserve RNG exactly')
+    assert.equal(restartEngineStateEvidence?.environmentMatchedOracle, true, 'restart must preserve per-day environment exactly')
+    assert.equal(restartEngineStateEvidence?.dayBoundaryAfterKey, restartEngineStateEvidence?.dayBoundaryExpectedKey)
+    assert.equal(restartEngineStateEvidence?.dayBoundaryAfterMs, restartEngineStateEvidence?.dayBoundaryExpectedMs)
+    assert.equal(restartEngineStateEvidence?.anchorAtOrAfterOracle, true, 'restart anchor must reach the oracle target without extra ticks')
+    assert.equal(restartEngineStateEvidence?.anchorAdvancedWithoutExtraTicks, true, 'anchor-only passes must not advance canonical game time')
+    assert.equal(restartEngineStateEvidence?.noDuplicateCatchUp, true, 'second restart must not duplicate catch-up')
+    assert.equal(importEngineStateEvidence?.rngPreserved, true, 'portable import must preserve source RNG')
+    assert.equal(importEngineStateEvidence?.jobsPreserved, true, 'portable import must preserve source jobs with clamp-adjusted deadlines')
+    assert.equal(importEngineStateEvidence?.sessionsPreserved, true, 'portable import must preserve and rebind source sessions')
+    assert.equal(importEngineStateEvidence?.environmentPreserved, true, 'portable import must preserve per-day environment')
+    assert.equal(importEngineStateEvidence?.dayBoundaryPreserved, true, 'portable import must preserve clamped day-boundary metadata')
+    assert.equal(importEngineStateEvidence?.anchorPreserved, true, 'portable import must persist the effective anchor')
+    assert.equal(importEngineStateEvidence?.sessionsReboundToDestination, true, 'portable import must rebind local sessions to the destination')
+    assert.equal(importEngineStateEvidence?.noDoubleCatchUp, true, 'portable import restart must not double catch-up')
     report.evidence.scenarios = {
       ownerPairViaRendererStorage: true,
       playerPairAndServerModeViaRendererStorage: true,
@@ -4794,6 +5939,19 @@ async function main() {
       deterministicRestartExact: true,
       revokedRendererReconnectRejected: true,
       timedWorkServerDeadlineExact: true,
+      timedWorkSeenByBothRenderers: timedBothRendererEvidence.bothRenderersSawServerDeadline,
+      sessionGradingTaskRewardExact: sessionGradingEvidence.examPassed
+        && sessionGradingEvidence.gameRoundDelta === 1
+        && sessionGradingEvidence.islandCorrect,
+      restartEngineStatePreserved: restartEngineStateEvidence.jobsMatchedOracle
+        && restartEngineStateEvidence.sessionsMatchedOracle
+        && restartEngineStateEvidence.rngMatchedDeterministicOracle
+        && restartEngineStateEvidence.environmentMatchedOracle,
+      portableImportEngineStatePreserved: importEngineStateEvidence.rngPreserved
+        && importEngineStateEvidence.jobsPreserved
+        && importEngineStateEvidence.sessionsPreserved
+        && importEngineStateEvidence.environmentPreserved
+        && importEngineStateEvidence.anchorPreserved,
       advanceWhileEmptyZeroClientExact: true,
       onlineTimeSigninCoverageSplit: true,
       localAuthorityDetachResumeFenced: true,
@@ -4819,6 +5977,28 @@ async function main() {
     report.evidence.rendererMutationBlockedCovered = true
     report.evidence.secretBoundaryAuditCovered = true
     report.evidence.answerKeysAbsent = true
+    report.evidence.timedWorkBothRenderersCovered = timedBothRendererEvidence.bothRenderersSawServerDeadline
+      && timedBothRendererEvidence.ownerRewardEventCount === 1
+      && timedBothRendererEvidence.playerRewardEventCount === 1
+    report.evidence.sessionGradingTaskRewardExactCovered = sessionGradingEvidence.examPassed
+      && sessionGradingEvidence.gameRoundDelta === 1
+      && sessionGradingEvidence.gameCounterDelta === 2
+      && sessionGradingEvidence.diudiuleYbDelta === 1
+      && sessionGradingEvidence.islandCorrect
+    report.evidence.answerKeyServerSideGradingCovered = sessionGradingEvidence.examCorrectCount === 3
+      && sessionGradingEvidence.answerKeysStoredServerSide === true
+      && sessionGradingEvidence.answerKeysProjected === false
+    report.evidence.restartEngineStatePreservedCovered = restartEngineStateEvidence.jobsMatchedOracle
+      && restartEngineStateEvidence.sessionsMatchedOracle
+      && restartEngineStateEvidence.rngMatchedDeterministicOracle
+      && restartEngineStateEvidence.environmentMatchedOracle
+    report.evidence.portableImportEngineStatePreservedCovered = importEngineStateEvidence.rngPreserved
+      && importEngineStateEvidence.jobsPreserved
+      && importEngineStateEvidence.sessionsPreserved
+      && importEngineStateEvidence.environmentPreserved
+      && importEngineStateEvidence.anchorPreserved
+    report.evidence.noDuplicateCatchUpCovered = restartEngineStateEvidence.noDuplicateCatchUp === true
+      && importEngineStateEvidence.noDoubleCatchUp === true
     report.evidence.hygiene = {
       pairingCodesAbsent: true,
       rawDeviceIdsAbsent: true,

@@ -9,7 +9,7 @@
 import { mkdir, rm } from 'node:fs/promises'
 
 /** The current C12 E2E contains all mandatory §16.6 scenarios plus the setup/teardown steps. */
-export const E2E_MIN_STEPS = 34
+export const E2E_MIN_STEPS = 36
 export const EVIDENCE_MAX_AGE_MS = 30 * 60_000
 export const EVIDENCE_FUTURE_SKEW_MS = 2 * 60_000
 const GENERATED_ACCEPTANCE_EVIDENCE_PREFIX = 'docs/superpowers/acceptance/artifacts/'
@@ -18,10 +18,10 @@ const GENERATED_TEMP_PATH_PATTERN = /^out\/(?:docker-smoke-|compose-smoke-|proxy
 export const REQUIRED_E2E_SCENARIO_NAMES = Object.freeze([
   'two-renderer competing actions reject exactly one canonical mutation',
   'game diudiule exam island-quiz session token abuse is rejected without answer keys',
-  'fresh-host portable import clamps and preserves canonical projection',
+  'fresh-host portable import preserves engine jobs sessions rng environment and anchor without double catch-up',
   'connected reset reopens exact survivor coverage',
   'startup crash repair uses heartbeat grace and reconnects without duplicate events',
-  'deterministic restart catch-up has exact state and active clients',
+  'deterministic restart preserves engine jobs sessions rng environment and anchor without duplicate catch-up',
   'revoked renderer reconnect is rejected after relaunch',
   'feed latency p95 across ten renderer commands',
   'timed work completes exactly once at server-owned deadline across restart',
@@ -32,6 +32,8 @@ export const REQUIRED_E2E_SCENARIO_NAMES = Object.freeze([
   'advanceWhileEmpty true zero-client reconnect applies deterministic random events exactly once',
   'renderer direct mutation and legacy SavePatch cannot change canonical state',
   'server SQLite device fields logs and projections exclude never-upload secrets and local-only fields',
+  'timed work deadline and completion are observed by both renderers exactly once across restart',
+  'exam game diudiule island grading task and reward deltas are exact once without answer-key exposure',
 ])
 export const REQUIRED_E2E_EVIDENCE_FLAGS = [
   'twoProcesses',
@@ -58,6 +60,12 @@ export const REQUIRED_E2E_EVIDENCE_FLAGS = [
   'rendererMutationBlockedCovered',
   'secretBoundaryAuditCovered',
   'answerKeysAbsent',
+  'timedWorkBothRenderersCovered',
+  'sessionGradingTaskRewardExactCovered',
+  'answerKeyServerSideGradingCovered',
+  'restartEngineStatePreservedCovered',
+  'portableImportEngineStatePreservedCovered',
+  'noDuplicateCatchUpCovered',
 ]
 export const REQUIRED_DOCKER_EVIDENCE_FLAGS = [
   'imageBuilt',

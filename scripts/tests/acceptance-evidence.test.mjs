@@ -20,7 +20,7 @@ const REV = 'a'.repeat(40)
 const startedAt = new Date(NOW - 120_000).toISOString()
 const finishedAt = new Date(NOW - 1_000).toISOString()
 
-function e2eSteps(count = 34) {
+function e2eSteps(count = 36) {
   const required = REQUIRED_E2E_SCENARIO_NAMES.map((name, index) => ({
     name,
     status: 'pass',
@@ -66,7 +66,13 @@ function e2eReport() {
       rendererMutationBlockedCovered: true,
       secretBoundaryAuditCovered: true,
       answerKeysAbsent: true,
-      stepCount: 34,
+      timedWorkBothRenderersCovered: true,
+      sessionGradingTaskRewardExactCovered: true,
+      answerKeyServerSideGradingCovered: true,
+      restartEngineStatePreservedCovered: true,
+      portableImportEngineStatePreservedCovered: true,
+      noDuplicateCatchUpCovered: true,
+      stepCount: 36,
       rendererProof: {
         electronMainPidsDistinct: true,
         browserWindowCount: 2,
@@ -151,10 +157,10 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
     ['missing finishedAt', () => ({ ...e2eReport(), finishedAt: undefined }), /valid finishedAt/],
     ['stale finishedAt', () => ({ ...e2eReport(), finishedAt: new Date(NOW - 31 * 60_000).toISOString() }), /stale/],
     ['future finishedAt', () => ({ ...e2eReport(), finishedAt: new Date(NOW + 3 * 60_000).toISOString() }), /future/],
-    ['too few steps', () => ({ ...e2eReport(), steps: e2eSteps(33) }), /minimum is 34/],
+    ['too few steps', () => ({ ...e2eReport(), steps: e2eSteps(35) }), /minimum is 36/],
     ['duplicate step names', () => {
       const report = e2eReport()
-      report.steps = Array.from({ length: 34 }, () => ({ name: 'same', status: 'pass', durationMs: 1 }))
+      report.steps = Array.from({ length: 36 }, () => ({ name: 'same', status: 'pass', durationMs: 1 }))
       return report
     }, /unique named steps/],
     ['missing mandatory scenario', () => {
@@ -235,6 +241,31 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
       delete report.evidence.answerKeysAbsent
       return report
     }, /answerKeysAbsent/],
+    ['timed two-renderer evidence not proven', () => {
+      const report = e2eReport()
+      report.evidence.timedWorkBothRenderersCovered = false
+      return report
+    }, /timedWorkBothRenderersCovered/],
+    ['grading evidence not proven', () => {
+      const report = e2eReport()
+      delete report.evidence.sessionGradingTaskRewardExactCovered
+      return report
+    }, /sessionGradingTaskRewardExactCovered/],
+    ['restart engine preservation not proven', () => {
+      const report = e2eReport()
+      report.evidence.restartEngineStatePreservedCovered = false
+      return report
+    }, /restartEngineStatePreservedCovered/],
+    ['portable import engine preservation not proven', () => {
+      const report = e2eReport()
+      delete report.evidence.portableImportEngineStatePreservedCovered
+      return report
+    }, /portableImportEngineStatePreservedCovered/],
+    ['no duplicate catch-up not proven', () => {
+      const report = e2eReport()
+      report.evidence.noDuplicateCatchUpCovered = false
+      return report
+    }, /noDuplicateCatchUpCovered/],
     ['missing real Electron evidence', () => {
       const report = e2eReport()
       delete report.evidence.realElectron
@@ -272,7 +303,7 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
     }, /preloadApiExposed/],
     ['stepCount mismatch', () => {
       const report = e2eReport()
-      report.evidence.stepCount = 33
+      report.evidence.stepCount = 35
       return report
     }, /stepCount/],
     ['websocket proof below two clients', () => {
