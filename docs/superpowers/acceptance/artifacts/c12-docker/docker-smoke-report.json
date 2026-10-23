@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "startedAt": "2026-10-23T00:56:20.692Z",
+  "codeRevision": "baf968389fbe1bb1111edd32c43bc87fb0337844",
+  "result": "PASS",
+  "image": "qqpet-server:smoke-27342-1792716980692",
+  "evidence": {
+    "imageBuilt": true,
+    "containerStarted": true,
+    "readyzReady": true,
+    "journalMode": "wal",
+    "synchronous": "full",
+    "nonRoot": true,
+    "uid": 1000,
+    "backupCreated": true,
+    "backupContentAsserted": true,
+    "restoreSucceeded": true,
+    "restoreContentMatched": true,
+    "postRestoreReadyz": true,
+    "teardown": true,
+    "initializedPetId": "default",
+    "initialAuthorityId": "65df4f81-e808-4ed0-a98a-c998d7c8a32c",
+    "backupRevision": 0,
+    "backupSaveSha256": "cc82c3fb95be5a1e4e61cb6a0514d62dc70c0363c7e9e1fc046b401d8ea55d26",
+    "postBackupRevision": 1000,
+    "restoredAuthorityId": "c16cfc47-c9b2-4b2f-af76-0146313dcb50",
+    "restoreGeneration": 1,
+    "postRestoreJournalMode": "wal",
+    "postRestoreSynchronous": "full"
+  },
+  "finishedAt": "2026-10-23T00:56:38.136Z"
+}

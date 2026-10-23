@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "startedAt": "2026-10-23T00:56:38.257Z",
+  "codeRevision": "baf968389fbe1bb1111edd32c43bc87fb0337844",
+  "result": "PASS",
+  "serverImage": "qqpet-server:proxy-smoke-28479-1792716998257",
+  "nginxImage": "nginx:1.27-alpine",
+  "evidence": {
+    "tlsTerminated": true,
+    "nginxProxy": true,
+    "webSocketUpgrade": true,
+    "authenticatedOverWss": true,
+    "syncAliasUpgrade": true,
+    "syncAliasAuthenticated": true,
+    "healthRoute": true,
+    "healthzRoute": true,
+    "readyzRoute": true,
+    "v1SyncRoute": true,
+    "syncRoute": true,
+    "imageBuilt": true,
+    "initializedPetId": "default",
+    "containerStarted": true,
+    "upstreamJournalMode": "wal",
+    "upstreamSynchronous": "full",
+    "tlsProtocol": "TLSv1.3",
+    "syncAliasDeviceId": "64f00720-365f-4a0b-ad3e-f873c7830cc0",
+    "teardown": true
+  },
+  "finishedAt": "2026-10-23T00:56:45.963Z"
+}

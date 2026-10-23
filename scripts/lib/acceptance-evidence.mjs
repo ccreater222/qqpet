@@ -8,10 +8,20 @@
  */
 import { mkdir, rm } from 'node:fs/promises'
 
-/** The current C12 E2E contains at least 15 substantive named scenarios. */
-export const E2E_MIN_STEPS = 15
+/** The current C12 E2E contains all mandatory §16.6 scenarios plus the setup/teardown steps. */
+export const E2E_MIN_STEPS = 26
 export const EVIDENCE_MAX_AGE_MS = 30 * 60_000
 export const EVIDENCE_FUTURE_SKEW_MS = 2 * 60_000
+export const REQUIRED_E2E_SCENARIO_NAMES = Object.freeze([
+  'two-renderer competing actions reject exactly one canonical mutation',
+  'game diudiule exam island-quiz session token abuse is rejected without answer keys',
+  'fresh-host portable import clamps and preserves canonical projection',
+  'connected reset reopens exact survivor coverage',
+  'startup crash repair uses heartbeat grace and reconnects without duplicate events',
+  'deterministic restart catch-up has exact state and active clients',
+  'revoked renderer reconnect is rejected after relaunch',
+  'feed latency p95 across ten renderer commands',
+])
 export const REQUIRED_E2E_EVIDENCE_FLAGS = [
   'twoProcesses',
   'realStandaloneServer',
@@ -20,6 +30,15 @@ export const REQUIRED_E2E_EVIDENCE_FLAGS = [
   'realRenderer',
   'rendererCoverage',
   'guiCoverage',
+  'competingActionsCovered',
+  'sessionTokenAbuseCovered',
+  'freshHostPortableImportCovered',
+  'connectedCoverageReopenCovered',
+  'startupCrashRepairCovered',
+  'deterministicRestartCovered',
+  'revokedReconnectCovered',
+  'feedLatencyP95Covered',
+  'answerKeysAbsent',
 ]
 export const REQUIRED_DOCKER_EVIDENCE_FLAGS = [
   'imageBuilt',
@@ -64,7 +83,7 @@ function validateCommon(report, options = {}) {
   const parsed = objectValue(report)
   if (parsed === null) {
     errors.push(kind + ' report is missing or not a JSON object')
-    return { errors, report: null, finishedAtMs: null }
+    return { errors, report: null, evidence: null, finishedAtMs: null }
   }
 
   if (parsed.result !== 'PASS') {
@@ -129,6 +148,15 @@ export function validateE2EReport(report, options = {}) {
       || String(step.status).toLowerCase() !== 'pass')
     if (failedSteps.length > 0) {
       errors.push('E2E report contains ' + failedSteps.length + ' step(s) that are not pass')
+    }
+    const stepByName = new Map(namedSteps.map(step => [step.name.trim(), step]))
+    for (const name of REQUIRED_E2E_SCENARIO_NAMES) {
+      const required = stepByName.get(name)
+      if (required === undefined) {
+        errors.push('E2E report is missing mandatory scenario "' + name + '"')
+      } else if (String(required.status).toLowerCase() !== 'pass') {
+        errors.push('E2E mandatory scenario "' + name + '" did not pass')
+      }
     }
     for (const step of namedSteps) {
       if (Number.isFinite(step.durationMs) === false || step.durationMs < 0) {

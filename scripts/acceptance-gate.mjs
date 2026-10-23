@@ -287,6 +287,15 @@ async function main() {
       + String(e2eReport.evidence?.rendererProof?.browserWindowCount ?? 'missing') + '` / `'
       + String(e2eReport.evidence?.rendererProof?.rendererProcessCount ?? 'missing') + '`')
     lines.push('- Evidence step count: `' + String(e2eReport.evidence?.stepCount ?? 'missing') + '`')
+    lines.push('- Competing actions covered: `' + String(e2eReport.evidence?.competingActionsCovered === true) + '`')
+    lines.push('- Session token abuse covered: `' + String(e2eReport.evidence?.sessionTokenAbuseCovered === true) + '`')
+    lines.push('- Fresh-host portable import covered: `' + String(e2eReport.evidence?.freshHostPortableImportCovered === true) + '`')
+    lines.push('- Connected coverage reopen covered: `' + String(e2eReport.evidence?.connectedCoverageReopenCovered === true) + '`')
+    lines.push('- Startup crash repair covered: `' + String(e2eReport.evidence?.startupCrashRepairCovered === true) + '`')
+    lines.push('- Deterministic restart catch-up covered: `' + String(e2eReport.evidence?.deterministicRestartCovered === true) + '`')
+    lines.push('- Revoked reconnect rejection covered: `' + String(e2eReport.evidence?.revokedReconnectCovered === true) + '`')
+    lines.push('- Feed latency p95 covered: `' + String(e2eReport.evidence?.feedLatencyP95Covered === true) + '`')
+    lines.push('- Answer keys absent: `' + String(e2eReport.evidence?.answerKeysAbsent === true) + '`')
     lines.push('')
     lines.push(markdownRow(['Scenario', 'Status', 'Duration']))
     lines.push(markdownRow(['---', '---', '---:']))
@@ -306,6 +315,14 @@ async function main() {
       'canonical feed from owner renderer reaches player renderer within 3s',
       'duplicate opId through renderer is idempotent',
       'dropped projection frame triggers renderer revision-gap resync',
+      'two-renderer competing actions reject exactly one canonical mutation',
+      'game diudiule exam island-quiz session token abuse is rejected without answer keys',
+      'fresh-host portable import clamps and preserves canonical projection',
+      'connected reset reopens exact survivor coverage',
+      'startup crash repair uses heartbeat grace and reconnects without duplicate events',
+      'deterministic restart catch-up has exact state and active clients',
+      'revoked renderer reconnect is rejected after relaunch',
+      'feed latency p95 across ten renderer commands',
       'owner detach then resume restores authority and both renderer projections converge',
       'device revoke disconnects player renderer and forces read-only',
       'real BrowserWindow/preload/renderer proof and evidence hygiene',

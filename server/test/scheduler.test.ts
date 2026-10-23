@@ -644,6 +644,7 @@ test('portable import rejects out-of-bounds anchors by default and explicit clam
 
   const accepted = await sendCommand(owner, 'import-clamp', { type: 'admin.importPortableBundle', payload: { bundle, allowClamp: true, rebindLocalSessions: true } })
   assert.equal(accepted.status, 'applied')
+  assert.equal((accepted.result as { importClamped?: boolean } | undefined)?.importClamped, true)
   const imported = canonical(h)
   assert.equal(imported.engine.importClamped, true)
   const skipped = imported.engine.clockSkippedMs
@@ -940,6 +941,7 @@ test('future-skewed imports use wall now without backfill and beyond-window impo
   const unchanged = canonical(h)
   const clamped = await sendCommand(owner, 'import-far-future-clamp', { type: 'admin.importPortableBundle', payload: { bundle: farFuture, allowClamp: true } })
   assert.equal(clamped.status, 'applied')
+  assert.equal((clamped.result as { importClamped?: boolean } | undefined)?.importClamped, true)
   const clampedState = canonical(h)
   assert.equal(clampedState.engine.importClamped, true)
   assert.equal(clampedState.engine.clockSkippedMs, clock.now() - (clock.now() + 60 * 60_000))

@@ -161,6 +161,7 @@ export function planPortableImport(options: ImportPlanOptions): ImportPlanResult
     engine.lastProcessedDayBoundaryKey = dayKeyAt(engine.gameTimeMs, engine.timeZone)
     engine.nextDailyBoundaryMs = nextDailyBoundaryMs(engine.gameTimeMs, engine.timeZone)
     engine.save.nowTimeLine = Math.floor(engine.gameTimeMs / 1000)
+    importClamped = true
     engine.importClamped = true
     engine.clockSkippedMs = clockSkippedMs
   } else if (importedAnchor > wallNowMs) {

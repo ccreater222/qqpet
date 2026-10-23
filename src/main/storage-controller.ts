@@ -590,6 +590,9 @@ export class DesktopStorageController {
     this.pairedFlag = true
     this.serverUrl = pairing.serverUrl
     this.deviceLabel = pairing.deviceLabel
+    // Welcome handling persists the server-assigned device id asynchronously;
+    // flush it before reading the config back into the status surface.
+    await remote.flush()
     this.remoteConfig = await this.loadRemoteConfig(tokenStore)
     this.bindRemote(remote)
     await this.seedRemoteOverlay(remote)
@@ -894,7 +897,19 @@ export class DesktopStorageController {
 
   async load(): Promise<SaveData> {
     await this.whenReady()
-    if (this.activeMode === 'server' && this.remote !== null) return this.remote.load()
+    if (this.activeMode === 'server' && this.remote !== null) {
+      try {
+        return await this.remote.load()
+      } catch (error) {
+        if (this.remote.getStatus().notice === 'device_revoked') {
+          // A revoked reconnect is a terminal authority rejection, not a
+          // transient offline state. Keep the window usable for the explicit
+          // error/read-only banner, but never fall back to a remote writer.
+          return await this.local.load()
+        }
+        throw error
+      }
+    }
     return this.local.load()
   }
 
@@ -1075,6 +1090,15 @@ export class DesktopStorageController {
     try {
       await remote.start()
     } catch {
+      const status = remote.getStatus()
+      if (status.notice === 'device_revoked') {
+        // Keep the terminal auth failure visible to the renderer. Dropping the
+        // repository here would turn a definitive reconnect rejection into a
+        // generic offline status and hide the server's revoked-device verdict.
+        this.remote = remote
+        this.bindRemote(remote)
+        return true
+      }
       try { await remote.stop() } catch { /* best effort */ }
       this.remote = null
       return true // paired but offline: server remains the intended authority

@@ -7,6 +7,7 @@ import test from 'node:test'
 import {
   cleanEvidenceDirectory,
   evaluateAcceptanceGate,
+  REQUIRED_E2E_SCENARIO_NAMES,
   validateDockerSmokeReport,
   validateE2EReport,
   validateProxySmokeReport,
@@ -17,12 +18,18 @@ const REV = 'a'.repeat(40)
 const startedAt = new Date(NOW - 120_000).toISOString()
 const finishedAt = new Date(NOW - 1_000).toISOString()
 
-function e2eSteps(count = 15) {
-  return Array.from({ length: count }, (_, index) => ({
-    name: 'scenario-' + String(index + 1),
+function e2eSteps(count = 26) {
+  const required = REQUIRED_E2E_SCENARIO_NAMES.map((name, index) => ({
+    name,
     status: 'pass',
     durationMs: index + 1,
   }))
+  const generated = Array.from({ length: Math.max(0, count - required.length) }, (_, index) => ({
+    name: 'scenario-' + String(index + 1),
+    status: 'pass',
+    durationMs: required.length + index + 1,
+  }))
+  return [...required, ...generated].slice(0, count)
 }
 
 function e2eReport() {
@@ -40,7 +47,16 @@ function e2eReport() {
       realRenderer: true,
       rendererCoverage: true,
       guiCoverage: true,
-      stepCount: 15,
+      competingActionsCovered: true,
+      sessionTokenAbuseCovered: true,
+      freshHostPortableImportCovered: true,
+      connectedCoverageReopenCovered: true,
+      startupCrashRepairCovered: true,
+      deterministicRestartCovered: true,
+      revokedReconnectCovered: true,
+      feedLatencyP95Covered: true,
+      answerKeysAbsent: true,
+      stepCount: 26,
       rendererProof: {
         electronMainPidsDistinct: true,
         browserWindowCount: 2,
@@ -121,12 +137,17 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
     ['missing finishedAt', () => ({ ...e2eReport(), finishedAt: undefined }), /valid finishedAt/],
     ['stale finishedAt', () => ({ ...e2eReport(), finishedAt: new Date(NOW - 31 * 60_000).toISOString() }), /stale/],
     ['future finishedAt', () => ({ ...e2eReport(), finishedAt: new Date(NOW + 3 * 60_000).toISOString() }), /future/],
-    ['too few steps', () => ({ ...e2eReport(), steps: e2eSteps(14) }), /minimum is 15/],
+    ['too few steps', () => ({ ...e2eReport(), steps: e2eSteps(25) }), /minimum is 26/],
     ['duplicate step names', () => {
       const report = e2eReport()
-      report.steps = Array.from({ length: 15 }, () => ({ name: 'same', status: 'pass', durationMs: 1 }))
+      report.steps = Array.from({ length: 26 }, () => ({ name: 'same', status: 'pass', durationMs: 1 }))
       return report
     }, /unique named steps/],
+    ['missing mandatory scenario', () => {
+      const report = e2eReport()
+      report.steps[0].name = 'a different passing scenario'
+      return report
+    }, /missing mandatory scenario/],
     ['failed step', () => {
       const report = e2eReport()
       report.steps[4].status = 'fail'
@@ -142,6 +163,16 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
       delete report.evidence.realWebSocket
       return report
     }, /realWebSocket/],
+    ['missing mandatory scenario flag', () => {
+      const report = e2eReport()
+      report.evidence.sessionTokenAbuseCovered = false
+      return report
+    }, /sessionTokenAbuseCovered/],
+    ['answer-key hygiene not proven', () => {
+      const report = e2eReport()
+      delete report.evidence.answerKeysAbsent
+      return report
+    }, /answerKeysAbsent/],
     ['missing real Electron evidence', () => {
       const report = e2eReport()
       delete report.evidence.realElectron
@@ -179,7 +210,7 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
     }, /preloadApiExposed/],
     ['stepCount mismatch', () => {
       const report = e2eReport()
-      report.evidence.stepCount = 14
+      report.evidence.stepCount = 25
       return report
     }, /stepCount/],
     ['websocket proof below two clients', () => {
@@ -265,6 +296,8 @@ test('the pure acceptance decision fails closed for every command/evidence condi
     ['short command list', gate => { gate.results.pop() }, /commands failed/],
     ['changed HEAD', gate => { gate.revisionAfter = 'b'.repeat(40) }, /HEAD changed/],
     ['missing E2E report', gate => { gate.e2eReport = null }, /report is missing/],
+    ['missing Docker report', gate => { gate.dockerReport = null }, /Docker: .*report is missing/],
+    ['missing proxy report', gate => { gate.proxyReport = null }, /TLS\/WSS proxy smoke report is missing/],
     ['failed E2E report', gate => { gate.e2eReport.result = 'FAIL' }, /exactly "PASS"/],
     ['wrong revision E2E report', gate => { gate.e2eReport.codeRevision = 'b'.repeat(40) }, /current HEAD/],
     ['stale Docker report', gate => { gate.dockerReport.finishedAt = new Date(NOW - 31 * 60_000).toISOString() }, /stale/],
