@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert/strict'
 import { spawn, spawnSync, execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createServer } from 'node:net'
 import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -42,6 +42,10 @@ const [
   SCENARIO_ADVANCE_WHILE_EMPTY,
   SCENARIO_ONLINE_SIGNIN,
   SCENARIO_LOCAL_HANDOFF,
+  SCENARIO_SURVIVOR_RESTART,
+  SCENARIO_ADVANCE_RANDOM_RECONNECT,
+  SCENARIO_MUTATION_BLOCKED,
+  SCENARIO_SECRET_BOUNDARY,
 ] = REQUIRED_E2E_SCENARIO_NAMES
 
 if (process.platform === 'linux' && process.env.DISPLAY === undefined && process.env.QQPET_E2E_XVFB === undefined) {
@@ -478,6 +482,107 @@ function findKeys(value, forbidden, path = '$', found = []) {
   return found
 }
 
+function countBy(values) {
+  const counts = new Map()
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1)
+  return Object.fromEntries([...counts.entries()].sort(([left], [right]) => left.localeCompare(right)))
+}
+
+async function readOptionalFile(path) {
+  try {
+    return await readFile(path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+function quoteSqlIdentifier(identifier) {
+  return '"' + identifier.replaceAll('"', '""') + '"'
+}
+
+/**
+ * Reads every table/column in the real temporary SQLite file. The caller can
+ * audit the exact persisted cells without trusting a hand-picked column list,
+ * and the device/pairing metadata exposes hash storage type/length.
+ */
+async function readDatabaseAudit(dbPath) {
+  return await withDatabase(dbPath, false, db => {
+    const tables = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    ).all().map(row => String(row.name))
+    const columns = {}
+    const textCells = []
+    const sessionPayloads = []
+    for (const table of tables) {
+      const quoted = quoteSqlIdentifier(table)
+      const tableColumns = db.prepare(`PRAGMA table_info(${quoted})`).all().map(row => String(row.name))
+      columns[table] = tableColumns
+      const rows = db.prepare(`SELECT * FROM ${quoted}`).all()
+      for (const row of rows) {
+        for (const column of tableColumns) {
+          const value = row[column]
+          if (typeof value !== 'string') continue
+          if (table === 'game_sessions' && column === 'payload_json') sessionPayloads.push(value)
+          else textCells.push({ table, column, text: value })
+        }
+      }
+    }
+    const devices = db.prepare(
+      `SELECT device_id, label, role, typeof(token_hash) AS token_hash_type,
+              length(token_hash) AS token_hash_length, revoked_at_ms
+       FROM devices ORDER BY device_id`,
+    ).all().map(row => ({
+      deviceId: String(row.device_id),
+      label: String(row.label),
+      role: String(row.role),
+      tokenHashType: String(row.token_hash_type),
+      tokenHashLength: Number(row.token_hash_length),
+      revoked: row.revoked_at_ms !== null,
+    }))
+    const pairingCodes = db.prepare(
+      `SELECT typeof(code_hash) AS code_hash_type, length(code_hash) AS code_hash_length,
+              role, used_at_ms
+       FROM pairing_codes ORDER BY code_hash`,
+    ).all().map(row => ({
+      codeHashType: String(row.code_hash_type),
+      codeHashLength: Number(row.code_hash_length),
+      role: String(row.role),
+      used: row.used_at_ms !== null,
+    }))
+    return { tables, columns, textCells, sessionPayloads, devices, pairingCodes }
+  })
+}
+
+function findKeysExcludingPath(value, forbidden, isExcludedPath, path = '$', found = []) {
+  if (isExcludedPath(path)) return found
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => findKeysExcludingPath(
+      item,
+      forbidden,
+      isExcludedPath,
+      path + '[' + String(index) + ']',
+      found,
+    ))
+    return found
+  }
+  if (value === null || typeof value !== 'object') return found
+  for (const [key, item] of Object.entries(value)) {
+    const nextPath = path + '.' + key
+    if (forbidden.has(key)) found.push(nextPath)
+    findKeysExcludingPath(item, forbidden, isExcludedPath, nextPath, found)
+  }
+  return found
+}
+
+function findKeysOutsideClosedSessionPayload(value, forbidden) {
+  return findKeysExcludingPath(
+    value,
+    forbidden,
+    path => /^\$\.gameSessions\[\d+\]\.payload(?:\.|$)/.test(path),
+  )
+}
+
 function assertRendererProjectionHygiene(projections, rawSessionTokens, label) {
   let checked = 0
   for (const [name, projection] of Object.entries(projections)) {
@@ -658,6 +763,13 @@ class ServerProcess {
     this.stderr = []
     this.exitPromise = null
     this.stopped = false
+    this.authToken = options.authToken ?? ''
+  }
+
+  setHealthToken(token) {
+    assert.equal(typeof token, 'string')
+    assert.ok(token.length > 0, 'health auth token must be non-empty')
+    this.authToken = token
   }
 
   async start() {
@@ -698,8 +810,18 @@ class ServerProcess {
   }
 
   async health() {
-    const response = await fetch('http://127.0.0.1:' + this.options.port + '/health')
+    const detailed = this.authToken.length > 0
+    const response = await fetch(
+      'http://127.0.0.1:' + this.options.port + (detailed ? '/health/detail' : '/health'),
+      detailed ? { headers: { authorization: 'Bearer ' + this.authToken } } : undefined,
+    )
     if (response.ok === false) throw new Error('health returned ' + response.status)
+    return await response.json()
+  }
+
+  async publicHealth() {
+    const response = await fetch('http://127.0.0.1:' + this.options.port + '/health')
+    if (response.ok === false) throw new Error('public health returned ' + response.status)
     return await response.json()
   }
 
@@ -809,6 +931,8 @@ class RendererApp {
         dropCommandTypes: [],
         droppedCommandFrames: [],
         droppedCommands: 0,
+        suppressCommandStatus: false,
+        suppressedCommandStatuses: 0,
         lastSocket: null,
       }
       globalThis.__QQPET_C12_WS_FAULTS__ = state
@@ -818,14 +942,18 @@ class RendererApp {
           state.sockets += 1
           state.lastSocket = this
           this.addEventListener('message', event => {
-            if (state.dropProjection <= 0) return
             let frame
             try {
               frame = JSON.parse(event.data)
             } catch {
               return
             }
-            if (frame?.t !== 'projection') return
+            if (state.suppressCommandStatus && frame?.t === 'commandStatusResult') {
+              state.suppressedCommandStatuses += 1
+              event.stopImmediatePropagation()
+              return
+            }
+            if (state.dropProjection <= 0 || frame?.t !== 'projection') return
             state.dropProjection -= 1
             state.droppedProjections += 1
             event.stopImmediatePropagation()
@@ -871,6 +999,25 @@ class RendererApp {
       async input => await window.qqpet.command(input.command, { opId: input.opId }),
       { command, opId },
     )
+  }
+
+  /** Exercises the legacy production preload SavePatch channel in the real renderer. */
+  async legacySave(patch) {
+    await this.page.evaluate(async value => { window.qqpet.save(value) }, patch)
+  }
+
+  async loadVisibleSave() {
+    return await this.page.evaluate(async () => await window.qqpet.load())
+  }
+
+  /** Test-only read of the real safeStorage-encrypted device credential. Never report it. */
+  async deviceToken() {
+    return await this.app.evaluate(({ app, safeStorage }) => {
+      const fs = process.getBuiltinModule('node:fs')
+      const path = process.getBuiltinModule('node:path')
+      const encrypted = fs.readFileSync(path.join(app.getPath('userData'), 'remote-token.bin'))
+      return safeStorage.decryptString(encrypted)
+    })
   }
 
   async exportBundle() {
@@ -939,6 +1086,8 @@ class RendererApp {
         dropCommandTypes: [...state.dropCommandTypes],
         droppedCommandFrames: state.droppedCommandFrames.length,
         droppedCommands: state.droppedCommands,
+        suppressCommandStatus: state.suppressCommandStatus,
+        suppressedCommandStatuses: state.suppressedCommandStatuses,
       }
     })
   }
@@ -949,6 +1098,8 @@ class RendererApp {
       state.dropCommandTypes = [type]
       state.droppedCommandFrames = []
       state.droppedCommands = 0
+      state.suppressCommandStatus = true
+      state.suppressedCommandStatuses = 0
     }, commandType)
   }
 
@@ -968,6 +1119,7 @@ class RendererApp {
       const socket = state.lastSocket
       if (socket === null) throw new Error('no live WebSocket for replay')
       state.dropCommandTypes = []
+      state.suppressCommandStatus = false
       const text = JSON.stringify(frame)
       socket.send(text)
       state.droppedCommandFrames = []
@@ -1017,6 +1169,31 @@ class RendererApp {
     }))
   }
 
+  /** SIGKILLs the real Electron process; the server must observe a real socket loss. */
+  async kill() {
+    if (this.closed) return
+    this.closed = true
+    if (this.app === null) return
+    const app = this.app
+    const processHandle = app.process()
+    const exited = new Promise(resolveExit => {
+      if (typeof processHandle.exitCode === 'number') {
+        resolveExit()
+        return
+      }
+      processHandle.once('exit', () => resolveExit())
+    })
+    try {
+      processHandle.kill('SIGKILL')
+    } catch {
+      // A concurrently exited process is still a valid kill outcome.
+    }
+    await Promise.race([exited, sleep(10_000)])
+    this.app = null
+    this.page = null
+    void app.close().catch(() => {})
+  }
+
   async close() {
     if (this.closed) return
     this.closed = true
@@ -1057,6 +1234,7 @@ async function createClockedServerFixture(root, label, baseEnv, options = {}) {
   const adminSocket = join(directory, 'admin.sock')
   const credentialFile = join(directory, 'owner-admin-credential.txt')
   const userData = join(directory, 'electron-owner')
+  const playerUserData = join(directory, 'electron-player')
   const clockFile = join(directory, 'clock.txt')
   const port = await freePort()
   const serverUrl = 'ws://127.0.0.1:' + port + '/v1/sync'
@@ -1064,6 +1242,7 @@ async function createClockedServerFixture(root, label, baseEnv, options = {}) {
   await mkdir(directory, { recursive: true })
   await mkdir(backupDir, { recursive: true })
   await mkdir(userData, { recursive: true })
+  if (options.withPlayer === true) await mkdir(playerUserData, { recursive: true })
   await writeFile(credentialFile, 'c12-clocked-fixture-owner-admin-credential\n', { mode: 0o600 })
   await writeClockedNow(clockFile, clockMs)
   const env = {
@@ -1086,6 +1265,15 @@ async function createClockedServerFixture(root, label, baseEnv, options = {}) {
   const paired = runClockedCli(env, ['pair', '--pet-id', 'default', '--role', 'owner'])
   assert.equal(paired.ok, true)
   assert.match(paired.pairingCode, /^QQP-[A-Za-z0-9_-]{20,}$/)
+  let playerPairingCode = ''
+  if (options.withPlayer === true) {
+    const pairedPlayer = runClockedCli(env, ['pair', '--pet-id', 'default', '--role', 'player'])
+    assert.equal(pairedPlayer.ok, true)
+    playerPairingCode = pairedPlayer.pairingCode
+    assert.match(playerPairingCode, /^QQP-[A-Za-z0-9_-]{20,}$/)
+    assert.notEqual(playerPairingCode, paired.pairingCode)
+  }
+  let healthToken = ''
   let server = await new ServerProcess({
     port,
     env,
@@ -1093,11 +1281,13 @@ async function createClockedServerFixture(root, label, baseEnv, options = {}) {
     args: ['serve'],
   }).start()
   let app = null
+  let playerApp = null
   const fixture = {
     label,
     directory,
     dbPath,
     userData,
+    playerUserData,
     clockFile,
     port,
     serverUrl,
@@ -1105,6 +1295,11 @@ async function createClockedServerFixture(root, label, baseEnv, options = {}) {
     db: dbPath,
     get server() { return server },
     get app() { return app },
+    get player() { return playerApp },
+    set player(next) { playerApp = next },
+    get pairingCodes() {
+      return { owner: paired.pairingCode, player: playerPairingCode }
+    },
     async setClock(value) {
       await writeClockedNow(clockFile, value)
     },
@@ -1115,6 +1310,7 @@ async function createClockedServerFixture(root, label, baseEnv, options = {}) {
         env,
         entry: CLOCKED_SERVER_ENTRY,
         args: ['serve'],
+        authToken: healthToken,
       }).start()
       return server
     },
@@ -1130,7 +1326,17 @@ async function createClockedServerFixture(root, label, baseEnv, options = {}) {
       await app.waitOnline(30_000)
       return app
     },
+    async relaunchPlayerApp() {
+      assert.notEqual(playerApp, null, label + ': player app has not been launched')
+      await playerApp.relaunch()
+      await playerApp.waitOnline(30_000)
+      return playerApp
+    },
     async cleanup() {
+      if (playerApp !== null) {
+        await playerApp.close().catch(() => {})
+        playerApp = null
+      }
       if (app !== null) {
         await app.close().catch(() => {})
         app = null
@@ -1149,6 +1355,8 @@ async function createClockedServerFixture(root, label, baseEnv, options = {}) {
     }).launch()
     const pairedStatus = await app.pair(paired.pairingCode, label + ' owner renderer')
     assert.equal(pairedStatus.paired, true)
+    healthToken = await app.deviceToken()
+    server.setHealthToken(healthToken)
     const status = await app.setServerMode('use-server')
     assert.equal(status.mode, 'server')
     assert.equal(status.activeMode, 'server')
@@ -1172,6 +1380,22 @@ async function createClockedServerFixture(root, label, baseEnv, options = {}) {
         return status.advanceWhileEmpty === false ? status : null
       }, label + ' advanceWhileEmpty false status', 10_000)
       assert.equal(updated.advanceWhileEmpty, false)
+    }
+    if (options.withPlayer === true) {
+      playerApp = await new RendererApp({
+        label: label + '-player-renderer',
+        userData: playerUserData,
+        serverUrl,
+      }).launch()
+      const pairedPlayer = await playerApp.pair(playerPairingCode, label + ' player renderer')
+      assert.equal(pairedPlayer.paired, true, label + ': player renderer pairing failed')
+      await waitForPairedDevice(playerApp, 'player', label + ' player identity')
+      const playerMode = await playerApp.setServerMode('use-server')
+      assert.equal(playerMode.mode, 'server')
+      assert.equal(playerMode.activeMode, 'server')
+      assert.equal(playerMode.authority.owner, 'server')
+      await playerApp.waitOnline(30_000)
+      await waitConverged(app, playerApp, 0, 20_000)
     }
     return fixture
   } catch (error) {
@@ -1233,6 +1457,7 @@ async function createLocalHandoffFixture(root, label, baseEnv, clockMs = Date.no
   assert.equal(initialized.ok, true)
   const pairing = runClockedCli(env, ['pair', '--pet-id', 'default', '--role', 'owner'])
   assert.equal(pairing.ok, true)
+  let healthToken = ''
   let server = await new ServerProcess({
     port,
     env,
@@ -1296,6 +1521,8 @@ async function createLocalHandoffFixture(root, label, baseEnv, clockMs = Date.no
     const paired = await app.pair(pairing.pairingCode, label + ' owner renderer')
     assert.equal(paired.paired, true)
     await waitForPairedDevice(app, 'owner', label + ' owner pairing')
+    healthToken = await app.deviceToken()
+    server.setHealthToken(healthToken)
     return fixture
   } catch (error) {
     await fixture.cleanup()
@@ -1327,7 +1554,7 @@ async function main() {
     QQPET_SYNC_TIME_ZONE: 'Asia/Shanghai',
     QQPET_SYNC_WEATHER_LOCATION: '北京',
     QQPET_SYNC_ADVANCE_WHILE_EMPTY: '0',
-    QQPET_SYNC_LOG_LEVEL: 'warn',
+    QQPET_SYNC_LOG_LEVEL: 'info',
   }
   const report = {
     schemaVersion: 2,
@@ -1348,6 +1575,8 @@ async function main() {
       'Timed-work, advance-while-empty and online/sign-in coverage scenarios run the real standalone SyncServer, SQLite store, command queue and scheduler with a test-only injected wall clock read from an atomically replaced file; this removes real-minute waits without changing server rules or canonical data.',
       'The local-authority fault case drops one already-serialized admin.resumeServer frame and replays it with only expectedEpoch fenced by +1. The portable bundle itself is produced by LocalRepository and is never edited; the resulting server rejection drives the production rollback path.',
       'Local and server timestamps in the handoff scenario share a near-wall clock fixture, but the test clock is not advanced during the final local scheduler run; local archive/freeze assertions compare persisted document hashes rather than wall-clock tick counts.',
+      'The renderer-kill, canonical-mutation and secret-boundary scenarios use dedicated real standalone servers with a test-only injected wall clock so revision/event deltas stay exact; they still launch real Electron renderers, drive the production preload API, and exercise real WebSockets, SQLite and captured server logs.',
+      'The secret/device-field audit inspects the temporary server SQLite/WAL/schema, device and pairing hash storage, captured server logs, canonical save/engine JSON and renderer projections. It does not scan OS keychains, encrypted Electron safeStorage blobs or process memory.',
     ],
   }
   const step = async (name, fn) => {
@@ -1426,19 +1655,36 @@ async function main() {
 
     await step('start real standalone server and verify WAL/synchronous=FULL health', async () => {
       server = await new ServerProcess({ port, env: baseEnv }).start()
-      const health = await server.health()
-      assert.equal(health.ready, true)
-      assert.equal(health.journalMode, 'wal')
-      assert.equal(health.synchronous, 'full')
-      assert.equal(health.activeClientCount, 0)
-      report.evidence.database = { temporarySqlite: true, journalMode: health.journalMode, synchronous: health.synchronous }
+      const publicHealth = await server.publicHealth()
+      const pragmas = await withDatabase(dbPath, false, db => {
+        const journal = db.prepare('PRAGMA journal_mode').get()
+        const synchronous = db.prepare('PRAGMA synchronous').get()
+        const quickCheck = db.prepare('PRAGMA quick_check').get()
+        return {
+          journalMode: String(Object.values(journal)[0] ?? '').toLowerCase(),
+          synchronous: Number(Object.values(synchronous)[0]) === 2 ? 'full' : String(Object.values(synchronous)[0]),
+          quickCheck: String(Object.values(quickCheck)[0] ?? ''),
+        }
+      })
+      assert.equal(publicHealth.ready, true)
+      assert.equal(publicHealth.databaseReady, true)
+      assert.equal(pragmas.journalMode, 'wal')
+      assert.equal(pragmas.synchronous, 'full')
+      assert.equal(pragmas.quickCheck, 'ok')
+      assert.equal((await readOpenCoverageRows(dbPath)).length, 0)
+      report.evidence.database = {
+        temporarySqlite: true,
+        journalMode: pragmas.journalMode,
+        synchronous: pragmas.synchronous,
+      }
       return {
         pid: server.child.pid,
-        ready: health.ready,
-        journalMode: health.journalMode,
-        synchronous: health.synchronous,
-        dbWritable: health.dbWritable,
-        quickCheck: health.quickCheck,
+        ready: publicHealth.ready,
+        journalMode: pragmas.journalMode,
+        synchronous: pragmas.synchronous,
+        databaseReady: publicHealth.databaseReady,
+        quickCheck: pragmas.quickCheck,
+        openCoverageRows: 0,
       }
     })
 
@@ -1474,6 +1720,7 @@ async function main() {
       assert.equal(paired.paired, true)
       const pairedStatus = await waitForPairedDevice(owner, 'owner', 'owner device identity after pairing')
       ownerDeviceId = pairedStatus.deviceId
+      server.setHealthToken(await owner.deviceToken())
       return {
         role: pairedStatus.deviceRole,
         paired: paired.paired,
@@ -2177,6 +2424,7 @@ async function main() {
         'fresh host owner identity after pairing',
       )
       freshOwnerDeviceId = freshOwnerPairedStatus.deviceId
+      freshServer.setHealthToken(await freshHostOwner.deviceToken())
       const ownerServerMode = await freshHostOwner.setServerMode('use-server')
       assert.equal(ownerServerMode.mode, 'server')
       assert.equal(ownerServerMode.activeMode, 'server')
@@ -2392,9 +2640,10 @@ async function main() {
       const openRows = await readOpenCoverageRows(dbPath)
       assert.equal(openRows.length, 2, 'both connected clients must own one open coverage interval')
       const expectedCrashEnds = new Map(openRows.map(row => [row.coverageId, row.lastHeartbeatAtMs + 30_000]))
+      const healthToken = server.authToken
       await server.crash()
       const restartWallBeforeReady = Date.now()
-      server = await new ServerProcess({ port, env: baseEnv }).start()
+      server = await new ServerProcess({ port, env: baseEnv, authToken: healthToken }).start()
       const restartWallAfterReady = Date.now()
       const repairedRows = await readCoverageRowsByIds(dbPath, openRows.map(row => row.coverageId))
       assert.equal(repairedRows.length, openRows.length, 'every pre-crash open interval must be repaired')
@@ -2489,11 +2738,12 @@ async function main() {
       const beforePlayerFaults = await player.websocketFaultState()
       const expectedTicks = 2
 
+      const healthToken = server.authToken
       await server.crash()
       const rewindAnchorMs = Date.now() - expectedTicks * 60_000 - 10_000
       const anchorUpdate = await rewindSchedulerAnchor(dbPath, rewindAnchorMs)
       assert.equal(anchorUpdate.advanceWhileEmpty, true)
-      server = await new ServerProcess({ port, env: baseEnv }).start()
+      server = await new ServerProcess({ port, env: baseEnv, authToken: healthToken }).start()
       const restartHealth = await server.health()
       assert.equal(restartHealth.ready, true)
 
@@ -2594,6 +2844,260 @@ async function main() {
         exactComparisons: true,
         projectionHash: projectionHash(after.left),
         activeClientCount: activeClients.activeClientCount,
+      }
+    })
+
+    await step(SCENARIO_SURVIVOR_RESTART, async () => {
+      const fixture = await createClockedServerFixture(root, 'survivor-restart', baseEnv, {
+        clockMs: TIME_FIXTURE_CLOCK_MS,
+        advanceWhileEmpty: true,
+        withPlayer: true,
+      })
+      try {
+        const survivor = fixture.app
+        let killed = fixture.player
+        const beforeConverged = await waitConverged(survivor, killed, 0, 20_000)
+        const beforeState = await readPetState(fixture.dbPath)
+        const beforeCounts = await readPersistedCounts(fixture.dbPath)
+        const beforeHealth = await fixture.server.health()
+        assert.equal(beforeHealth.activeClientCount, 2)
+        assert.equal(sameProjection(beforeConverged.left, beforeConverged.right), true)
+        const killedPid = killed.pid
+        const killedUserData = killed.userData
+        const killedFaults = await killed.websocketFaultState()
+
+        // Kill a real Electron renderer, not just its socket. The surviving
+        // renderer must keep its authenticated connection and apply canonical
+        // broadcasts while the killed peer is absent.
+        await killed.kill()
+        await waitForClients(fixture.server, 1, 'one survivor after renderer kill', 20_000)
+        const survivorStatus = await survivor.storageStatus()
+        assert.equal(survivorStatus.connection, 'online')
+        assert.equal(survivorStatus.readOnly, false)
+        const signed = await survivor.command(
+          { type: 'signin.sign', payload: {} },
+          'c12-survivor-signin',
+        )
+        assert.equal(signed.status, 'applied', 'survivor sign-in rejected: ' + JSON.stringify(signed.error))
+        const canonicalAfterSignin = await readCanonicalEngine(fixture.dbPath)
+        const stateAfterSignin = await readPetState(fixture.dbPath)
+        assert.equal(stateAfterSignin.revision, signed.revision)
+        assert.equal(stateAfterSignin.eventSeq, signed.eventSeq)
+        const survivorProjection = await waitFor(async () => {
+          const projection = await survivor.projection()
+          if (projection === null
+            || projection.revision !== signed.revision
+            || projection.eventSeq !== signed.eventSeq
+            || projectionHash(projection) !== hash(canonicalAfterSignin.save)) return null
+          return projection
+        }, 'survivor renderer applies canonical sign-in projection', 10_000)
+        const signinEventsAfterKill = (await readEventRows(fixture.dbPath))
+          .filter(event => event.type === 'reward.granted' && event.payload.source === 'signin')
+        assert.equal(signinEventsAfterKill.length, 1, 'survivor sign-in reward must be granted exactly once')
+        const countsAfterSignin = await readPersistedCounts(fixture.dbPath)
+        assert.equal(countsAfterSignin.duplicateOpIds, 0)
+        assert.equal(countsAfterSignin.duplicateEventSeqs, 0)
+        assert.equal(countsAfterSignin.commandRows, beforeCounts.commandRows + 1)
+        assert.equal((await fixture.server.health()).activeClientCount, 1)
+
+        // Relaunch the killed renderer from the same userData/identity. It must
+        // resume from the server snapshot and neither replay the survivor's
+        // command nor create any duplicate rewards/events.
+        for (const stale of ['SingletonCookie', 'SingletonLock', 'SingletonSocket', 'DevToolsActivePort']) {
+          await rm(join(killedUserData, stale), { force: true })
+        }
+        const replacement = await new RendererApp({
+          label: 'survivor-restart-player-renderer',
+          userData: killedUserData,
+          serverUrl: fixture.serverUrl,
+        }).launch()
+        fixture.player = replacement
+        assert.notEqual(replacement.pid, killedPid, 'relaunched renderer must be a fresh Electron process')
+        await replacement.waitOnline(30_000)
+        await waitForClients(fixture.server, 2, 'both renderer clients after relaunch', 20_000)
+        const converged = await waitConverged(survivor, replacement, signed.revision, 20_000)
+        const expectedSharedHash = hash(canonicalAfterSignin.save)
+        assert.equal(projectionHash(converged.left), expectedSharedHash)
+        assert.equal(projectionHash(converged.right), expectedSharedHash)
+        assert.equal(converged.left.eventSeq, signed.eventSeq)
+        assert.equal(converged.right.eventSeq, signed.eventSeq)
+        const finalState = await readPetState(fixture.dbPath)
+        assert.equal(finalState.revision, stateAfterSignin.revision, 'reconnect must not mutate canonical revision')
+        assert.equal(finalState.eventSeq, stateAfterSignin.eventSeq, 'reconnect must not append canonical events')
+        const finalCounts = await readPersistedCounts(fixture.dbPath)
+        assert.deepEqual(finalCounts, countsAfterSignin, 'reconnect must not duplicate command/event rows')
+        const finalSigninEvents = (await readEventRows(fixture.dbPath))
+          .filter(event => event.type === 'reward.granted' && event.payload.source === 'signin')
+        assert.equal(finalSigninEvents.length, 1, 'reconnect must not replay the sign-in reward')
+        const finalSignin = signinState((await readCanonicalEngine(fixture.dbPath)).save)
+        assert.equal(countSigninDay(finalSignin, Number(signed.result.day)), 1)
+        const replacementFaults = await replacement.websocketFaultState()
+        return {
+          killedMainPid: killedPid,
+          survivorMainPid: survivor.pid,
+          replacementMainPid: replacement.pid,
+          freshRendererProcess: replacement.pid !== killedPid,
+          killedRendererHelloFrames: killedFaults.sentHellos,
+          survivorActiveClientCountAfterKill: 1,
+          survivorConnection: survivorStatus.connection,
+          survivorAppliedRevision: survivorProjection.revision,
+          survivorAppliedEventSeq: survivorProjection.eventSeq,
+          survivorCommandStatus: signed.status,
+          signinDay: Number(signed.result.day),
+          signinRewardEventCountAfterReconnect: finalSigninEvents.length,
+          signinDayEntryCountAfterReconnect: countSigninDay(finalSignin, Number(signed.result.day)),
+          commandRowsBeforeKill: beforeCounts.commandRows,
+          commandRowsAfterSignin: countsAfterSignin.commandRows,
+          commandRowsAfterReconnect: finalCounts.commandRows,
+          eventRowsAfterSignin: countsAfterSignin.eventRows,
+          eventRowsAfterReconnect: finalCounts.eventRows,
+          duplicateOpIds: finalCounts.duplicateOpIds,
+          duplicateEventSeqs: finalCounts.duplicateEventSeqs,
+          revisionAfterSignin: stateAfterSignin.revision,
+          revisionAfterReconnect: finalState.revision,
+          eventSeqAfterSignin: stateAfterSignin.eventSeq,
+          eventSeqAfterReconnect: finalState.eventSeq,
+          projectionHash: projectionHash(converged.left),
+          activeClientCount: (await fixture.server.health()).activeClientCount,
+          replacementObservedSockets: replacementFaults.sockets,
+          replacementObservedHellos: replacementFaults.sentHellos,
+          reconnectedWithoutDuplicate: true,
+        }
+      } finally {
+        await fixture.cleanup()
+      }
+    })
+
+    await step(SCENARIO_MUTATION_BLOCKED, async () => {
+      const fixture = await createClockedServerFixture(root, 'canonical-mutation-boundary', baseEnv, {
+        clockMs: TIME_FIXTURE_CLOCK_MS,
+        advanceWhileEmpty: true,
+        withPlayer: true,
+      })
+      try {
+        const owner = fixture.app
+        const player = fixture.player
+        const beforeConverged = await waitConverged(owner, player, 0, 20_000)
+        const beforeState = await readPetState(fixture.dbPath)
+        const beforeEngine = await readCanonicalEngine(fixture.dbPath)
+        const beforeCounts = await readPersistedCounts(fixture.dbPath)
+        const beforeOwner = await owner.projection()
+        const beforePlayer = await player.projection()
+        const beforeHash = projectionHash(beforeConverged.left)
+        assert.equal(projectionHash(beforeConverged.right), beforeHash)
+        const forgedYb = 987_654_321
+
+        // Production legacy preload path: fire-and-forget SavePatch. The
+        // storage controller must reject it in server mode and log the
+        // canonical_mutation_blocked error in the real Electron main process.
+        await owner.legacySave({
+          petInfo: { name: 'c12-legacy-savepatch', yb: forgedYb },
+          settings: { zoom: 3 },
+          saveJsonData: { task: JSON.stringify({ doNums: { Eat: 999 } }) },
+        })
+        await waitFor(
+          () => owner.launchLog.some(line =>
+            line.includes('runtime save(patch) rejected') && line.includes('canonical_mutation_blocked')),
+          'legacy SavePatch rejection in Electron main log',
+          10_000,
+        )
+
+        // Mutable-looking IPC results are detached copies. Mutate both the
+        // projection object and the devtools-visible load() SaveData, then
+        // prove a fresh renderer read and server state never observe them.
+        const mutationAttempt = await owner.page.evaluate(async forged => {
+          const projection = await window.qqpet.getProjection()
+          const visibleSave = await window.qqpet.load()
+          const originalProjectionYb = Number(projection.shared.petInfo.yb)
+          const originalVisibleSaveYb = Number(visibleSave.petInfo.yb)
+          projection.shared.petInfo.yb = forged
+          projection.shared.havePet = false
+          projection.revision = 999_999_999
+          projection.save.petInfo.yb = forged + 2
+          visibleSave.petInfo.yb = forged + 1
+          visibleSave.havePet = false
+          visibleSave.settings.zoom = 4
+          return {
+            originalProjectionYb,
+            originalVisibleSaveYb,
+            mutatedProjectionYb: Number(projection.shared.petInfo.yb),
+            mutatedComposedSaveYb: Number(projection.save.petInfo.yb),
+            mutatedVisibleSaveYb: Number(visibleSave.petInfo.yb),
+            mutatedRevision: Number(projection.revision),
+            mutatedVisibleHavePet: visibleSave.havePet,
+            mutatedVisibleZoom: visibleSave.settings.zoom,
+          }
+        }, forgedYb)
+        assert.equal(mutationAttempt.mutatedProjectionYb, forgedYb)
+        assert.equal(mutationAttempt.mutatedComposedSaveYb, forgedYb + 2)
+        assert.equal(mutationAttempt.mutatedVisibleSaveYb, forgedYb + 1)
+        assert.equal(mutationAttempt.mutatedRevision, 999_999_999)
+        assert.equal(mutationAttempt.mutatedVisibleHavePet, false)
+        assert.equal(mutationAttempt.mutatedVisibleZoom, 4)
+
+        await owner.requestResync()
+        const afterOwner = await waitFor(async () => {
+          const projection = await owner.projection()
+          return projection !== null
+            && projection.revision === beforeOwner.revision
+            && projection.eventSeq === beforeOwner.eventSeq
+            && sameProjection(projection, beforeOwner)
+            ? projection
+            : null
+        }, 'owner projection refresh after direct mutation attempts', 10_000)
+        const afterPlayer = await waitFor(async () => {
+          const projection = await player.projection()
+          return projection !== null
+            && projection.revision === beforePlayer.revision
+            && projection.eventSeq === beforePlayer.eventSeq
+            && sameProjection(projection, beforePlayer)
+            ? projection
+            : null
+        }, 'player projection unchanged after direct mutation attempts', 10_000)
+        const afterState = await readPetState(fixture.dbPath)
+        const afterCounts = await readPersistedCounts(fixture.dbPath)
+        const afterEngine = await readCanonicalEngine(fixture.dbPath)
+        assert.deepEqual(afterState, beforeState, 'SavePatch/direct mutation must not change canonical pet state')
+        assert.deepEqual(afterCounts, beforeCounts, 'SavePatch/direct mutation must not add command/event rows')
+        assert.equal(hash(afterEngine.save), hash(beforeEngine.save), 'SavePatch/direct mutation must not change canonical save')
+        assert.equal(hash(afterEngine.rng), hash(beforeEngine.rng), 'SavePatch/direct mutation must not consume or replace RNG state')
+        assert.equal(Number(afterOwner.shared.petInfo.yb), Number(beforeOwner.shared.petInfo.yb))
+        assert.equal(afterOwner.shared.havePet, true)
+        assert.equal(Number(afterPlayer.shared.petInfo.yb), Number(beforeOwner.shared.petInfo.yb))
+        assert.equal(projectionHash(afterOwner), beforeHash)
+        assert.equal(projectionHash(afterPlayer), beforeHash)
+        return {
+          legacySavePatchChannel: 'window.qqpet.save',
+          legacySavePatchBlockedInMainLog: true,
+          legacySavePatchError: 'canonical_mutation_blocked',
+          projectionMutationAttempted: true,
+          visibleSaveMutationAttempted: true,
+          mutatedDetachedProjectionYb: mutationAttempt.mutatedProjectionYb,
+          mutatedDetachedVisibleSaveYb: mutationAttempt.mutatedVisibleSaveYb,
+          freshOwnerProjectionYb: Number(afterOwner.shared.petInfo.yb),
+          freshPlayerProjectionYb: Number(afterPlayer.shared.petInfo.yb),
+          revisionBefore: beforeState.revision,
+          revisionAfter: afterState.revision,
+          eventSeqBefore: beforeState.eventSeq,
+          eventSeqAfter: afterState.eventSeq,
+          commandRowsBefore: beforeCounts.commandRows,
+          commandRowsAfter: afterCounts.commandRows,
+          eventRowsBefore: beforeCounts.eventRows,
+          eventRowsAfter: afterCounts.eventRows,
+          duplicateOpIds: afterCounts.duplicateOpIds,
+          duplicateEventSeqs: afterCounts.duplicateEventSeqs,
+          canonicalSaveHashBefore: hash(beforeEngine.save),
+          canonicalSaveHashAfter: hash(afterEngine.save),
+          canonicalRngHashBefore: hash(beforeEngine.rng),
+          canonicalRngHashAfter: hash(afterEngine.rng),
+          ownerProjectionHashBefore: beforeHash,
+          ownerProjectionHashAfter: projectionHash(afterOwner),
+          playerProjectionHashAfter: projectionHash(afterPlayer),
+          canonicalUnchanged: true,
+          projectionRefreshedUnchanged: true,
+        }
+      } finally {
+        await fixture.cleanup()
       }
     })
 
@@ -3063,6 +3567,151 @@ async function main() {
       }
     })
 
+    await step(SCENARIO_ADVANCE_RANDOM_RECONNECT, async () => {
+      const fixture = await createClockedServerFixture(root, 'advance-empty-random-reconnect', baseEnv, {
+        clockMs: TIME_FIXTURE_CLOCK_MS,
+        advanceWhileEmpty: true,
+      })
+      try {
+        let app = fixture.app
+        let server = fixture.server
+        const connectedBaseline = await waitFor(async () => {
+          const projection = await app.projection()
+          return projection?.shared?.havePet === true ? projection : null
+        }, 'random-reconnect baseline projection', 20_000)
+        const onLineBaseline = Number(connectedBaseline.shared.petInfo.onLineTime)
+        await app.close()
+        await waitForClients(server, 0, 'random-reconnect fixture zero clients')
+        await fixture.stopServer()
+        const before = await readPetState(fixture.dbPath)
+        const engineBefore = await readCanonicalEngine(fixture.dbPath)
+        assert.equal(engineBefore.advanceWhileEmpty, true)
+        assert.equal(before.lastSchedulerWallMs, TIME_FIXTURE_CLOCK_MS)
+        const emptyIntervalMinutes = 19 * 60 + 5
+        const targetWallMs = TIME_FIXTURE_CLOCK_MS + emptyIntervalMinutes * 60_000
+        const { advanceSchedulerChunk } = await loadRuntimeOracle()
+        const expected = advanceSchedulerChunk(engineBefore, {
+          gameTimeMs: engineBefore.gameTimeMs,
+          environment: engineBefore.environment,
+          activeClientCount: 0,
+          sessionActive: false,
+          actorDeviceId: null,
+        }, targetWallMs, { maxChunkTicks: 1_440 })
+        assert.equal(expected.ok, true)
+        assert.equal(expected.catchingUp, false)
+        assert.equal(expected.ticks, emptyIntervalMinutes)
+        assert.ok(expected.events.length > 0, 'enabled empty interval must publish canonical events')
+        const expectedTypeCounts = countBy(expected.events.map(event => event.type))
+        assert.ok((expectedTypeCounts['pet.statsChanged'] ?? 0) > 0, 'RNG-driven minute events must be present')
+        assert.ok((expectedTypeCounts['mail.arrived'] ?? 0) > 0, 'the crossed daily boundary must deliver deterministic mail')
+        const expectedEventSeq = before.eventSeq + expected.events.length
+        const expectedRevision = before.revision + 1
+
+        await fixture.setClock(targetWallMs)
+        server = await fixture.startServer()
+        const after = await waitFor(async () => {
+          const state = await readPetState(fixture.dbPath)
+          return state.gameTimeMs === targetWallMs
+            && state.revision === expectedRevision
+            && state.eventSeq === expectedEventSeq
+            ? state
+            : null
+        }, 'enabled zero-client catch-up reaches the exact clock target', 30_000)
+        const afterHealth = await server.health()
+        assert.equal(afterHealth.activeClientCount, 0)
+        assert.equal(afterHealth.advanceWhileEmpty, true)
+        const engineAfter = await readCanonicalEngine(fixture.dbPath)
+        assert.equal(hash(engineAfter.save), hash(expected.state.save), 'random/event outcome state must match the deterministic oracle')
+        assert.equal(hash(engineAfter.rng), hash(expected.state.rng), 'RNG state must match the deterministic oracle')
+        assert.notEqual(hash(engineBefore.rng), hash(engineAfter.rng), 'empty interval must advance deterministic RNG state')
+        assert.equal(Number(engineAfter.save.petInfo.onLineTime), onLineBaseline, 'zero-client catch-up must not credit online time')
+        const allRowsAfterCatchup = await readEventRows(fixture.dbPath)
+        const catchupRows = allRowsAfterCatchup.filter(event => event.eventSeq > before.eventSeq)
+        assert.equal(catchupRows.length, expected.events.length, 'every expected event must be persisted exactly once')
+        assert.deepEqual(catchupRows.map(event => event.eventSeq), expected.events.map((_, index) => before.eventSeq + index + 1))
+        assert.deepEqual(catchupRows.map(event => event.type), expected.events.map(event => event.type))
+        assert.equal(hash(catchupRows.map(event => event.payload)), hash(expected.events.map(event => event.payload)))
+        assert.deepEqual(countBy(catchupRows.map(event => event.type)), expectedTypeCounts)
+        const uniqueCatchupSeqs = new Set(catchupRows.map(event => event.eventSeq))
+        assert.equal(uniqueCatchupSeqs.size, catchupRows.length)
+        const mailEvents = catchupRows.filter(event => event.type === 'mail.arrived')
+        assert.equal(mailEvents.length, expectedTypeCounts['mail.arrived'])
+
+        app = await fixture.relaunchApp()
+        await waitForClients(server, 1, 'random-reconnect one authenticated client', 20_000)
+        const reconnected = await waitFor(async () => {
+          const projection = await app.projection()
+          return projection !== null
+            && projection.revision === expectedRevision
+            && projection.eventSeq === expectedEventSeq
+            && projection.gameTimeMs === targetWallMs
+            && projectionHash(projection) === hash(expected.state.save)
+            ? projection
+            : null
+        }, 'reconnected renderer applies the precomputed empty-interval outcome', 20_000)
+        await app.requestResync()
+        const afterResync = await waitFor(async () => {
+          const projection = await app.projection()
+          return projection !== null
+            && projection.revision === expectedRevision
+            && projection.eventSeq === expectedEventSeq
+            && projectionHash(projection) === hash(expected.state.save)
+            ? projection
+            : null
+        }, 'random-reconnect resync remains exact', 10_000)
+        const stateAfterReconnect = await readPetState(fixture.dbPath)
+        assert.equal(stateAfterReconnect.gameTimeMs, after.gameTimeMs)
+        assert.equal(stateAfterReconnect.revision, after.revision, 'reconnect must not commit another revision')
+        assert.equal(stateAfterReconnect.eventSeq, after.eventSeq, 'reconnect must not backfill/duplicate events')
+        const allRowsAfterReconnect = await readEventRows(fixture.dbPath)
+        assert.equal(allRowsAfterReconnect.length, allRowsAfterCatchup.length, 'reconnect must not append event rows')
+        assert.equal(allRowsAfterReconnect.filter(event => event.eventSeq > before.eventSeq).length, expected.events.length)
+        const duplicateEventSeqs = allRowsAfterReconnect.length - new Set(allRowsAfterReconnect.map(event => event.eventSeq)).size
+        assert.equal(duplicateEventSeqs, 0)
+        assert.equal(Number(engineAfter.save.petInfo.onLineTime), onLineBaseline)
+        assert.equal(projectionHash(reconnected), projectionHash(afterResync))
+        return {
+          advanceWhileEmpty: afterHealth.advanceWhileEmpty,
+          zeroClientsDuringAdvance: afterHealth.activeClientCount === 0,
+          emptyIntervalMinutes,
+          wallTargetMs: targetWallMs,
+          expectedTicks: expected.ticks,
+          observedTicks: (after.gameTimeMs - before.gameTimeMs) / 60_000,
+          revisionBefore: before.revision,
+          revisionAfterCatchup: after.revision,
+          revisionExpected: expectedRevision,
+          eventSeqBefore: before.eventSeq,
+          eventSeqAfterCatchup: after.eventSeq,
+          eventSeqExpected: expectedEventSeq,
+          deterministicEventCount: expected.events.length,
+          observedEventCount: catchupRows.length,
+          eventTypeCounts: expectedTypeCounts,
+          randomizedStatsEventCount: expectedTypeCounts['pet.statsChanged'] ?? 0,
+          dailyBoundaryMailEventCount: mailEvents.length,
+          deterministicRngAdvanced: hash(engineBefore.rng) !== hash(engineAfter.rng),
+          rngMatchedOracle: hash(engineAfter.rng) === hash(expected.state.rng),
+          stateMatchedOracle: hash(engineAfter.save) === hash(expected.state.save),
+          eventPayloadsMatchedOracle: hash(catchupRows.map(event => event.payload)) === hash(expected.events.map(event => event.payload)),
+          onLineTimeBaseline: onLineBaseline,
+          onLineTimeAfterCatchup: Number(engineAfter.save.petInfo.onLineTime),
+          connectedProjectionRevision: reconnected.revision,
+          connectedProjectionEventSeq: reconnected.eventSeq,
+          connectedProjectionHash: projectionHash(reconnected),
+          resyncedProjectionHash: projectionHash(afterResync),
+          reconnectRevisionDelta: stateAfterReconnect.revision - after.revision,
+          reconnectEventSeqDelta: stateAfterReconnect.eventSeq - after.eventSeq,
+          reconnectEventRowDelta: allRowsAfterReconnect.length - allRowsAfterCatchup.length,
+          duplicateEventSeqs,
+          activeClientCountAfterReconnect: (await server.health()).activeClientCount,
+          appliedOnceWithoutBackfill: stateAfterReconnect.revision === after.revision
+            && stateAfterReconnect.eventSeq === after.eventSeq
+            && allRowsAfterReconnect.length === allRowsAfterCatchup.length,
+        }
+      } finally {
+        await fixture.cleanup()
+      }
+    })
+
     await step(SCENARIO_ONLINE_SIGNIN, async () => {
       const fixture = await createClockedServerFixture(root, 'online-signin-split', baseEnv, {
         clockMs: TIME_FIXTURE_CLOCK_MS,
@@ -3451,41 +4100,81 @@ async function main() {
         }
         await app.page.evaluate(input => {
           const scope = window
-          scope.__C12_HANDOFF_RESULT__ = { done: false }
-          void scope.qqpet.storage.setMode(input).then(status => {
-            scope.__C12_HANDOFF_RESULT__ = {
-              done: true,
-              ok: true,
-              mode: status.mode,
-              activeMode: status.activeMode,
-              handoffState: status.handoff.state,
-              handoffReason: status.handoff.reason,
-            }
-          }).catch(error => {
-            scope.__C12_HANDOFF_RESULT__ = { done: true, ok: false, error: String(error?.message ?? error) }
-          })
+          // The local->server switch opens a fresh remote connection. The
+          // production storage controller intentionally fails closed until
+          // that connection is online, so retry the same idempotent switch;
+          // once the resume frame is dropped this promise stays pending.
+          scope.__C12_HANDOFF_RESULT__ = { done: false, attempts: 0 }
+          const attempt = () => {
+            scope.__C12_HANDOFF_RESULT__.attempts += 1
+            void scope.qqpet.storage.setMode(input).then(status => {
+              scope.__C12_HANDOFF_RESULT__ = {
+                done: true,
+                ok: true,
+                attempts: scope.__C12_HANDOFF_RESULT__.attempts,
+                mode: status.mode,
+                activeMode: status.activeMode,
+                handoffState: status.handoff.state,
+                handoffReason: status.handoff.reason,
+              }
+            }).catch(error => {
+              const message = String(error?.message ?? error)
+              if (message.includes('offline: the server connection is not ready')) {
+                setTimeout(attempt, 250)
+                return
+              }
+              scope.__C12_HANDOFF_RESULT__ = {
+                done: true,
+                ok: false,
+                attempts: scope.__C12_HANDOFF_RESULT__.attempts,
+                error: message,
+              }
+            })
+          }
+          attempt()
         }, resumeInput)
         let frozenObserved = null
         const frozen = await waitFor(async () => {
           try {
             const document = await readLocalDocument(fixture.userData)
             const faultState = await app.websocketFaultState()
+            const handoffResult = await app.page.evaluate(() => window.__C12_HANDOFF_RESULT__ ?? null)
+            const status = await app.storageStatus()
             frozenObserved = {
               documentAuthority: document.authority,
               documentRevision: document.revision,
               faultState,
+              handoffResult,
+              status: {
+                mode: status.mode,
+                activeMode: status.activeMode,
+                connection: status.connection,
+                readOnly: status.readOnly,
+                handoff: status.handoff,
+                notice: status.notice,
+                lastError: status.lastError,
+              },
             }
             return document.authority.state === 'handoff_pending'
               && faultState.droppedCommands === 1
+              && faultState.suppressedCommandStatuses >= 0
               ? { document, faultState }
               : null
           } catch (error) {
-            frozenObserved = { error: error instanceof Error ? error.message : String(error) }
+            frozenObserved = { error: error instanceof Error ? error.stack ?? error.message : String(error) }
             return null
           }
-        }, 'frozen local authority with dropped resume command', 20_000).catch(error => {
-          throw new Error(error instanceof Error ? error.message : String(error)
-            + ' observed=' + JSON.stringify(frozenObserved))
+        }, 'frozen local authority with dropped resume command', 30_000).catch(error => {
+          let diagnostic = frozenObserved
+          try {
+            diagnostic = {
+              ...(frozenObserved ?? {}),
+              serverLogTail: fixture.server.logText().split('\n').filter(line => line.length > 0).slice(-30),
+              electronLogTail: app.launchLog.slice(-30),
+            }
+          } catch { /* keep the primary observation */ }
+          throw new Error((error instanceof Error ? error.message : String(error))
+            + ' observed=' + JSON.stringify(diagnostic))
         })
         const frozenStatus = await app.storageStatus()
         assert.equal(frozenStatus.handoff.state, 'pending')
@@ -3669,6 +4358,311 @@ async function main() {
       }
     })
 
+    await step(SCENARIO_SECRET_BOUNDARY, async () => {
+      const fixture = await createClockedServerFixture(root, 'secret-boundary-audit', baseEnv, {
+        clockMs: TIME_FIXTURE_CLOCK_MS,
+        advanceWhileEmpty: true,
+        withPlayer: true,
+      })
+      try {
+        const owner = fixture.app
+        const player = fixture.player
+        const boundary = await import(
+          pathToFileURL(join(ROOT, 'server/dist/src/shared/sync/data-boundary.js')).href
+        )
+        const neverUploadKeys = [...boundary.NEVER_UPLOAD_KEYS]
+        const deviceSettingsKeys = [...boundary.DEVICE_LOCAL_SETTINGS_KEYS]
+        const devicePetKeys = [...boundary.DEVICE_ONLY_PET_INFO_KEYS]
+        const answerFields = new Set([...boundary.SESSION_ANSWER_KEY_FIELDS, 'correctAnswer', 'correctIndex'])
+        const deviceSettingsSet = new Set(deviceSettingsKeys)
+        const canonicalForbiddenColumns = new Set([
+          ...neverUploadKeys,
+          ...deviceSettingsKeys,
+          ...devicePetKeys,
+          'localDeviceId',
+          'device',
+          'localSettings',
+        ])
+        const canonicalGlobalForbidden = new Set([
+          ...neverUploadKeys,
+          ...devicePetKeys,
+          'localDeviceId',
+          'device',
+          'localSettings',
+          'presentation',
+        ])
+        const findCanonicalBoundaryPaths = value => {
+          const paths = findKeys(value, canonicalGlobalForbidden)
+          const settingsBlocks = []
+          if (value !== null && typeof value === 'object') {
+            if (value.settings !== null && typeof value.settings === 'object') {
+              settingsBlocks.push({ prefix: '', settings: value.settings })
+            }
+            const engineSave = value.save
+            if (engineSave !== null && typeof engineSave === 'object'
+              && engineSave.settings !== null && typeof engineSave.settings === 'object') {
+              settingsBlocks.push({ prefix: 'save.', settings: engineSave.settings })
+            }
+          }
+          for (const block of settingsBlocks) {
+            for (const path of findKeys(block.settings, deviceSettingsSet)) {
+              paths.push(block.prefix + path.slice(1))
+            }
+          }
+          return paths
+        }
+        const projectionSharedForbidden = new Set([
+          ...boundary.NEVER_UPLOAD_KEYS,
+          ...devicePetKeys,
+          'localDeviceId',
+        ])
+        await waitConverged(owner, player, 0, 20_000)
+
+        // Create a real server-side exam session so the audit has a legitimate
+        // closed session payload containing grading keys.
+        await seedExamLessons(fixture.dbPath, 9)
+        const examStart = await owner.command(
+          { type: 'exam.start', payload: { subject: 'xx-chinese' } },
+          'secret-audit-exam-start',
+        )
+        assert.equal(examStart.status, 'applied', 'exam fixture rejected: ' + JSON.stringify(examStart.error))
+        const examToken = examStart.result.sessionToken
+        assert.ok(typeof examToken === 'string' && examToken.length > 0)
+        rawSessionTokens.push(examToken)
+        const examSubmit = await owner.command(
+          { type: 'exam.submit', payload: { sessionToken: examToken, answers: [0, 0, 0] } },
+          'secret-audit-exam-submit',
+        )
+        assert.equal(examSubmit.status, 'applied', 'exam submit rejected: ' + JSON.stringify(examSubmit.error))
+        await waitConverged(owner, player, examSubmit.revision)
+
+        // Persist unique never-upload markers only in the owner's real local
+        // overlay. They must reach the local projection cache but never the
+        // server DB, logs, canonical shared projection, or player projection.
+        const secretPrefix = 'c12-never-upload-' + randomUUID()
+        const secrets = {
+          aiKey: secretPrefix + '-ai-key',
+          searchKey: secretPrefix + '-search-key',
+          webhookToken: secretPrefix + '-webhook-token',
+          presentation: secretPrefix + '-presentation',
+        }
+        const localPetPosition = { lastX: 123_456_789, lastY: 987_654_321 }
+        const localUpdate = await owner.page.evaluate(
+          async payload => await window.qqpet.localSettings.update(payload),
+          {
+            settings: {
+              aiKey: secrets.aiKey,
+              searchKey: secrets.searchKey,
+              webhookToken: secrets.webhookToken,
+              searchBackend: 'tavily',
+            },
+            petInfo: localPetPosition,
+            presentation: { neverUploadMarker: secrets.presentation },
+          },
+        )
+        assert.equal(localUpdate.settings.aiKey, secrets.aiKey)
+        assert.equal(localUpdate.settings.searchKey, secrets.searchKey)
+        assert.equal(localUpdate.settings.webhookToken, secrets.webhookToken)
+        assert.equal(localUpdate.petInfo.lastX, localPetPosition.lastX)
+        assert.equal(localUpdate.petInfo.lastY, localPetPosition.lastY)
+
+        const ownerCachePath = join(owner.userData, 'save.json')
+        const localCacheText = await waitFor(async () => {
+          try {
+            const text = await readFile(ownerCachePath, 'utf8')
+            return Object.values(secrets).every(marker => text.includes(marker)) ? text : null
+          } catch {
+            return null
+          }
+        }, 'owner local projection cache contains never-upload markers', 10_000)
+        assert.ok(localCacheText.length > 0)
+        const ownerProjectionWithLocal = await waitFor(async () => {
+          const projection = await owner.projection()
+          return projection?.device?.settings?.aiKey === secrets.aiKey ? projection : null
+        }, 'owner renderer local overlay contains never-upload markers', 10_000)
+        assert.equal(ownerProjectionWithLocal.device.settings.searchKey, secrets.searchKey)
+        assert.equal(ownerProjectionWithLocal.device.settings.webhookToken, secrets.webhookToken)
+        assert.equal(ownerProjectionWithLocal.device.petInfo.lastX, localPetPosition.lastX)
+        assert.equal(ownerProjectionWithLocal.device.petInfo.lastY, localPetPosition.lastY)
+        const playerProjectionAfterLocalWrite = await player.projection()
+        assert.notEqual(playerProjectionAfterLocalWrite, null)
+        assert.equal(
+          Object.values(secrets).some(marker => JSON.stringify(playerProjectionAfterLocalWrite).includes(marker)),
+          false,
+          'owner device-local secrets must not enter the player projection',
+        )
+
+        // A normal canonical command after the local secret write gives the
+        // captured server log real command lifecycle entries to audit.
+        const bought = await owner.command(
+          { type: 'inventory.buy', payload: { type: 'food', itemId: '102010001', quantity: 1 } },
+          'secret-audit-post-secret-command',
+        )
+        assert.equal(bought.status, 'applied', 'post-secret command rejected: ' + JSON.stringify(bought.error))
+        await waitConverged(owner, player, bought.revision)
+
+        const audit = await readDatabaseAudit(fixture.dbPath)
+        const allColumns = Object.values(audit.columns).flat()
+        const forbiddenColumns = allColumns.filter(column => canonicalForbiddenColumns.has(column))
+        assert.deepEqual(forbiddenColumns, [], 'server schema must not contain never-upload/device-local columns')
+        assert.ok(audit.devices.length >= 2, 'server device registry must contain the real paired renderers')
+        assert.ok(
+          audit.devices.every(row => row.tokenHashType === 'blob' && row.tokenHashLength === 32),
+          'device authentication material must be a 32-byte hash blob',
+        )
+        assert.equal(audit.columns.devices.includes('token'), false, 'devices must not store a plaintext token column')
+        assert.equal(audit.columns.devices.includes('token_hash'), true)
+        assert.equal(audit.columns.pairing_codes.includes('code'), false, 'pairing codes must not be stored in plaintext')
+        assert.equal(audit.columns.pairing_codes.includes('code_hash'), true)
+        assert.ok(
+          audit.pairingCodes.every(row => row.codeHashType === 'blob' && row.codeHashLength === 32),
+          'used pairing codes must remain 32-byte hash blobs',
+        )
+
+        const closedSessionAnswerKeyPaths = audit.sessionPayloads.flatMap(text => {
+          try {
+            return findKeys(JSON.parse(text), answerFields)
+          } catch {
+            return []
+          }
+        })
+        assert.ok(closedSessionAnswerKeyPaths.length >= 3, 'closed exam payload must retain its grading keys server-side')
+
+        const answerKeyPathsOutsideSessions = []
+        const canonicalForbiddenPaths = []
+        for (const cell of audit.textCells) {
+          let parsed
+          try {
+            parsed = JSON.parse(cell.text)
+          } catch {
+            if ([...answerFields].some(field => cell.text.includes(field))) {
+              answerKeyPathsOutsideSessions.push(cell.table + '.' + cell.column + ':raw')
+            }
+            continue
+          }
+          for (const path of findKeysOutsideClosedSessionPayload(parsed, answerFields)) {
+            answerKeyPathsOutsideSessions.push(cell.table + '.' + cell.column + ':' + path)
+          }
+          if (cell.table === 'pets' && (cell.column === 'save_json' || cell.column === 'engine_json')) {
+            for (const path of findCanonicalBoundaryPaths(parsed)) {
+              canonicalForbiddenPaths.push(cell.column + ':' + path)
+            }
+          }
+        }
+        assert.deepEqual(answerKeyPathsOutsideSessions, [], 'answer keys must exist only inside closed session payloads')
+        assert.deepEqual(canonicalForbiddenPaths, [], 'canonical state must not contain never-upload/device-local fields')
+
+        const pairingCodes = Object.values(fixture.pairingCodes).filter(
+          value => typeof value === 'string' && value.length > 0,
+        )
+        assert.ok(pairingCodes.length >= 2, 'both real pairing codes must be available for the leak audit')
+        const secretValues = Object.values(secrets)
+        const dbBuffers = await Promise.all(
+          [fixture.dbPath, fixture.dbPath + '-wal', fixture.dbPath + '-shm'].map(readOptionalFile),
+        )
+        const databaseFileText = Buffer.concat(dbBuffers.filter(buffer => buffer !== null)).toString('utf8')
+        const textCellValues = audit.textCells.map(cell => cell.text).join('\n')
+        const databaseText = textCellValues + '\n' + databaseFileText + '\n' + audit.sessionPayloads.join('\n')
+        assert.equal(
+          [...secretValues, ...pairingCodes].some(value => databaseText.includes(value)),
+          false,
+          'server SQLite/WAL must not contain never-upload markers or plaintext pairing codes',
+        )
+
+        const serverLogs = fixture.server.logText()
+        const logLines = serverLogs.split('\n').filter(line => line.length > 0)
+        assert.ok(logLines.length > 0, 'server log capture must not be empty')
+        assert.match(serverLogs, /"event":"command\.committed"/, 'server info log must record the post-secret canonical command')
+        assert.equal(
+          [...secretValues, ...pairingCodes, examToken, 'issuedToken'].some(value => serverLogs.includes(value)),
+          false,
+          'server logs must not contain secrets, pairing codes, or session tokens',
+        )
+        const answerFieldsInLogs = [...answerFields].filter(field => serverLogs.includes(field))
+        assert.deepEqual(answerFieldsInLogs, [], 'server logs must not contain answer-key field names')
+
+        const ownerProjection = await owner.projection()
+        const playerProjection = await player.projection()
+        assert.notEqual(ownerProjection, null)
+        assert.notEqual(playerProjection, null)
+        const projectionHygieneChecks = assertRendererProjectionHygiene(
+          { owner: ownerProjection, player: playerProjection },
+          [examToken],
+          'secret boundary projection',
+        )
+        assert.equal(
+          Object.values(secrets).some(marker => JSON.stringify(playerProjection).includes(marker)),
+          false,
+          'player projection must not contain another renderer local overlay secrets',
+        )
+        for (const [label, projection] of Object.entries({ owner: ownerProjection, player: playerProjection })) {
+          assert.equal(JSON.stringify(projection).includes(examToken), false, label + ' projection leaked a session token')
+          const sharedForbiddenPaths = findKeys(projection.shared, projectionSharedForbidden)
+          assert.deepEqual(sharedForbiddenPaths, [], label + ' shared projection leaked device-local/never-upload keys')
+        }
+        const ownerProjectionText = JSON.stringify(ownerProjection)
+        assert.equal(
+          secretValues.every(marker => ownerProjectionText.includes(marker)),
+          true,
+          'owner-local overlay should retain its own never-upload markers locally',
+        )
+
+        const syncConfig = await readOptionalFile(join(owner.userData, 'sync-config.json'))
+        const syncConfigText = syncConfig === null ? '' : syncConfig.toString('utf8')
+        assert.equal(secretValues.some(marker => syncConfigText.includes(marker)), false)
+        const deviceTokenFile = await readOptionalFile(join(owner.userData, 'remote-token.bin'))
+        const deviceTokenFileText = deviceTokenFile === null ? '' : deviceTokenFile.toString('utf8')
+        assert.equal(secretValues.some(marker => deviceTokenFileText.includes(marker)), false)
+
+        const scenarioDetail = {
+          databaseTables: audit.tables.length,
+          databaseColumnsChecked: allColumns.length,
+          deviceRows: audit.devices.length,
+          deviceTokenHashStorage: 'blob',
+          deviceTokenHashBytes: 32,
+          plaintextDeviceTokenColumnPresent: audit.columns.devices.includes('token'),
+          pairingCodeRows: audit.pairingCodes.length,
+          pairingCodeHashStorage: 'blob',
+          pairingCodeHashBytes: 32,
+          plaintextPairingCodeColumnPresent: audit.columns.pairing_codes.includes('code'),
+          neverUploadSecretsChecked: secretValues.length,
+          pairingCodesChecked: pairingCodes.length,
+          secretMarkersInSqliteOrWal: false,
+          pairingCodesInSqliteOrWal: false,
+          localOnlyColumnsAbsent: forbiddenColumns.length === 0,
+          localOnlyKeyPathsInCanonicalState: canonicalForbiddenPaths.length,
+          closedSessionPayloadAnswerKeyPaths: closedSessionAnswerKeyPaths.length,
+          answerKeyPathsOutsideClosedSessionPayload: answerKeyPathsOutsideSessions.length,
+          answerKeyFieldNamesInServerLogs: answerFieldsInLogs.length,
+          sessionTokensInServerLogsOrProjections: 0,
+          projectionHygieneChecks,
+          playerProjectionSecretMarkerMatches: Object.values(secrets)
+            .filter(marker => JSON.stringify(playerProjection).includes(marker)).length,
+          ownerLocalOverlaySecretMarkerMatches: secretValues
+            .filter(marker => ownerProjectionText.includes(marker)).length,
+          ownerLocalProjectionCacheContainsSecrets: localCacheText.length > 0,
+          syncConfigContainsSecrets: false,
+          serverLogLines: logLines.length,
+          serverCommandCommittedLogPresent: true,
+          deviceTokenFilePresent: deviceTokenFile !== null,
+          deviceTokenFileContainsMarkers: false,
+          secretsHash: hash(secretValues),
+          pairingCodesHash: hash(pairingCodes),
+          sessionTokenHash: hash(examToken),
+          answerKeysAbsentOutsideClosedSessionPayload: true,
+          neverUploadBoundaryHolds: true,
+        }
+        const detailText = JSON.stringify(scenarioDetail)
+        assert.equal(scenarioDetail.secretsHash.includes(secretPrefix), false)
+        for (const value of [...secretValues, ...pairingCodes, examToken]) {
+          assert.equal(detailText.includes(value), false, 'scenario detail must not contain raw secret material')
+        }
+        return scenarioDetail
+      } finally {
+        await fixture.cleanup()
+      }
+    })
+
     await step('real BrowserWindow/preload/renderer proof and evidence hygiene', async () => {
       const ownerMain = await owner.mainProof()
       const playerMain = await player.mainProof()
@@ -3803,6 +4797,10 @@ async function main() {
       advanceWhileEmptyZeroClientExact: true,
       onlineTimeSigninCoverageSplit: true,
       localAuthorityDetachResumeFenced: true,
+      survivorRestartNoDuplicate: true,
+      advanceWhileEmptyRandomReconnect: true,
+      rendererCanonicalMutationBlocked: true,
+      secretBoundaryAudit: true,
     }
     report.evidence.competingActionsCovered = true
     report.evidence.sessionTokenAbuseCovered = true
@@ -3816,12 +4814,19 @@ async function main() {
     report.evidence.advanceWhileEmptyZeroClientCovered = true
     report.evidence.onlineTimeSigninSplitCovered = true
     report.evidence.localAuthorityHandoffCovered = true
+    report.evidence.survivorRestartNoDuplicateCovered = true
+    report.evidence.advanceWhileEmptyRandomReconnectCovered = true
+    report.evidence.rendererMutationBlockedCovered = true
+    report.evidence.secretBoundaryAuditCovered = true
     report.evidence.answerKeysAbsent = true
     report.evidence.hygiene = {
       pairingCodesAbsent: true,
       rawDeviceIdsAbsent: true,
       tokensAbsent: true,
       answerKeysAbsent: true,
+      neverUploadSecretsAbsentFromServer: true,
+      deviceLocalFieldsAbsentFromCanonicalState: true,
+      authTokensHashOnlyInSqlite: true,
     }
     report.evidence.stepCount = report.steps.length
     report.finishedAt = new Date().toISOString()

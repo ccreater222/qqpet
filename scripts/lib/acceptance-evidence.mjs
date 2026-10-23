@@ -9,7 +9,7 @@
 import { mkdir, rm } from 'node:fs/promises'
 
 /** The current C12 E2E contains all mandatory §16.6 scenarios plus the setup/teardown steps. */
-export const E2E_MIN_STEPS = 30
+export const E2E_MIN_STEPS = 34
 export const EVIDENCE_MAX_AGE_MS = 30 * 60_000
 export const EVIDENCE_FUTURE_SKEW_MS = 2 * 60_000
 const GENERATED_ACCEPTANCE_EVIDENCE_PREFIX = 'docs/superpowers/acceptance/artifacts/'
@@ -28,6 +28,10 @@ export const REQUIRED_E2E_SCENARIO_NAMES = Object.freeze([
   'advanceWhileEmpty true and false have exact zero-client state deltas',
   'online-time and sign-in gift split credits only covered intervals exactly once',
   'real LocalRepository authority detach resume fences epochs and failed imports',
+  'renderer kill survivor continues and reconnect resumes without duplicate reward/events',
+  'advanceWhileEmpty true zero-client reconnect applies deterministic random events exactly once',
+  'renderer direct mutation and legacy SavePatch cannot change canonical state',
+  'server SQLite device fields logs and projections exclude never-upload secrets and local-only fields',
 ])
 export const REQUIRED_E2E_EVIDENCE_FLAGS = [
   'twoProcesses',
@@ -49,6 +53,10 @@ export const REQUIRED_E2E_EVIDENCE_FLAGS = [
   'advanceWhileEmptyZeroClientCovered',
   'onlineTimeSigninSplitCovered',
   'localAuthorityHandoffCovered',
+  'survivorRestartNoDuplicateCovered',
+  'advanceWhileEmptyRandomReconnectCovered',
+  'rendererMutationBlockedCovered',
+  'secretBoundaryAuditCovered',
   'answerKeysAbsent',
 ]
 export const REQUIRED_DOCKER_EVIDENCE_FLAGS = [

@@ -569,6 +569,43 @@ test('use-server against an archived server resumes with the current local bundl
   assert.equal(status.handoff.state, 'applied')
 })
 
+test('online archived server without a projection can resume the local bundle', async () => {
+  const harness = makeController()
+  harness.remote.projection = null
+  harness.remote.status.connection = 'online'
+  harness.remote.status.authority.state = 'archived'
+  harness.remote.commandResults.push(applied('admin.resumeServer', {
+    imported: true,
+    epoch: 5,
+    importClamped: false,
+    clockSkippedMs: 0,
+  }))
+  await harness.controller.setMode({
+    mode: 'server',
+    initialSource: 'upload-local',
+    rebindLocalSessions: true,
+  })
+  assert.equal(harness.remote.calls.includes('start'), true)
+  assert.equal(harness.remote.commands.length, 1)
+  assert.equal(harness.remote.commands[0].type, 'admin.resumeServer')
+  assert.equal(harness.remote.commands[0].payload.rebindLocalSessions, true)
+  const status = harness.controller.status()
+  assert.equal(status.mode, 'server')
+  assert.equal(status.activeMode, 'server')
+  assert.equal(harness.local.status.authorityState, 'archived')
+})
+
+test('online active server without a projection still fails closed before switching', async () => {
+  const harness = makeController()
+  harness.remote.projection = null
+  harness.remote.status.connection = 'online'
+  await assert.rejects(
+    harness.controller.setMode({ mode: 'server', initialSource: 'upload-local' }),
+    /offline: the server connection is not ready/,
+  )
+  assert.equal(harness.remote.commands.length, 0)
+})
+
 test('archived-server resume threads caller clamp, rebind and expected epoch options', async () => {
   const harness = makeController()
   harness.remote.status.authority.state = 'archived'

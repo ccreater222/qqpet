@@ -1050,7 +1050,14 @@ export class DesktopStorageController {
 
   private requireRemoteReady(): void {
     if (this.remote === null) throw new Error('pairing_required: pair this device with a server first')
-    if (this.remote.getProjection() === null || this.remote.getStatus().connection !== 'online') {
+    const status = this.remote.getStatus()
+    const archived = status.authority?.state === 'archived'
+      || status.authorityState === 'archived'
+    // Archived authority deliberately exposes status only (never a snapshot),
+    // so an online archived connection legitimately has no projection. The
+    // local bundle upload is the next operation and must remain allowed.
+    if (status.connection !== 'online'
+      || (this.remote.getProjection() === null && archived === false)) {
       throw new Error('offline: the server connection is not ready; wait for online status before switching')
     }
   }

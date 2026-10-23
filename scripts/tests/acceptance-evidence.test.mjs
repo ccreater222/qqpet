@@ -20,7 +20,7 @@ const REV = 'a'.repeat(40)
 const startedAt = new Date(NOW - 120_000).toISOString()
 const finishedAt = new Date(NOW - 1_000).toISOString()
 
-function e2eSteps(count = 30) {
+function e2eSteps(count = 34) {
   const required = REQUIRED_E2E_SCENARIO_NAMES.map((name, index) => ({
     name,
     status: 'pass',
@@ -61,8 +61,12 @@ function e2eReport() {
       advanceWhileEmptyZeroClientCovered: true,
       onlineTimeSigninSplitCovered: true,
       localAuthorityHandoffCovered: true,
+      survivorRestartNoDuplicateCovered: true,
+      advanceWhileEmptyRandomReconnectCovered: true,
+      rendererMutationBlockedCovered: true,
+      secretBoundaryAuditCovered: true,
       answerKeysAbsent: true,
-      stepCount: 30,
+      stepCount: 34,
       rendererProof: {
         electronMainPidsDistinct: true,
         browserWindowCount: 2,
@@ -147,10 +151,10 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
     ['missing finishedAt', () => ({ ...e2eReport(), finishedAt: undefined }), /valid finishedAt/],
     ['stale finishedAt', () => ({ ...e2eReport(), finishedAt: new Date(NOW - 31 * 60_000).toISOString() }), /stale/],
     ['future finishedAt', () => ({ ...e2eReport(), finishedAt: new Date(NOW + 3 * 60_000).toISOString() }), /future/],
-    ['too few steps', () => ({ ...e2eReport(), steps: e2eSteps(29) }), /minimum is 30/],
+    ['too few steps', () => ({ ...e2eReport(), steps: e2eSteps(33) }), /minimum is 34/],
     ['duplicate step names', () => {
       const report = e2eReport()
-      report.steps = Array.from({ length: 30 }, () => ({ name: 'same', status: 'pass', durationMs: 1 }))
+      report.steps = Array.from({ length: 34 }, () => ({ name: 'same', status: 'pass', durationMs: 1 }))
       return report
     }, /unique named steps/],
     ['missing mandatory scenario', () => {
@@ -158,6 +162,34 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
       report.steps[0].name = 'a different passing scenario'
       return report
     }, /missing mandatory scenario/],
+    ['missing survivor restart scenario', () => {
+      const report = e2eReport()
+      const index = report.steps.findIndex(step => step.name.includes('renderer kill survivor'))
+      assert.ok(index >= 0)
+      report.steps[index] = { ...report.steps[index], name: 'a different still-passing scenario' }
+      return report
+    }, /missing mandatory scenario "renderer kill survivor/],
+    ['missing random reconnect scenario', () => {
+      const report = e2eReport()
+      const index = report.steps.findIndex(step => step.name.includes('deterministic random events exactly once'))
+      assert.ok(index >= 0)
+      report.steps[index] = { ...report.steps[index], name: 'another different passing scenario' }
+      return report
+    }, /missing mandatory scenario "advanceWhileEmpty true zero-client reconnect/],
+    ['missing renderer mutation scenario', () => {
+      const report = e2eReport()
+      const index = report.steps.findIndex(step => step.name.includes('legacy SavePatch cannot change'))
+      assert.ok(index >= 0)
+      report.steps[index] = { ...report.steps[index], name: 'yet another passing scenario' }
+      return report
+    }, /missing mandatory scenario "renderer direct mutation and legacy SavePatch/],
+    ['missing secret boundary scenario', () => {
+      const report = e2eReport()
+      const index = report.steps.findIndex(step => step.name.includes('exclude never-upload secrets'))
+      assert.ok(index >= 0)
+      report.steps[index] = { ...report.steps[index], name: 'the last different passing scenario' }
+      return report
+    }, /missing mandatory scenario "server SQLite device fields logs and projections/],
     ['failed step', () => {
       const report = e2eReport()
       report.steps[4].status = 'fail'
@@ -178,6 +210,26 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
       report.evidence.sessionTokenAbuseCovered = false
       return report
     }, /sessionTokenAbuseCovered/],
+    ['survivor restart evidence not proven', () => {
+      const report = e2eReport()
+      delete report.evidence.survivorRestartNoDuplicateCovered
+      return report
+    }, /survivorRestartNoDuplicateCovered/],
+    ['random reconnect evidence not proven', () => {
+      const report = e2eReport()
+      report.evidence.advanceWhileEmptyRandomReconnectCovered = false
+      return report
+    }, /advanceWhileEmptyRandomReconnectCovered/],
+    ['renderer mutation evidence not proven', () => {
+      const report = e2eReport()
+      delete report.evidence.rendererMutationBlockedCovered
+      return report
+    }, /rendererMutationBlockedCovered/],
+    ['secret boundary evidence not proven', () => {
+      const report = e2eReport()
+      report.evidence.secretBoundaryAuditCovered = false
+      return report
+    }, /secretBoundaryAuditCovered/],
     ['answer-key hygiene not proven', () => {
       const report = e2eReport()
       delete report.evidence.answerKeysAbsent
@@ -220,7 +272,7 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
     }, /preloadApiExposed/],
     ['stepCount mismatch', () => {
       const report = e2eReport()
-      report.evidence.stepCount = 29
+      report.evidence.stepCount = 33
       return report
     }, /stepCount/],
     ['websocket proof below two clients', () => {

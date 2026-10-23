@@ -312,6 +312,7 @@ class FakeServer {
     this.replayDeliveryOnReconnect = false
     this.authorityResetOnNextCachedHello = false
     this.muteProjection = null
+    this.statusOnlyArchived = false
   }
 
   gameTimeMs() {
@@ -371,6 +372,15 @@ class FakeServer {
       }
       this.clients.add(connection)
       let deviceId = OWNER_DEVICE_ID
+      if (this.statusOnlyArchived) {
+        const welcome = welcomeFrame(deviceId, 'none', undefined, this.weatherLocation)
+        welcome.authority = clone(ARCHIVED_AUTHORITY)
+        welcome.headRevision = this.revision
+        welcome.headEventSeq = this.eventSeq
+        connection.emit(welcome)
+        connection.emit(readyFrame(this.revision, this.eventSeq, ARCHIVED_AUTHORITY))
+        return
+      }
       if (frame.auth.kind === 'pairing') {
         assert.equal(frame.auth.code, this.pairingCode)
       } else if (frame.auth.token !== TOKEN) {
@@ -1777,6 +1787,29 @@ test('archived owner can issue the detach/resume handoff commands through Remote
   assert.deepEqual(
     connection.sent.filter(frame => frame.t === 'command').map(frame => frame.command.type),
     ['admin.exportForDetach', 'admin.resumeServer'],
+  )
+})
+
+test('status-only archived handshake can resume without a projection snapshot', async t => {
+  const server = new FakeServer()
+  server.statusOnlyArchived = true
+  const { repository } = await makeRepository(server)
+  t.after(() => repository.stop())
+  const projection = await repository.start()
+  assert.equal(projection, null)
+  assert.equal(repository.getProjection(), null)
+  assert.equal(repository.getStatus().connection, 'online')
+  assert.equal(repository.getStatus().authority.state, 'archived')
+  assert.equal(repository.getStatus().readOnly, true)
+  const resumed = await repository.command({
+    type: 'admin.resumeServer',
+    payload: { expectedEpoch: 7, bundle: fixtures.bundle },
+  }, { opId: 'op-status-only-resume' })
+  assert.equal(resumed.status, 'applied')
+  const connection = [...server.clients][0]
+  assert.deepEqual(
+    connection.sent.filter(frame => frame.t === 'command').map(frame => frame.command.type),
+    ['admin.resumeServer'],
   )
 })
 

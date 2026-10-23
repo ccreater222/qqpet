@@ -506,10 +506,12 @@ export class RemoteRepository {
       && this.projection.authority.state === 'active'
     // Archived server authority still accepts the owner-only detach/resume
     // handoff pair. All ordinary gameplay commands stay fenced.
-    const archivedHandoffCommand = this.projection !== null
-      && authority !== undefined
+    // Archived authority may be status-only (projection === null), which is
+    // exactly the state a local bundle must resume from. Never require a save
+    // snapshot for the owner detach/resume handoff pair.
+    const archivedHandoffCommand = authority !== undefined
       && authority.state === 'archived'
-      && this.projection.authority.state === 'archived'
+      && (this.projection === null || this.projection.authority.state === 'archived')
       && this.role === 'owner'
       && (parsed.command.type === 'admin.exportForDetach' || parsed.command.type === 'admin.resumeServer')
     if (activeAuthority === false && archivedHandoffCommand === false) {
