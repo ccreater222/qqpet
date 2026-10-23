@@ -295,6 +295,10 @@ async function main() {
     lines.push('- Deterministic restart catch-up covered: `' + String(e2eReport.evidence?.deterministicRestartCovered === true) + '`')
     lines.push('- Revoked reconnect rejection covered: `' + String(e2eReport.evidence?.revokedReconnectCovered === true) + '`')
     lines.push('- Feed latency p95 covered: `' + String(e2eReport.evidence?.feedLatencyP95Covered === true) + '`')
+    lines.push('- Timed server-owned deadline covered: `' + String(e2eReport.evidence?.timedServerDeadlineCovered === true) + '`')
+    lines.push('- advanceWhileEmpty zero-client covered: `' + String(e2eReport.evidence?.advanceWhileEmptyZeroClientCovered === true) + '`')
+    lines.push('- Online-time/sign-in split covered: `' + String(e2eReport.evidence?.onlineTimeSigninSplitCovered === true) + '`')
+    lines.push('- Real LocalRepository handoff covered: `' + String(e2eReport.evidence?.localAuthorityHandoffCovered === true) + '`')
     lines.push('- Answer keys absent: `' + String(e2eReport.evidence?.answerKeysAbsent === true) + '`')
     lines.push('')
     lines.push(markdownRow(['Scenario', 'Status', 'Duration']))
@@ -323,6 +327,10 @@ async function main() {
       'deterministic restart catch-up has exact state and active clients',
       'revoked renderer reconnect is rejected after relaunch',
       'feed latency p95 across ten renderer commands',
+      'timed work completes exactly once at server-owned deadline across restart',
+      'advanceWhileEmpty true and false have exact zero-client state deltas',
+      'online-time and sign-in gift split credits only covered intervals exactly once',
+      'real LocalRepository authority detach resume fences epochs and failed imports',
       'owner detach then resume restores authority and both renderer projections converge',
       'device revoke disconnects player renderer and forces read-only',
       'real BrowserWindow/preload/renderer proof and evidence hygiene',

@@ -369,7 +369,10 @@ test('failed import stays read-only and rollbackDetach restores the frozen pre-d
   const repo = makeRepo(repoOptions(dir, clock))
   await repo.load()
   const activeEpoch = repo.getDocument().authority.stamp.epoch
+  const previousHandoffId = repo.getDocument().authority.stamp.handoffId
   const bundle = await repo.exportForDetach(1)
+  assert.notEqual(bundle.authority.handoffId, previousHandoffId)
+  assert.equal(bundle.authority.detachedAtWallMs, WALL_TIME_MS)
   const failed = await repo.importPortableBundle(bundle, { opId: 'op-bad-import', expectedEpoch: 99 })
   assert.equal(failed, null)
   assert.equal(repo.getStatus().state, 'read_only')
@@ -379,6 +382,14 @@ test('failed import stays read-only and rollbackDetach restores the frozen pre-d
   assert.equal(repo.getStatus().state, 'ready')
   assert.equal(repo.getDocument().authority.state, 'active')
   assert.equal(repo.getDocument().authority.stamp.epoch, activeEpoch)
+  // A definitive rejection rolls back to the pre-detach epoch and handoff id.
+  // The next genuine attempt must mint a fresh handoff/op-id rather than
+  // replaying the rejected command identity.
+  const retried = await repo.exportForDetach(1)
+  assert.notEqual(retried.authority.handoffId, bundle.authority.handoffId)
+  assert.equal(retried.authority.detachedAtWallMs, WALL_TIME_MS)
+  assert.ok(retried.authority.epoch > activeEpoch)
+  await repo.rollbackDetach()
 })
 
 test('failed persistence leaves command/catch-up state, cache, revision and anchors untouched', async () => {

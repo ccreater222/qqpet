@@ -541,6 +541,12 @@ export class LocalRepository {
       const at = this.now()
       this.closeAllOpenCoverageOn(candidate, at, 'authority_handoff')
       candidate.authority.stamp.epoch = Math.max(candidate.authority.stamp.epoch, incomingEpoch) + 1
+      // Every new handoff attempt gets a fresh idempotency identity. A
+      // definitive rejection records the old opId in the server command log;
+      // retrying that rejected op would be an op_id_conflict even though the
+      // local rollback restored a writable authority.
+      candidate.authority.stamp.handoffId = this.newUuid()
+      candidate.authority.stamp.detachedAtWallMs = at
       candidate.authority.state = 'handoff_pending'
       candidate.revision += 1
       this.syncAuthorityOn(candidate, at)

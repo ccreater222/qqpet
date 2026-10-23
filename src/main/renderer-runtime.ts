@@ -348,7 +348,18 @@ export class DesktopRendererRuntime {
     if (this.sendEnabled === false) return
     const next = this.toProjection(projection)
     const events = this.deltaEvents(projection)
-    const delivery = classifyProjectionDelivery(this.cursor, next, events)
+    // A definitive server rejection rolls the local authority back to its
+    // exact pre-export snapshot. That rollback intentionally restores the
+    // prior revision/epoch, so the normal monotonic classifier would reject
+    // the only projection that returns the renderer to the active local
+    // authority. Admit only same-lineage frozen -> active rollback recovery.
+    const rollbackRecovery = this.currentProjection !== null
+      && this.currentProjection.authority.state !== 'active'
+      && next.authority.state === 'active'
+      && this.currentProjection.authority.authorityId === next.authority.authorityId
+    const delivery = rollbackRecovery
+      ? { kind: 'resync' as const, reason: 'rollback_recovered' as const }
+      : classifyProjectionDelivery(this.cursor, next, events)
     if (delivery.kind === 'stale') return
     this.acceptProjection(projection)
     const channel = delivery.kind === 'resync' ? IPC.resync : IPC.projection

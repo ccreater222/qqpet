@@ -1289,6 +1289,10 @@ export class DesktopStorageController {
       }
       this.mapModeLocal()
       this.persistConfig()
+      // The local repository restored its pre-freeze active projection. Push
+      // it through the renderer immediately so status/read-only state cannot
+      // remain pinned to the frozen handoff_pending snapshot after rollback.
+      this.pushActiveProjection()
       return 'rolled_back'
     }
     try {

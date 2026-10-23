@@ -18,7 +18,7 @@ const REV = 'a'.repeat(40)
 const startedAt = new Date(NOW - 120_000).toISOString()
 const finishedAt = new Date(NOW - 1_000).toISOString()
 
-function e2eSteps(count = 26) {
+function e2eSteps(count = 30) {
   const required = REQUIRED_E2E_SCENARIO_NAMES.map((name, index) => ({
     name,
     status: 'pass',
@@ -55,8 +55,12 @@ function e2eReport() {
       deterministicRestartCovered: true,
       revokedReconnectCovered: true,
       feedLatencyP95Covered: true,
+      timedServerDeadlineCovered: true,
+      advanceWhileEmptyZeroClientCovered: true,
+      onlineTimeSigninSplitCovered: true,
+      localAuthorityHandoffCovered: true,
       answerKeysAbsent: true,
-      stepCount: 26,
+      stepCount: 30,
       rendererProof: {
         electronMainPidsDistinct: true,
         browserWindowCount: 2,
@@ -137,10 +141,10 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
     ['missing finishedAt', () => ({ ...e2eReport(), finishedAt: undefined }), /valid finishedAt/],
     ['stale finishedAt', () => ({ ...e2eReport(), finishedAt: new Date(NOW - 31 * 60_000).toISOString() }), /stale/],
     ['future finishedAt', () => ({ ...e2eReport(), finishedAt: new Date(NOW + 3 * 60_000).toISOString() }), /future/],
-    ['too few steps', () => ({ ...e2eReport(), steps: e2eSteps(25) }), /minimum is 26/],
+    ['too few steps', () => ({ ...e2eReport(), steps: e2eSteps(29) }), /minimum is 30/],
     ['duplicate step names', () => {
       const report = e2eReport()
-      report.steps = Array.from({ length: 26 }, () => ({ name: 'same', status: 'pass', durationMs: 1 }))
+      report.steps = Array.from({ length: 30 }, () => ({ name: 'same', status: 'pass', durationMs: 1 }))
       return report
     }, /unique named steps/],
     ['missing mandatory scenario', () => {
@@ -210,7 +214,7 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
     }, /preloadApiExposed/],
     ['stepCount mismatch', () => {
       const report = e2eReport()
-      report.evidence.stepCount = 25
+      report.evidence.stepCount = 29
       return report
     }, /stepCount/],
     ['websocket proof below two clients', () => {

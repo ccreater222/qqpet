@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:net'
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -22,7 +22,10 @@ import { E2E_MIN_STEPS, REQUIRED_E2E_SCENARIO_NAMES } from '../lib/acceptance-ev
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '../..')
 const SERVER_ENTRY = join(ROOT, 'server/dist/server/src/index.js')
+const CLOCKED_SERVER_ENTRY = join(HERE, 'clocked-server.mjs')
 const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+/** Fixed noon in Asia/Shanghai, far from any 06:00 daily boundary. */
+const TIME_FIXTURE_CLOCK_MS = Date.UTC(2030, 0, 1, 4, 0, 0)
 const CODE_REVISION = process.env.QQPET_CODE_REVISION?.trim()
   || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim()
 
@@ -35,6 +38,10 @@ const [
   SCENARIO_DETERMINISTIC_RESTART,
   SCENARIO_REVOKED_RECONNECT,
   SCENARIO_FEED_P95,
+  SCENARIO_TIMED_WORK,
+  SCENARIO_ADVANCE_WHILE_EMPTY,
+  SCENARIO_ONLINE_SIGNIN,
+  SCENARIO_LOCAL_HANDOFF,
 ] = REQUIRED_E2E_SCENARIO_NAMES
 
 if (process.platform === 'linux' && process.env.DISPLAY === undefined && process.env.QQPET_E2E_XVFB === undefined) {
@@ -287,6 +294,166 @@ async function rewindSchedulerAnchor(dbPath, anchorMs, petId = 'default') {
   })
 }
 
+
+async function readScheduledJobRows(dbPath, petId = 'default') {
+  return await withDatabase(dbPath, false, db => db.prepare(
+    `SELECT job_id, kind, due_at_game_ms, payload_json, status, created_command_seq, completed_command_seq
+     FROM scheduled_jobs WHERE pet_id = ? ORDER BY due_at_game_ms, job_id`,
+  ).all(petId).map(row => ({
+    id: Number(row.job_id),
+    kind: String(row.kind),
+    dueAtGameMs: Number(row.due_at_game_ms),
+    payload: JSON.parse(String(row.payload_json)),
+    status: String(row.status),
+    createdCommandSeq: row.created_command_seq === null ? null : Number(row.created_command_seq),
+    completedCommandSeq: row.completed_command_seq === null ? null : Number(row.completed_command_seq),
+  })))
+}
+
+async function readEventRows(dbPath, options = {}) {
+  const petId = options.petId ?? 'default'
+  const type = options.type
+  return await withDatabase(dbPath, false, db => {
+    const rows = type === undefined
+      ? db.prepare(
+        `SELECT event_seq, revision, command_seq, game_time_ms, type, payload_json
+         FROM events WHERE pet_id = ? ORDER BY event_seq`,
+      ).all(petId)
+      : db.prepare(
+        `SELECT event_seq, revision, command_seq, game_time_ms, type, payload_json
+         FROM events WHERE pet_id = ? AND type = ? ORDER BY event_seq`,
+      ).all(petId, type)
+    return rows.map(row => ({
+      eventSeq: Number(row.event_seq),
+      revision: Number(row.revision),
+      commandSeq: row.command_seq === null ? null : Number(row.command_seq),
+      gameTimeMs: Number(row.game_time_ms),
+      type: String(row.type),
+      payload: JSON.parse(String(row.payload_json)),
+    }))
+  })
+}
+
+/**
+ * Independent canonical engine snapshot for the deterministic scheduler
+ * oracle. This reconstructs exactly the same public fields DatabaseStore uses,
+ * without writing fixture data into the canonical document.
+ */
+async function readCanonicalEngine(dbPath, petId = 'default') {
+  return await withDatabase(dbPath, false, db => {
+    const pet = db.prepare(
+      `SELECT save_json, engine_json, game_time_ms, last_scheduler_wall_ms
+       FROM pets WHERE id = ?`,
+    ).get(petId)
+    const settings = db.prepare(
+      'SELECT advance_while_empty, time_zone, weather_location FROM pet_settings WHERE pet_id = ?',
+    ).get(petId)
+    if (pet === undefined || settings === undefined) throw new Error('canonical pet/settings row is missing')
+    const engine = JSON.parse(String(pet.engine_json))
+    engine.save = JSON.parse(String(pet.save_json))
+    engine.gameTimeMs = Number(pet.game_time_ms)
+    engine.lastSchedulerWallMs = Number(pet.last_scheduler_wall_ms)
+    engine.timeZone = String(settings.time_zone)
+    engine.advanceWhileEmpty = Number(settings.advance_while_empty) === 1
+    engine.weatherLocation = settings.weather_location === null
+      ? engine.weatherLocation
+      : String(settings.weather_location)
+    engine.scheduledJobs = db.prepare(
+      `SELECT job_id, kind, due_at_game_ms, payload_json, status
+       FROM scheduled_jobs WHERE pet_id = ? ORDER BY due_at_game_ms, job_id`,
+    ).all(petId).map(row => ({
+      id: Number(row.job_id),
+      type: String(row.kind),
+      dueAtGameMs: Number(row.due_at_game_ms),
+      payload: JSON.parse(String(row.payload_json)),
+      status: String(row.status),
+    }))
+    engine.gameSessions = db.prepare(
+      `SELECT session_token, actor_device_id, payload_json, started_at_game_ms,
+              expires_at_game_ms, status, settled_command_seq, reward_key, cancel_reason
+       FROM game_sessions WHERE pet_id = ? ORDER BY started_at_game_ms, session_token`,
+    ).all(petId).map(row => {
+      const session = {
+        sessionToken: String(row.session_token),
+        actorDeviceId: String(row.actor_device_id),
+        payload: JSON.parse(String(row.payload_json)),
+        startedAtGameMs: Number(row.started_at_game_ms),
+        expiresAtGameMs: Number(row.expires_at_game_ms),
+        status: String(row.status),
+      }
+      if (row.settled_command_seq !== null) session.settledCommandSeq = Number(row.settled_command_seq)
+      if (row.reward_key !== null) session.rewardKey = String(row.reward_key)
+      if (row.cancel_reason !== null) session.cancelReason = String(row.cancel_reason)
+      return session
+    })
+    engine.sessionCoverage = db.prepare(
+      `SELECT coverage_id, device_id, connected_at_ms, disconnected_at_ms, last_heartbeat_at_ms, close_reason
+       FROM session_coverage WHERE pet_id = ? ORDER BY connected_at_ms, coverage_id`,
+    ).all(petId).map(row => {
+      const interval = {
+        coverageId: String(row.coverage_id),
+        deviceId: String(row.device_id),
+        connectedAtWallMs: Number(row.connected_at_ms),
+        lastHeartbeatWallMs: Number(row.last_heartbeat_at_ms),
+      }
+      if (row.disconnected_at_ms !== null) interval.disconnectedAtWallMs = Number(row.disconnected_at_ms)
+      if (row.close_reason !== null) interval.closeReason = String(row.close_reason)
+      return interval
+    })
+    return engine
+  })
+}
+
+async function readAuthorityRow(dbPath, petId = 'default') {
+  const row = await withDatabase(dbPath, false, db => db.prepare(
+    `SELECT authority_id, restore_generation, epoch, handoff_epoch, owner, state, handoff_id,
+            detached_at_ms, source_revision, source_event_seq
+     FROM pet_authority WHERE pet_id = ?`,
+  ).get(petId))
+  if (row === undefined) throw new Error('pet authority row is missing')
+  return {
+    authorityId: String(row.authority_id),
+    restoreGeneration: Number(row.restore_generation),
+    epoch: Number(row.epoch),
+    handoffEpoch: row.handoff_epoch === null ? null : Number(row.handoff_epoch),
+    owner: String(row.owner),
+    state: String(row.state),
+    handoffId: String(row.handoff_id),
+    detachedAtMs: row.detached_at_ms === null ? null : Number(row.detached_at_ms),
+    sourceRevision: row.source_revision === null ? null : Number(row.source_revision),
+    sourceEventSeq: row.source_event_seq === null ? null : Number(row.source_event_seq),
+  }
+}
+
+function localDocumentPath(userDataPath) {
+  return join(userDataPath, 'save.v2.json')
+}
+
+async function readLocalDocument(userDataPath) {
+  return JSON.parse(await readFile(localDocumentPath(userDataPath), 'utf8'))
+}
+
+async function fileSha256(path) {
+  return createHash('sha256').update(await readFile(path)).digest('hex')
+}
+
+async function writeClockedNow(clockFile, value) {
+  assert.ok(Number.isSafeInteger(value) && value >= 0, 'test clock must be a non-negative safe integer')
+  const temporary = clockFile + '.' + process.pid + '.' + Date.now() + '.tmp'
+  await writeFile(temporary, String(value) + '\n')
+  await rename(temporary, clockFile)
+}
+
+function runClockedCli(env, args) {
+  const stdout = execFileSync(process.execPath, [CLOCKED_SERVER_ENTRY, ...args], {
+    cwd: ROOT,
+    env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  return JSON.parse(stdout)
+}
+
 const FORBIDDEN_SESSION_PROJECTION_KEYS = new Set([
   'answerIndex',
   'answerKey',
@@ -438,9 +605,54 @@ function eatTaskCount(projection) {
   }
 }
 
+function taskCounter(save, counter) {
+  const raw = save?.saveJsonData?.task
+  if (typeof raw !== 'string') return 0
+  try {
+    return Number(JSON.parse(raw).doNums?.[counter] ?? 0)
+  } catch {
+    return 0
+  }
+}
+
+function sharedBlob(save, key, fallback = {}) {
+  const raw = save?.saveJsonData?.[key]
+  if (typeof raw !== 'string') return fallback
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return fallback
+  }
+}
+
+function signinState(save) {
+  const state = sharedBlob(save, 'signin', {})
+  return {
+    collectionList: state.collectionList ?? {},
+    getGrowth: state.getGrowth ?? null,
+    onlineGiftNum: Number(state.onlineGiftNum ?? 0),
+    isOnlineLastTime: Number(state.isOnlineLastTime ?? 20),
+    getBirthDayGift: state.getBirthDayGift ?? true,
+  }
+}
+
+function countSigninDay(state, day) {
+  let count = 0
+  for (const months of Object.values(state.collectionList ?? {})) {
+    if (months === null || typeof months !== 'object') continue
+    for (const days of Object.values(months)) {
+      if (Array.isArray(days) === false) continue
+      count += days.filter(value => Number(value) === Number(day)).length
+    }
+  }
+  return count
+}
+
 class ServerProcess {
   constructor(options) {
     this.options = options
+    this.entry = options.entry ?? SERVER_ENTRY
+    this.args = options.args ?? ['start']
     this.child = null
     this.stdout = []
     this.stderr = []
@@ -449,7 +661,7 @@ class ServerProcess {
   }
 
   async start() {
-    this.child = spawn(process.execPath, [SERVER_ENTRY, 'start'], {
+    this.child = spawn(process.execPath, [this.entry, ...this.args], {
       cwd: ROOT,
       env: this.options.env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -594,12 +806,17 @@ class RendererApp {
         sentResyncs: 0,
         sentHellos: 0,
         sockets: 0,
+        dropCommandTypes: [],
+        droppedCommandFrames: [],
+        droppedCommands: 0,
+        lastSocket: null,
       }
       globalThis.__QQPET_C12_WS_FAULTS__ = state
       globalThis.WebSocket = class extends OriginalWebSocket {
         constructor(url) {
           super(url)
           state.sockets += 1
+          state.lastSocket = this
           this.addEventListener('message', event => {
             if (state.dropProjection <= 0) return
             let frame
@@ -616,12 +833,20 @@ class RendererApp {
         }
 
         send(data) {
+          let frame = null
           try {
-            const frame = JSON.parse(String(data))
+            frame = JSON.parse(String(data))
             if (frame?.t === 'resync') state.sentResyncs += 1
             if (frame?.t === 'hello') state.sentHellos += 1
           } catch {
             // Non-JSON payloads are not used by this protocol.
+          }
+          if (frame?.t === 'command'
+            && Array.isArray(state.dropCommandTypes)
+            && state.dropCommandTypes.includes(frame.command?.type)) {
+            state.droppedCommandFrames.push(String(data))
+            state.droppedCommands += 1
+            return
           }
           return super.send(data)
         }
@@ -677,6 +902,13 @@ class RendererApp {
     )
   }
 
+  async setMode(input) {
+    return await this.page.evaluate(
+      async payload => await window.qqpet.storage.setMode(payload),
+      input,
+    )
+  }
+
   async setServerMode(initialSource = 'use-server') {
     return await this.page.evaluate(
       async source => await window.qqpet.storage.setMode({ mode: 'server', initialSource: source }),
@@ -696,7 +928,51 @@ class RendererApp {
   }
 
   async websocketFaultState() {
-    return await this.app.evaluate(() => ({ ...globalThis.__QQPET_C12_WS_FAULTS__ }))
+    return await this.app.evaluate(() => {
+      const state = globalThis.__QQPET_C12_WS_FAULTS__
+      return {
+        dropProjection: state.dropProjection,
+        droppedProjections: state.droppedProjections,
+        sentResyncs: state.sentResyncs,
+        sentHellos: state.sentHellos,
+        sockets: state.sockets,
+        dropCommandTypes: [...state.dropCommandTypes],
+        droppedCommandFrames: state.droppedCommandFrames.length,
+        droppedCommands: state.droppedCommands,
+      }
+    })
+  }
+
+  async armCommandDrop(commandType) {
+    await this.app.evaluate((_electron, type) => {
+      const state = globalThis.__QQPET_C12_WS_FAULTS__
+      state.dropCommandTypes = [type]
+      state.droppedCommandFrames = []
+      state.droppedCommands = 0
+    }, commandType)
+  }
+
+  async replayDroppedCommand({ expectedEpochDelta = 0 } = {}) {
+    return await this.app.evaluate((_electron, delta) => {
+      const state = globalThis.__QQPET_C12_WS_FAULTS__
+      if (state.droppedCommandFrames.length !== 1) {
+        throw new Error('expected exactly one dropped command frame, got ' + state.droppedCommandFrames.length)
+      }
+      const frame = JSON.parse(state.droppedCommandFrames[0])
+      if (delta !== 0) {
+        if (typeof frame?.command?.payload?.expectedEpoch !== 'number') {
+          throw new Error('dropped command has no expectedEpoch to fence')
+        }
+        frame.command.payload.expectedEpoch += delta
+      }
+      const socket = state.lastSocket
+      if (socket === null) throw new Error('no live WebSocket for replay')
+      state.dropCommandTypes = []
+      const text = JSON.stringify(frame)
+      socket.send(text)
+      state.droppedCommandFrames = []
+      return { commandType: frame.command?.type ?? '', expectedEpoch: frame?.command?.payload?.expectedEpoch }
+    }, expectedEpochDelta)
   }
 
   async armProjectionDrop() {
@@ -765,6 +1041,268 @@ class RendererApp {
   }
 }
 
+
+async function waitForClients(server, expected, label, timeoutMs = 15_000) {
+  return await waitFor(async () => {
+    const health = await server.health()
+    return health.activeClientCount === expected ? health : null
+  }, label, timeoutMs)
+}
+
+async function createClockedServerFixture(root, label, baseEnv, options = {}) {
+  const directory = join(root, label)
+  const dbPath = join(directory, 'qqpet.sqlite')
+  const backupDir = join(directory, 'backups')
+  const restoreGenerationFile = join(directory, 'restore-generation.txt')
+  const adminSocket = join(directory, 'admin.sock')
+  const credentialFile = join(directory, 'owner-admin-credential.txt')
+  const userData = join(directory, 'electron-owner')
+  const clockFile = join(directory, 'clock.txt')
+  const port = await freePort()
+  const serverUrl = 'ws://127.0.0.1:' + port + '/v1/sync'
+  const clockMs = options.clockMs ?? TIME_FIXTURE_CLOCK_MS
+  await mkdir(directory, { recursive: true })
+  await mkdir(backupDir, { recursive: true })
+  await mkdir(userData, { recursive: true })
+  await writeFile(credentialFile, 'c12-clocked-fixture-owner-admin-credential\n', { mode: 0o600 })
+  await writeClockedNow(clockFile, clockMs)
+  const env = {
+    ...baseEnv,
+    QQPET_SYNC_DB: dbPath,
+    QQPET_SYNC_BACKUP_DIR: backupDir,
+    QQPET_SYNC_RESTORE_GENERATION_FILE: restoreGenerationFile,
+    QQPET_ADMIN_SOCKET: adminSocket,
+    QQPET_OWNER_ADMIN_CREDENTIAL: credentialFile,
+    QQPET_SYNC_PORT: String(port),
+    QQPET_SYNC_ADVANCE_WHILE_EMPTY: options.advanceWhileEmpty === false ? '0' : '1',
+    QQPET_E2E_CLOCK_FILE: clockFile,
+  }
+  const initialized = runClockedCli(env, [
+    'init', '--pet-id', 'default', '--time-zone', 'Asia/Shanghai', '--weather-city', '北京',
+  ])
+  assert.equal(initialized.ok, true)
+  const ownerPairingCode = initialized.pairingCode
+  assert.match(ownerPairingCode, /^QQP-[A-Za-z0-9_-]{20,}$/)
+  const paired = runClockedCli(env, ['pair', '--pet-id', 'default', '--role', 'owner'])
+  assert.equal(paired.ok, true)
+  assert.match(paired.pairingCode, /^QQP-[A-Za-z0-9_-]{20,}$/)
+  let server = await new ServerProcess({
+    port,
+    env,
+    entry: CLOCKED_SERVER_ENTRY,
+    args: ['serve'],
+  }).start()
+  let app = null
+  const fixture = {
+    label,
+    directory,
+    dbPath,
+    userData,
+    clockFile,
+    port,
+    serverUrl,
+    env,
+    db: dbPath,
+    get server() { return server },
+    get app() { return app },
+    async setClock(value) {
+      await writeClockedNow(clockFile, value)
+    },
+    async startServer() {
+      assert.equal(server, null, label + ': server is already running')
+      server = await new ServerProcess({
+        port,
+        env,
+        entry: CLOCKED_SERVER_ENTRY,
+        args: ['serve'],
+      }).start()
+      return server
+    },
+    async stopServer() {
+      if (server === null) return
+      const current = server
+      server = null
+      await current.stop()
+    },
+    async relaunchApp() {
+      assert.notEqual(app, null, label + ': app has not been launched')
+      await app.relaunch()
+      await app.waitOnline(30_000)
+      return app
+    },
+    async cleanup() {
+      if (app !== null) {
+        await app.close().catch(() => {})
+        app = null
+      }
+      if (server !== null) {
+        await server.stop().catch(() => {})
+        server = null
+      }
+    },
+  }
+  try {
+    app = await new RendererApp({
+      label: label + '-owner-renderer',
+      userData,
+      serverUrl,
+    }).launch()
+    const pairedStatus = await app.pair(paired.pairingCode, label + ' owner renderer')
+    assert.equal(pairedStatus.paired, true)
+    const status = await app.setServerMode('use-server')
+    assert.equal(status.mode, 'server')
+    assert.equal(status.activeMode, 'server')
+    assert.equal(status.authority.owner, 'server')
+    assert.equal(status.authority.state, 'active')
+    if (options.adopt !== false) {
+      const adopted = await app.command(
+        { type: 'pet.adopt', payload: { sex: 'GG' } },
+        label + '-adopt',
+      )
+      assert.equal(adopted.status, 'applied', label + ': adopt rejected: ' + JSON.stringify(adopted.error))
+      await waitFor(async () => {
+        const projection = await app.projection()
+        return projection?.shared?.havePet === true ? projection : null
+      }, label + ' pet projection', 20_000)
+    }
+    if (options.advanceWhileEmpty === false) {
+      await app.setAdvanceWhileEmpty(false)
+      const updated = await waitFor(async () => {
+        const status = await app.storageStatus()
+        return status.advanceWhileEmpty === false ? status : null
+      }, label + ' advanceWhileEmpty false status', 10_000)
+      assert.equal(updated.advanceWhileEmpty, false)
+    }
+    return fixture
+  } catch (error) {
+    await fixture.cleanup()
+    throw error
+  }
+}
+
+async function ensureWorkReady(app, label) {
+  for (const [stat, amount] of [['growth', 2_000], ['health', 5], ['mood', 1_000], ['hunger', 1_000]]) {
+    const result = await app.command(
+      { type: 'admin.grantCheat', payload: { stat, amount } },
+      label + '-cheat-' + stat,
+    )
+    assert.equal(result.status, 'applied', label + ': ' + stat + ' fixture rejected: ' + JSON.stringify(result.error))
+  }
+  const projection = await waitFor(async () => {
+    const current = await app.projection()
+    return current?.shared?.havePet === true
+      && current.shared.petInfo.health === 5
+      && current.shared.petInfo.mood > 0
+      && current.shared.petComputedlInfo.level >= 2
+      ? current
+      : null
+  }, label + ' work-ready living pet', 10_000)
+  return projection
+}
+
+async function createLocalHandoffFixture(root, label, baseEnv, clockMs = Date.now()) {
+  const directory = join(root, label)
+  const dbPath = join(directory, 'qqpet.sqlite')
+  const backupDir = join(directory, 'backups')
+  const restoreGenerationFile = join(directory, 'restore-generation.txt')
+  const adminSocket = join(directory, 'admin.sock')
+  const credentialFile = join(directory, 'owner-admin-credential.txt')
+  const userData = join(directory, 'electron-owner')
+  const clockFile = join(directory, 'clock.txt')
+  const port = await freePort()
+  const serverUrl = 'ws://127.0.0.1:' + port + '/v1/sync'
+  await mkdir(directory, { recursive: true })
+  await mkdir(backupDir, { recursive: true })
+  await mkdir(userData, { recursive: true })
+  await writeFile(credentialFile, 'c12-local-handoff-owner-admin-credential\n', { mode: 0o600 })
+  await writeClockedNow(clockFile, clockMs)
+  const env = {
+    ...baseEnv,
+    QQPET_SYNC_DB: dbPath,
+    QQPET_SYNC_BACKUP_DIR: backupDir,
+    QQPET_SYNC_RESTORE_GENERATION_FILE: restoreGenerationFile,
+    QQPET_ADMIN_SOCKET: adminSocket,
+    QQPET_OWNER_ADMIN_CREDENTIAL: credentialFile,
+    QQPET_SYNC_PORT: String(port),
+    QQPET_SYNC_ADVANCE_WHILE_EMPTY: '1',
+    QQPET_E2E_CLOCK_FILE: clockFile,
+  }
+  const initialized = runClockedCli(env, [
+    'init', '--pet-id', 'default', '--time-zone', 'Asia/Shanghai', '--weather-city', '北京',
+  ])
+  assert.equal(initialized.ok, true)
+  const pairing = runClockedCli(env, ['pair', '--pet-id', 'default', '--role', 'owner'])
+  assert.equal(pairing.ok, true)
+  let server = await new ServerProcess({
+    port,
+    env,
+    entry: CLOCKED_SERVER_ENTRY,
+    args: ['serve'],
+  }).start()
+  let app = null
+  const fixture = {
+    label,
+    directory,
+    dbPath,
+    userData,
+    clockFile,
+    port,
+    serverUrl,
+    env,
+    get server() { return server },
+    get app() { return app },
+    async setClock(value) {
+      await writeClockedNow(clockFile, value)
+    },
+    async stopServer() {
+      if (server === null) return
+      const current = server
+      server = null
+      await current.stop()
+    },
+    async cleanup() {
+      if (app !== null) {
+        await app.close().catch(() => {})
+        app = null
+      }
+      if (server !== null) {
+        await server.stop().catch(() => {})
+        server = null
+      }
+    },
+  }
+  try {
+    app = await new RendererApp({
+      label: label + '-owner-renderer',
+      userData,
+      serverUrl,
+    }).launch()
+    const localStatus = await app.storageStatus()
+    assert.equal(localStatus.mode, 'local')
+    assert.equal(localStatus.activeMode, 'local')
+    const adopted = await app.command(
+      { type: 'pet.adopt', payload: { sex: 'MM' } },
+      label + '-local-adopt',
+    )
+    assert.equal(adopted.status, 'applied', label + ': local adopt rejected: ' + JSON.stringify(adopted.error))
+    await waitFor(async () => {
+      const projection = await app.projection()
+      return projection?.shared?.havePet === true
+        && projection.authority.owner === 'local'
+        && projection.authority.state === 'active'
+        ? projection
+        : null
+    }, label + ' active local projection', 20_000)
+    const paired = await app.pair(pairing.pairingCode, label + ' owner renderer')
+    assert.equal(paired.paired, true)
+    await waitForPairedDevice(app, 'owner', label + ' owner pairing')
+    return fixture
+  } catch (error) {
+    await fixture.cleanup()
+    throw error
+  }
+}
+
 async function main() {
   const startedAt = new Date().toISOString()
   const root = await mkdtemp(join(tmpdir(), 'qqpet-c12-renderer-e2e-'))
@@ -807,6 +1345,9 @@ async function main() {
       'The deterministic restart scenario rewinds the persisted scheduler anchor only while the real server process is stopped, so the real runtime executes an exact two-tick catch-up; the expected state/events are derived with the same compiled canonical runtime as an independent oracle.',
       'Startup crash repair deliberately SIGSTOPs the real server for 32 seconds so the persisted heartbeat + 30 second grace bound is observably earlier than restart wall time.',
       'Revoked-reconnect testing relaunches a fresh Electron process from a copied userData directory after removing copied Chromium singleton lock files; the same persisted revoked device token is presented to the real server.',
+      'Timed-work, advance-while-empty and online/sign-in coverage scenarios run the real standalone SyncServer, SQLite store, command queue and scheduler with a test-only injected wall clock read from an atomically replaced file; this removes real-minute waits without changing server rules or canonical data.',
+      'The local-authority fault case drops one already-serialized admin.resumeServer frame and replays it with only expectedEpoch fenced by +1. The portable bundle itself is produced by LocalRepository and is never edited; the resulting server rejection drives the production rollback path.',
+      'Local and server timestamps in the handoff scenario share a near-wall clock fixture, but the test clock is not advanced during the final local scheduler run; local archive/freeze assertions compare persisted document hashes rather than wall-clock tick counts.',
     ],
   }
   const step = async (name, fn) => {
@@ -1417,26 +1958,31 @@ async function main() {
         'c12-session-island-news',
       )
       assert.equal(news.status, 'applied')
-      const islandReady = await waitConverged(owner, player, news.revision)
-      let islandState = JSON.parse(islandReady.right.shared.saveJsonData.island)
-      let quizIndex = islandState.errands.findIndex(errand => errand.kind === 'quiz')
-      if (quizIndex < 0) {
-        // The daily roll is allowed not to choose a quiz errand. Seed one
-        // canonical quiz errand in the real SQLite document, then exercise the
-        // same production start/answer commands over the live WebSocket.
-        const seeded = await seedIslandQuizErrand(dbPath)
-        quizIndex = seeded.quizIndex
-        islandState = {
-          ...islandState,
-          errands: [...islandState.errands, seeded.errand],
-        }
+      await waitConverged(owner, player, news.revision)
+      // The daily roll is allowed not to choose a quiz errand. Always seed the
+      // canonical SQLite fixture, then read the current server document again
+      // so the command uses the exact persisted errand index rather than a
+      // possibly stale renderer projection.
+      let islandStart = null
+      let quizIndex = -1
+      let quizErrand = null
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await seedIslandQuizErrand(dbPath)
+        const canonical = await readCanonicalEngine(dbPath)
+        const islandState = JSON.parse(String(canonical.save.saveJsonData.island ?? '{}'))
+        quizIndex = Array.isArray(islandState.errands)
+          ? islandState.errands.findIndex(errand => errand.kind === 'quiz')
+          : -1
+        assert.ok(quizIndex >= 0, 'island fixture must expose a quiz errand')
+        quizErrand = islandState.errands[quizIndex]
+        islandStart = await owner.command(
+          { type: 'island.startQuiz', payload: { npcId: quizErrand.from, errandId: String(quizIndex) } },
+          'c12-session-island-start-' + attempt,
+        )
+        if (islandStart.status === 'applied') break
+        assert.equal(islandStart.error?.code, 'not_available', 'unexpected island.startQuiz rejection: ' + JSON.stringify(islandStart.error))
+        await sleep(150)
       }
-      assert.ok(quizIndex >= 0, 'island fixture must expose a quiz errand')
-      const quizErrand = islandState.errands[quizIndex]
-      const islandStart = await owner.command(
-        { type: 'island.startQuiz', payload: { npcId: quizErrand.from, errandId: String(quizIndex) } },
-        'c12-session-island-start',
-      )
       assert.equal(islandStart.status, 'applied', 'island.startQuiz rejected: ' + JSON.stringify(islandStart.error))
       const islandToken = islandStart.result.sessionToken
       rawSessionTokens.push(islandToken)
@@ -2146,6 +2692,983 @@ async function main() {
       }
     })
 
+    await step(SCENARIO_TIMED_WORK, async () => {
+      const fixture = await createClockedServerFixture(root, 'timed-work-authority', baseEnv, {
+        clockMs: TIME_FIXTURE_CLOCK_MS,
+        advanceWhileEmpty: true,
+      })
+      try {
+        let app = fixture.app
+        let server = fixture.server
+        const beforeWork = await ensureWorkReady(app, 'timed-work')
+        const taskBefore = taskCounter(beforeWork.shared, 'Work')
+        const ybBefore = Number(beforeWork.shared.petInfo.yb)
+        const started = await app.command(
+          { type: 'job.startWork', payload: { jobId: 'bz' } },
+          'timed-work-start',
+        )
+        assert.equal(started.status, 'applied', 'timed work start rejected: ' + JSON.stringify(started.error))
+        const jobId = Number(started.result.jobId)
+        const dueAtGameMs = Number(started.result.dueAtGameMs)
+        assert.equal(Number.isSafeInteger(jobId), true)
+        assert.equal(dueAtGameMs, Number(beforeWork.gameTimeMs) + 30 * 60_000)
+        const jobsAtStart = await readScheduledJobRows(fixture.dbPath)
+        const pending = jobsAtStart.filter(job => job.id === jobId)
+        assert.equal(pending.length, 1, 'the renderer command must create exactly one canonical job row')
+        assert.equal(pending[0].kind, 'work')
+        assert.equal(pending[0].status, 'pending')
+        assert.equal(pending[0].dueAtGameMs, dueAtGameMs)
+        assert.equal(pending[0].payload.activityKind, 'work')
+        assert.equal(pending[0].payload.activityId, 'bz')
+        assert.equal(pending[0].payload.startedAtGameMs + 30 * 60_000, dueAtGameMs)
+
+        await app.close()
+        await waitForClients(server, 0, 'timed-work zero authenticated clients before stop')
+        await fixture.stopServer()
+        const beforeCatchUp = await readPetState(fixture.dbPath)
+        const engineBefore = await readCanonicalEngine(fixture.dbPath)
+        assert.equal(engineBefore.lastSchedulerWallMs, engineBefore.gameTimeMs)
+        const expectedTicks = (dueAtGameMs - engineBefore.lastSchedulerWallMs) / 60_000
+        assert.equal(Number.isSafeInteger(expectedTicks), true)
+        assert.equal(expectedTicks, 30, 'timed work must be due exactly 30 server game-minutes after the command')
+        const { advanceSchedulerChunk } = await loadRuntimeOracle()
+        const expected = advanceSchedulerChunk(engineBefore, {
+          gameTimeMs: engineBefore.gameTimeMs,
+          environment: engineBefore.environment,
+          activeClientCount: 0,
+          sessionActive: false,
+          actorDeviceId: null,
+        }, dueAtGameMs, { maxChunkTicks: 1_440 })
+        assert.equal(expected.ok, true)
+        assert.equal(expected.ticks, expectedTicks)
+        assert.equal(expected.catchingUp, false)
+
+        await fixture.setClock(dueAtGameMs)
+        server = await fixture.startServer()
+        const healthAfter = await server.health()
+        assert.equal(healthAfter.activeClientCount, 0, 'catch-up must run with zero authenticated clients')
+        assert.equal(healthAfter.ready, true)
+        const afterCatchUp = await readPetState(fixture.dbPath)
+        const expectedGameTimeMs = beforeCatchUp.gameTimeMs + expectedTicks * 60_000
+        const expectedRevision = beforeCatchUp.revision + 1
+        const expectedEventSeq = beforeCatchUp.eventSeq + expected.events.length
+        assert.equal(afterCatchUp.gameTimeMs, dueAtGameMs)
+        assert.equal(afterCatchUp.gameTimeMs, expectedGameTimeMs)
+        assert.equal(healthAfter.gameTimeMs, expectedGameTimeMs)
+        assert.equal(afterCatchUp.revision, expectedRevision)
+        assert.equal(healthAfter.revision, expectedRevision)
+        assert.equal(afterCatchUp.eventSeq, expectedEventSeq)
+        assert.equal(healthAfter.eventSeq, expectedEventSeq)
+        const afterEngine = await readCanonicalEngine(fixture.dbPath)
+        assert.equal(hash(afterEngine.save), hash(expected.state.save), 'scheduler result must match the deterministic runtime oracle')
+
+        const rewardEvents = (await readEventRows(fixture.dbPath, { type: 'reward.granted' }))
+          .filter(event => event.payload.source === 'work')
+        const completionEvents = (await readEventRows(fixture.dbPath, { type: 'activity.completed' }))
+          .filter(event => event.payload.kind === 'work')
+        assert.equal(rewardEvents.length, 1, 'work reward must be granted exactly once')
+        assert.equal(completionEvents.length, 1, 'work completion must be recorded exactly once')
+        assert.equal(rewardEvents[0].gameTimeMs, dueAtGameMs, 'the reward event must be stamped at the server-owned due time')
+        assert.equal(completionEvents[0].gameTimeMs, dueAtGameMs, 'the completion event must be stamped at the server-owned due time')
+        const completedRows = (await readScheduledJobRows(fixture.dbPath)).filter(job => job.id === jobId)
+        assert.equal(completedRows.length, 1)
+        assert.equal(completedRows[0].status, 'completed')
+        assert.equal(afterEngine.scheduledJobs.find(job => job.id === jobId).status, 'completed')
+        assert.equal(afterEngine.save.activeOption.work, null)
+        const ybReward = Number(rewardEvents[0].payload.yb)
+        assert.ok(Number.isSafeInteger(ybReward) && ybReward > 0)
+        assert.equal(Number(afterEngine.save.petInfo.yb), ybBefore + ybReward, 'work payout must be credited exactly once')
+        assert.equal(taskCounter(afterEngine.save, 'Work'), taskBefore + 1)
+
+        app = await fixture.relaunchApp()
+        const projectionAfterRestart = await waitFor(async () => {
+          const projection = await app.projection()
+          return projection?.gameTimeMs === dueAtGameMs
+            && projection.revision === expectedRevision
+            && projection.eventSeq === expectedEventSeq
+            && projection.shared?.activeOption?.work === null
+            ? projection
+            : null
+        }, 'timed work completion projection after restart', 20_000)
+        assert.equal(Number(projectionAfterRestart.shared.petInfo.yb), ybBefore + ybReward)
+        assert.equal(taskCounter(projectionAfterRestart.shared, 'Work'), taskBefore + 1)
+
+        // Replay catch-up after the job is already completed. This is the
+        // duplicate-completion path: no reward/event may be emitted twice.
+        await app.close()
+        await waitForClients(server, 0, 'timed-work zero clients before replay restart')
+        await fixture.stopServer()
+        await fixture.setClock(dueAtGameMs + expectedTicks * 60_000)
+        server = await fixture.startServer()
+        const replayHealth = await server.health()
+        assert.equal(replayHealth.ready, true)
+        const replayRewardEvents = (await readEventRows(fixture.dbPath, { type: 'reward.granted' }))
+          .filter(event => event.payload.source === 'work')
+        const replayCompletionEvents = (await readEventRows(fixture.dbPath, { type: 'activity.completed' }))
+          .filter(event => event.payload.kind === 'work')
+        const replayJobRows = await readScheduledJobRows(fixture.dbPath)
+        assert.equal(replayRewardEvents.length, 1, 'replayed catch-up must not grant the work reward twice')
+        assert.equal(replayCompletionEvents.length, 1, 'replayed catch-up must not complete the job twice')
+        assert.equal(replayJobRows.filter(job => job.id === jobId && job.status === 'completed').length, 1)
+        assert.equal(replayJobRows.filter(job => job.id === jobId).length, 1, 'replayed completion must not insert a duplicate job row')
+        app = await fixture.relaunchApp()
+        const replayProjection = await waitFor(async () => {
+          const projection = await app.projection()
+          return projection?.shared?.activeOption?.work === null ? projection : null
+        }, 'timed work replay projection', 20_000)
+        assert.equal(Number(replayProjection.shared.petInfo.yb), ybBefore + ybReward)
+        assert.equal(taskCounter(replayProjection.shared, 'Work'), taskBefore + 1)
+        return {
+          jobId,
+          startedAtGameMs: pending[0].payload.startedAtGameMs,
+          dueAtGameMs,
+          serverDeadlineMatchesCommand: pending[0].dueAtGameMs === dueAtGameMs,
+          expectedTicks,
+          observedTicks: (afterCatchUp.gameTimeMs - beforeCatchUp.gameTimeMs) / 60_000,
+          gameTimeBefore: beforeCatchUp.gameTimeMs,
+          gameTimeAfter: afterCatchUp.gameTimeMs,
+          revisionBefore: beforeCatchUp.revision,
+          revisionAfter: afterCatchUp.revision,
+          revisionExpected: expectedRevision,
+          eventSeqBefore: beforeCatchUp.eventSeq,
+          eventSeqAfter: afterCatchUp.eventSeq,
+          eventSeqExpected: expectedEventSeq,
+          rewardEventCount: rewardEvents.length,
+          completionEventCount: completionEvents.length,
+          rewardGameTimeMs: rewardEvents[0].gameTimeMs,
+          completionGameTimeMs: completionEvents[0].gameTimeMs,
+          completionExactlyAtDeadline: rewardEvents[0].gameTimeMs === dueAtGameMs && completionEvents[0].gameTimeMs === dueAtGameMs,
+          ybBefore,
+          ybReward,
+          ybAfter: Number(projectionAfterRestart.shared.petInfo.yb),
+          taskWorkBefore: taskBefore,
+          taskWorkAfter: taskCounter(projectionAfterRestart.shared, 'Work'),
+          projectionRevisionAfterRestart: projectionAfterRestart.revision,
+          persistedAcrossRestart: true,
+          replayRewardEventCount: replayRewardEvents.length,
+          replayCompletionEventCount: replayCompletionEvents.length,
+          duplicateCompletionRewarded: replayRewardEvents.length !== 1,
+          sharedHashMatchesOracle: hash(afterEngine.save) === hash(expected.state.save),
+          zeroAuthenticatedClients: replayHealth.activeClientCount === 0,
+        }
+      } finally {
+        await fixture.cleanup()
+      }
+    })
+
+    await step(SCENARIO_ADVANCE_WHILE_EMPTY, async () => {
+      const { advanceSchedulerChunk } = await loadRuntimeOracle()
+      const enabledFixture = await createClockedServerFixture(root, 'advance-empty-enabled', baseEnv, {
+        clockMs: TIME_FIXTURE_CLOCK_MS,
+        advanceWhileEmpty: true,
+      })
+      let enabledDetail
+      try {
+        let app = enabledFixture.app
+        let server = enabledFixture.server
+        await ensureWorkReady(app, 'advance-empty-enabled')
+        const started = await app.command(
+          { type: 'job.startWork', payload: { jobId: 'bz' } },
+          'advance-empty-enabled-start-work',
+        )
+        assert.equal(started.status, 'applied', JSON.stringify(started.error))
+        const dueAtGameMs = Number(started.result.dueAtGameMs)
+        await app.close()
+        await waitForClients(server, 0, 'enabled fixture zero clients before restart')
+        await enabledFixture.stopServer()
+        const before = await readPetState(enabledFixture.dbPath)
+        const engineBefore = await readCanonicalEngine(enabledFixture.dbPath)
+        assert.equal(engineBefore.advanceWhileEmpty, true)
+        assert.equal(before.gameTimeMs, engineBefore.gameTimeMs)
+        const expectedTicks = (dueAtGameMs - before.gameTimeMs) / 60_000
+        assert.equal(expectedTicks, 30)
+        const { advanceSchedulerChunk } = await loadRuntimeOracle()
+        const expected = advanceSchedulerChunk(engineBefore, {
+          gameTimeMs: engineBefore.gameTimeMs,
+          environment: engineBefore.environment,
+          activeClientCount: 0,
+          sessionActive: false,
+          actorDeviceId: null,
+        }, dueAtGameMs, { maxChunkTicks: 1_440 })
+        assert.equal(expected.ok, true)
+        assert.equal(expected.ticks, expectedTicks)
+        await enabledFixture.setClock(dueAtGameMs)
+        server = await enabledFixture.startServer()
+        const restartHealth = await server.health()
+        assert.equal(restartHealth.advanceWhileEmpty, true)
+        assert.equal(restartHealth.activeClientCount, 0)
+        assert.equal(restartHealth.ready, true)
+        const after = await readPetState(enabledFixture.dbPath)
+        const expectedGameTime = before.gameTimeMs + expectedTicks * 60_000
+        const expectedRevision = before.revision + 1
+        const expectedEventSeq = before.eventSeq + expected.events.length
+        assert.equal(after.gameTimeMs, expectedGameTime)
+        assert.equal(after.revision, expectedRevision)
+        assert.equal(after.eventSeq, expectedEventSeq)
+        const afterEngine = await readCanonicalEngine(enabledFixture.dbPath)
+        assert.equal(hash(afterEngine.save), hash(expected.state.save))
+        const rewardEvents = (await readEventRows(enabledFixture.dbPath, { type: 'reward.granted' }))
+          .filter(event => event.payload.source === 'work')
+        assert.equal(rewardEvents.length, 1, 'enabled zero-client catch-up must complete a scheduled work effect exactly once')
+        assert.equal(rewardEvents[0].gameTimeMs, dueAtGameMs)
+        const job = (await readScheduledJobRows(enabledFixture.dbPath))[0]
+        assert.equal(job.status, 'completed')
+
+        // With true, zero clients continue advancing in real scheduler passes.
+        const liveBefore = await readPetState(enabledFixture.dbPath)
+        const liveEngineBefore = await readCanonicalEngine(enabledFixture.dbPath)
+        const liveTarget = dueAtGameMs + 60_000
+        const liveExpected = advanceSchedulerChunk(liveEngineBefore, {
+          gameTimeMs: liveEngineBefore.gameTimeMs,
+          environment: liveEngineBefore.environment,
+          activeClientCount: 0,
+          sessionActive: false,
+          actorDeviceId: null,
+        }, liveTarget, { maxChunkTicks: 1_440 })
+        assert.equal(liveExpected.ticks, 1)
+        await enabledFixture.setClock(liveTarget)
+        const liveAfter = await waitFor(async () => {
+          const current = await readPetState(enabledFixture.dbPath)
+          return current.gameTimeMs === liveBefore.gameTimeMs + 60_000 ? current : null
+        }, 'enabled advance-while-empty live zero-client tick', 10_000)
+        assert.equal(liveAfter.revision, liveBefore.revision + 1)
+        assert.equal(liveAfter.eventSeq, liveBefore.eventSeq + liveExpected.events.length)
+        assert.equal((await server.health()).activeClientCount, 0)
+        enabledDetail = {
+          advanceWhileEmpty: restartHealth.advanceWhileEmpty,
+          activeClientCountAtRestart: restartHealth.activeClientCount,
+          expectedTicks,
+          observedRestartTicks: (after.gameTimeMs - before.gameTimeMs) / 60_000,
+          gameTimeBefore: before.gameTimeMs,
+          gameTimeAfterRestart: after.gameTimeMs,
+          gameTimeExpected: expectedGameTime,
+          revisionBefore: before.revision,
+          revisionAfterRestart: after.revision,
+          revisionExpected: expectedRevision,
+          eventSeqBefore: before.eventSeq,
+          eventSeqAfterRestart: after.eventSeq,
+          eventSeqExpected: expectedEventSeq,
+          scheduledRewardEventCount: rewardEvents.length,
+          scheduledRewardAtDueTime: rewardEvents[0].gameTimeMs === dueAtGameMs,
+          scheduledJobStatus: job.status,
+          liveZeroClientTicks: (liveAfter.gameTimeMs - liveBefore.gameTimeMs) / 60_000,
+          liveZeroClientRevisionDelta: liveAfter.revision - liveBefore.revision,
+          liveZeroClientEventSeqDelta: liveAfter.eventSeq - liveBefore.eventSeq,
+          exactRestartDeltas: true,
+          exactLiveDeltas: true,
+        }
+      } finally {
+        await enabledFixture.cleanup()
+      }
+
+      const frozenFixture = await createClockedServerFixture(root, 'advance-empty-frozen', baseEnv, {
+        clockMs: TIME_FIXTURE_CLOCK_MS,
+        advanceWhileEmpty: false,
+      })
+      try {
+        let app = frozenFixture.app
+        let server = frozenFixture.server
+        await ensureWorkReady(app, 'advance-empty-frozen')
+        const started = await app.command(
+          { type: 'job.startWork', payload: { jobId: 'bz' } },
+          'advance-empty-frozen-start-work',
+        )
+        assert.equal(started.status, 'applied', JSON.stringify(started.error))
+        const dueAtGameMs = Number(started.result.dueAtGameMs)
+        const baseline = await readPetState(frozenFixture.dbPath)
+        const baselineEngine = await readCanonicalEngine(frozenFixture.dbPath)
+        assert.equal(baselineEngine.advanceWhileEmpty, false)
+        await app.close()
+        await waitForClients(server, 0, 'frozen fixture zero clients before restart')
+        await frozenFixture.stopServer()
+        const stoppedEngine = await readCanonicalEngine(frozenFixture.dbPath)
+        assert.equal(stoppedEngine.advanceWhileEmpty, false)
+
+        const emptyWallGapMs = 10 * 60_000
+        const resumeWallMs = stoppedEngine.lastSchedulerWallMs + emptyWallGapMs
+        await frozenFixture.setClock(resumeWallMs)
+        server = await frozenFixture.startServer()
+        const frozenHealth = await server.health()
+        assert.equal(frozenHealth.advanceWhileEmpty, false)
+        assert.equal(frozenHealth.activeClientCount, 0)
+        assert.equal(frozenHealth.ready, true)
+        const frozenState = await readPetState(frozenFixture.dbPath)
+        assert.equal(frozenState.gameTimeMs, baseline.gameTimeMs, 'false must freeze game time across the zero-client interval')
+        assert.equal(frozenState.revision, baseline.revision, 'false must not create a zero-client revision')
+        assert.equal(frozenState.eventSeq, baseline.eventSeq, 'false must not create zero-client events')
+        const frozenJob = (await readScheduledJobRows(frozenFixture.dbPath)).find(job => job.dueAtGameMs === dueAtGameMs)
+        assert.equal(frozenJob.status, 'pending', 'false must leave pending work pending across the empty interval')
+
+        app = await frozenFixture.relaunchApp()
+        await waitForClients(server, 1, 'frozen fixture one reconnected client')
+        const beforeLive = await waitFor(async () => {
+          const state = await readPetState(frozenFixture.dbPath)
+          const coverage = await readOpenCoverageRows(frozenFixture.dbPath)
+          return coverage.length === 1 && coverage[0].connectedAtMs === resumeWallMs ? state : null
+        }, 'frozen fixture resumed active coverage', 10_000)
+        const liveEngineBefore = await readCanonicalEngine(frozenFixture.dbPath)
+        assert.equal(liveEngineBefore.sessionCoverage.filter(interval => interval.disconnectedAtWallMs === undefined).length, 1)
+        assert.equal(liveEngineBefore.lastSchedulerWallMs, resumeWallMs, 'resume must anchor at the actual reconnect wall')
+        const expectedLive = advanceSchedulerChunk(liveEngineBefore, {
+          gameTimeMs: liveEngineBefore.gameTimeMs,
+          environment: liveEngineBefore.environment,
+          activeClientCount: 0,
+          sessionActive: false,
+          actorDeviceId: null,
+        }, resumeWallMs + 60_000, { maxChunkTicks: 1_440 })
+        assert.equal(expectedLive.ok, true)
+        assert.equal(expectedLive.ticks, 1)
+        await frozenFixture.setClock(resumeWallMs + 60_000)
+        const afterLive = await waitFor(async () => {
+          const state = await readPetState(frozenFixture.dbPath)
+          return state.gameTimeMs === beforeLive.gameTimeMs + 60_000 ? state : null
+        }, 'frozen fixture first live scheduler tick', 15_000)
+        assert.equal(afterLive.revision, beforeLive.revision + 1)
+        assert.equal(afterLive.eventSeq, beforeLive.eventSeq + expectedLive.events.length)
+        const afterLiveEngine = await readCanonicalEngine(frozenFixture.dbPath)
+        assert.equal(hash(afterLiveEngine.save), hash(expectedLive.state.save), 'resume tick must match the deterministic runtime oracle')
+        const onLineBefore = Number(beforeLive && liveEngineBefore.save.petInfo.onLineTime)
+        const onLineAfter = Number(afterLiveEngine.save.petInfo.onLineTime)
+        assert.equal(onLineAfter, onLineBefore + 1, 'the first post-reconnect live tick must credit exactly one online minute')
+        const pendingJobAfterResume = (await readScheduledJobRows(frozenFixture.dbPath)).find(job => job.dueAtGameMs === dueAtGameMs)
+        assert.equal(pendingJobAfterResume.status, 'pending')
+        const wallElapsedMinutes = (resumeWallMs + 60_000 - baseline.gameTimeMs) / 60_000
+        const retroactiveTicks = (afterLive.gameTimeMs - baseline.gameTimeMs) / 60_000 - 1
+        assert.equal(retroactiveTicks, 0, 'zero-client wall time must never be backfilled on reconnect')
+        return {
+          enabled: enabledDetail,
+          disabled: {
+            advanceWhileEmpty: frozenHealth.advanceWhileEmpty,
+            activeClientCountWhileFrozen: frozenHealth.activeClientCount,
+            emptyWallGapMs,
+            wallElapsedMinutes,
+            zeroClientGameTimeDelta: frozenState.gameTimeMs - baseline.gameTimeMs,
+            zeroClientRevisionDelta: frozenState.revision - baseline.revision,
+            zeroClientEventSeqDelta: frozenState.eventSeq - baseline.eventSeq,
+            pendingJobBeforeRelapse: frozenJob.status,
+            pendingJobAfterResume: pendingJobAfterResume.status,
+            reconnectedAtWallMs: resumeWallMs,
+            firstLiveTickGameTimeDelta: afterLive.gameTimeMs - beforeLive.gameTimeMs,
+            firstLiveTickRevisionDelta: afterLive.revision - beforeLive.revision,
+            firstLiveTickEventSeqDelta: afterLive.eventSeq - beforeLive.eventSeq,
+            firstLiveTickExpectedEventSeqDelta: expectedLive.events.length,
+            onLineTimeDelta: onLineAfter - onLineBefore,
+            retroactiveTicks,
+            frozenWithoutBackfill: retroactiveTicks === 0 && frozenState.gameTimeMs === baseline.gameTimeMs,
+            exactFrozenDeltas: true,
+          },
+        }
+      } finally {
+        await frozenFixture.cleanup()
+      }
+    })
+
+    await step(SCENARIO_ONLINE_SIGNIN, async () => {
+      const fixture = await createClockedServerFixture(root, 'online-signin-split', baseEnv, {
+        clockMs: TIME_FIXTURE_CLOCK_MS,
+        advanceWhileEmpty: true,
+      })
+      try {
+        let app = fixture.app
+        let server = fixture.server
+        const base = TIME_FIXTURE_CLOCK_MS
+        const baseProjection = await waitFor(async () => {
+          const projection = await app.projection()
+          return projection?.shared?.havePet === true ? projection : null
+        }, 'online split baseline projection', 20_000)
+        const onLineBaseline = Number(baseProjection.shared.petInfo.onLineTime)
+        const onlineDataBaseline = Number(baseProjection.shared.petInfo.onlineDataTime)
+        const signinBaseline = signinState(baseProjection.shared)
+        const signed = await app.command({ type: 'signin.sign', payload: {} }, 'online-split-signin-once')
+        assert.equal(signed.status, 'applied', 'daily sign-in rejected: ' + JSON.stringify(signed.error))
+        const signinDay = Number(signed.result.day)
+        assert.equal(Number.isSafeInteger(signinDay), true)
+        const afterSignin = await waitFor(async () => {
+          const projection = await app.projection()
+          return projection?.revision >= signed.revision ? projection : null
+        }, 'daily sign-in projection', 10_000)
+        let signedState = signinState(afterSignin.shared)
+        assert.equal(countSigninDay(signedState, signinDay), 1, 'daily sign-in must grant the day exactly once')
+        let signinRewardEvents = (await readEventRows(fixture.dbPath, { type: 'reward.granted' }))
+          .filter(event => event.payload.source === 'signin')
+        assert.equal(signinRewardEvents.length, 1)
+
+        const duplicateOp = await app.command(
+          { type: 'signin.sign', payload: {} },
+          'online-split-signin-once',
+        )
+        assert.equal(duplicateOp.status, 'duplicate', 'same-op sign-in retry must be idempotent')
+        const duplicateNewOp = await app.command(
+          { type: 'signin.sign', payload: {} },
+          'online-split-signin-second-op',
+        )
+        assert.equal(duplicateNewOp.status, 'rejected')
+        assert.equal(duplicateNewOp.error?.code, 'already_claimed')
+        signinRewardEvents = (await readEventRows(fixture.dbPath, { type: 'reward.granted' }))
+          .filter(event => event.payload.source === 'signin')
+        assert.equal(signinRewardEvents.length, 1, 'replayed sign-in commands must not grant a second reward')
+        signedState = signinState((await app.projection()).shared)
+
+        const coveredStart = await readPetState(fixture.dbPath)
+        const coveredEngineBefore = await readCanonicalEngine(fixture.dbPath)
+        const openCoverageBefore = coveredEngineBefore.sessionCoverage.filter(interval => interval.disconnectedAtWallMs === undefined)
+        assert.equal(openCoverageBefore.length, 1, 'the connected renderer must own one open coverage interval')
+        assert.equal(openCoverageBefore[0].connectedAtWallMs, base)
+        const coveredTarget = base + 5 * 60_000
+        const { advanceSchedulerChunk } = await loadRuntimeOracle()
+        const coveredExpected = advanceSchedulerChunk(coveredEngineBefore, {
+          gameTimeMs: coveredEngineBefore.gameTimeMs,
+          environment: coveredEngineBefore.environment,
+          activeClientCount: 0,
+          sessionActive: false,
+          actorDeviceId: null,
+        }, coveredTarget, { maxChunkTicks: 1_440 })
+        assert.equal(coveredExpected.ok, true)
+        assert.equal(coveredExpected.ticks, 5)
+        await fixture.setClock(coveredTarget)
+        const coveredAfter = await waitFor(async () => {
+          const state = await readPetState(fixture.dbPath)
+          return state.gameTimeMs === coveredTarget ? state : null
+        }, 'five covered online minutes', 15_000)
+        assert.equal(coveredAfter.revision, coveredStart.revision + 1)
+        assert.equal(coveredAfter.eventSeq, coveredStart.eventSeq + coveredExpected.events.length)
+        const coveredEngineAfter = await readCanonicalEngine(fixture.dbPath)
+        assert.equal(hash(coveredEngineAfter.save), hash(coveredExpected.state.save))
+        assert.equal(Number(coveredEngineAfter.save.petInfo.onLineTime), onLineBaseline + 5)
+        assert.equal(Number(coveredEngineAfter.save.petInfo.onlineDataTime), onlineDataBaseline + 5)
+        assert.equal(signinState(coveredEngineAfter.save).isOnlineLastTime, signinBaseline.isOnlineLastTime - 5)
+        assert.equal((await readEventRows(fixture.dbPath, { type: 'reward.granted' }))
+          .filter(event => event.payload.source === 'signin').length, 1)
+        assert.equal((await server.health()).activeClientCount, 1)
+
+        await app.close()
+        await waitForClients(server, 0, 'online split disconnect')
+        const closedCoverage = await readCoverageIntervals(fixture.dbPath)
+        const firstInterval = closedCoverage.find(interval => interval.connectedAtWallMs === base)
+        assert.notEqual(firstInterval, undefined, 'first known coverage interval must be persisted')
+        assert.equal(firstInterval.disconnectedAtWallMs, coveredTarget)
+        assert.equal(closedCoverage.filter(interval => interval.disconnectedAtWallMs === undefined).length, 0)
+        const stateAtGapStart = await readPetState(fixture.dbPath)
+        const onLineAtGapStart = Number(coveredEngineAfter.save.petInfo.onLineTime)
+        const signinAtGapStart = signinState(coveredEngineAfter.save)
+        await fixture.stopServer()
+
+        const gapEngineBefore = await readCanonicalEngine(fixture.dbPath)
+        assert.equal(gapEngineBefore.lastSchedulerWallMs, coveredTarget)
+        const gapTarget = base + 15 * 60_000
+        const gapExpected = advanceSchedulerChunk(gapEngineBefore, {
+          gameTimeMs: gapEngineBefore.gameTimeMs,
+          environment: gapEngineBefore.environment,
+          activeClientCount: 0,
+          sessionActive: false,
+          actorDeviceId: null,
+        }, gapTarget, { maxChunkTicks: 1_440 })
+        assert.equal(gapExpected.ok, true)
+        assert.equal(gapExpected.ticks, 10)
+        await fixture.setClock(gapTarget)
+        server = await fixture.startServer()
+        const afterGapHealth = await server.health()
+        assert.equal(afterGapHealth.activeClientCount, 0)
+        assert.equal(afterGapHealth.ready, true)
+        const afterGap = await readPetState(fixture.dbPath)
+        assert.equal(afterGap.gameTimeMs, gapTarget)
+        assert.equal(afterGap.revision, stateAtGapStart.revision + 1)
+        assert.equal(afterGap.eventSeq, stateAtGapStart.eventSeq + gapExpected.events.length)
+        const gapEngineAfter = await readCanonicalEngine(fixture.dbPath)
+        assert.equal(hash(gapEngineAfter.save), hash(gapExpected.state.save))
+        assert.equal(Number(gapEngineAfter.save.petInfo.onLineTime), onLineAtGapStart, 'zero-client gap must not credit online time')
+        assert.equal(Number(gapEngineAfter.save.petInfo.onlineDataTime), onlineDataBaseline + 5)
+        assert.equal(signinState(gapEngineAfter.save).isOnlineLastTime, signinAtGapStart.isOnlineLastTime)
+        assert.equal((await readEventRows(fixture.dbPath, { type: 'reward.granted' }))
+          .filter(event => event.payload.source === 'signin').length, 1)
+
+        app = await fixture.relaunchApp()
+        await waitForClients(server, 1, 'online split reconnect')
+        const resumedState = await waitFor(async () => {
+          const state = await readPetState(fixture.dbPath)
+          const open = await readOpenCoverageRows(fixture.dbPath)
+          return open.length === 1 && open[0].connectedAtMs === gapTarget ? state : null
+        }, 'known reconnect coverage interval', 15_000)
+        const resumeEngineBefore = await readCanonicalEngine(fixture.dbPath)
+        const resumeTarget = base + 17 * 60_000
+        const resumeExpected = advanceSchedulerChunk(resumeEngineBefore, {
+          gameTimeMs: resumeEngineBefore.gameTimeMs,
+          environment: resumeEngineBefore.environment,
+          activeClientCount: 0,
+          sessionActive: false,
+          actorDeviceId: null,
+        }, resumeTarget, { maxChunkTicks: 1_440 })
+        assert.equal(resumeExpected.ok, true)
+        assert.equal(resumeExpected.ticks, 2)
+        const onLineBeforeResume = Number(gapEngineAfter.save.petInfo.onLineTime)
+        const signinBeforeResume = signinState(gapEngineAfter.save)
+        await fixture.setClock(resumeTarget)
+        const resumedAfter = await waitFor(async () => {
+          const state = await readPetState(fixture.dbPath)
+          return state.gameTimeMs === resumeTarget ? state : null
+        }, 'two covered minutes after reconnect', 15_000)
+        assert.equal(resumedAfter.revision, resumedState.revision + 1)
+        assert.equal(resumedAfter.eventSeq, resumedState.eventSeq + resumeExpected.events.length)
+        const finalEngine = await readCanonicalEngine(fixture.dbPath)
+        assert.equal(hash(finalEngine.save), hash(resumeExpected.state.save))
+        assert.equal(Number(finalEngine.save.petInfo.onLineTime), onLineBeforeResume + 2)
+        assert.equal(Number(finalEngine.save.petInfo.onlineDataTime), onlineDataBaseline + 7)
+        assert.equal(signinState(finalEngine.save).isOnlineLastTime, signinBeforeResume.isOnlineLastTime - 2)
+        const finalSigninAttempt = await app.command(
+          { type: 'signin.sign', payload: {} },
+          'online-split-signin-after-reconnect',
+        )
+        assert.equal(finalSigninAttempt.status, 'rejected')
+        assert.equal(finalSigninAttempt.error?.code, 'already_claimed')
+        const finalSigninRewardEvents = (await readEventRows(fixture.dbPath, { type: 'reward.granted' }))
+          .filter(event => event.payload.source === 'signin')
+        assert.equal(finalSigninRewardEvents.length, 1, 'daily sign-in reward must survive reconnect/restart exactly once')
+        const finalSigninState = signinState(finalEngine.save)
+        assert.equal(countSigninDay(finalSigninState, signinDay), 1)
+        const finalCoverage = await readCoverageIntervals(fixture.dbPath)
+        assert.equal(finalCoverage.filter(interval => interval.disconnectedAtWallMs === undefined).length, 1)
+        const finalOpen = finalCoverage.find(interval => interval.disconnectedAtWallMs === undefined)
+        assert.equal(finalOpen.connectedAtWallMs, gapTarget)
+        const firstCoveredMinutes = (firstInterval.disconnectedAtWallMs - firstInterval.connectedAtWallMs) / 60_000
+        const gapMinutes = (finalOpen.connectedAtWallMs - firstInterval.disconnectedAtWallMs) / 60_000
+        const secondCoveredMinutes = (resumeTarget - finalOpen.connectedAtWallMs) / 60_000
+        const totalOnlineDelta = Number(finalEngine.save.petInfo.onLineTime) - onLineBaseline
+        assert.equal(firstCoveredMinutes, 5)
+        assert.equal(gapMinutes, 10)
+        assert.equal(secondCoveredMinutes, 2)
+        assert.equal(totalOnlineDelta, 7, 'only the 5 + 2 covered minutes may accrue')
+        return {
+          signinDay,
+          signinRewardEventCount: finalSigninRewardEvents.length,
+          signinDayEntryCount: countSigninDay(finalSigninState, signinDay),
+          signinGrantedExactlyOnceAcrossReconnectRestart: finalSigninRewardEvents.length === 1
+            && countSigninDay(finalSigninState, signinDay) === 1,
+          duplicateOpStatus: duplicateOp.status,
+          duplicateNewOpCode: duplicateNewOp.error?.code,
+          finalReconnectSigninCode: finalSigninAttempt.error?.code,
+          firstCoverageInterval: {
+            connectedAtWallMs: firstInterval.connectedAtWallMs,
+            disconnectedAtWallMs: firstInterval.disconnectedAtWallMs,
+            coveredMinutes: firstCoveredMinutes,
+          },
+          zeroClientGap: {
+            fromWallMs: firstInterval.disconnectedAtWallMs,
+            toWallMs: finalOpen.connectedAtWallMs,
+            gapMinutes,
+            gameTimeDelta: afterGap.gameTimeMs - stateAtGapStart.gameTimeMs,
+            revisionDelta: afterGap.revision - stateAtGapStart.revision,
+            eventSeqDelta: afterGap.eventSeq - stateAtGapStart.eventSeq,
+            expectedEventSeqDelta: gapExpected.events.length,
+            onLineTimeDelta: Number(gapEngineAfter.save.petInfo.onLineTime) - onLineAtGapStart,
+            onlineDataTimeDelta: Number(gapEngineAfter.save.petInfo.onlineDataTime) - (onlineDataBaseline + 5),
+            signinCountdownDelta: signinState(gapEngineAfter.save).isOnlineLastTime - signinAtGapStart.isOnlineLastTime,
+          },
+          coveredBeforeGap: {
+            connectedAtWallMs: base,
+            disconnectedAtWallMs: coveredTarget,
+            coveredMinutes: firstCoveredMinutes,
+            gameTimeDelta: coveredAfter.gameTimeMs - coveredStart.gameTimeMs,
+            revisionDelta: coveredAfter.revision - coveredStart.revision,
+            eventSeqDelta: coveredAfter.eventSeq - coveredStart.eventSeq,
+            expectedEventSeqDelta: coveredExpected.events.length,
+            onLineTimeDelta: Number(coveredEngineAfter.save.petInfo.onLineTime) - onLineBaseline,
+          },
+          coveredAfterGap: {
+            connectedAtWallMs: gapTarget,
+            observedThroughWallMs: resumeTarget,
+            coveredMinutes: secondCoveredMinutes,
+            gameTimeDelta: resumedAfter.gameTimeMs - resumedState.gameTimeMs,
+            revisionDelta: resumedAfter.revision - resumedState.revision,
+            eventSeqDelta: resumedAfter.eventSeq - resumedState.eventSeq,
+            expectedEventSeqDelta: resumeExpected.events.length,
+            onLineTimeDelta: Number(finalEngine.save.petInfo.onLineTime) - onLineBeforeResume,
+          },
+          totalOnlineTimeDelta: totalOnlineDelta,
+          totalOnlineDataTimeDelta: Number(finalEngine.save.petInfo.onlineDataTime) - onlineDataBaseline,
+          totalSigninCountdownDelta: signinState(finalEngine.save).isOnlineLastTime - signinBaseline.isOnlineLastTime,
+          retroactiveZeroClientCreditMinutes: totalOnlineDelta - firstCoveredMinutes - secondCoveredMinutes,
+          exactCoverageOverlapOnly: totalOnlineDelta === firstCoveredMinutes + secondCoveredMinutes,
+        }
+      } finally {
+        await fixture.cleanup()
+      }
+    })
+
+    await step(SCENARIO_LOCAL_HANDOFF, async () => {
+      const handoffClockBase = Math.floor(Date.now() / 1_000) * 1_000
+      const fixture = await createLocalHandoffFixture(
+        root,
+        'local-authority-handoff',
+        baseEnv,
+        handoffClockBase,
+      )
+      try {
+        const app = fixture.app
+        let server = fixture.server
+        const initialLocal = await readLocalDocument(fixture.userData)
+        assert.equal(initialLocal.authority.state, 'active')
+        assert.equal(initialLocal.authority.stamp.owner, 'local')
+        const sourceExport = await app.exportBundle()
+        assert.equal(sourceExport.mode, 'local')
+        const sourceBundle = JSON.parse(sourceExport.json)
+        assert.equal(sourceBundle.authority.owner, 'local')
+        assert.equal(sourceBundle.shared.havePet, true)
+        const sourceLocalRevision = Number(sourceBundle.authority.revision)
+        const sourceLocalEpoch = Number(sourceBundle.authority.epoch)
+
+        // Production LocalRepository -> StorageController upload. The renderer
+        // command path freezes the local queue, increments/fences the epoch and
+        // exports the real local document; the test never edits bundle fields.
+        const uploaded = await app.setMode({
+          mode: 'server',
+          initialSource: 'upload-local',
+          rebindLocalSessions: true,
+        })
+        assert.equal(uploaded.mode, 'server')
+        assert.equal(uploaded.activeMode, 'server')
+        assert.equal(uploaded.authority.owner, 'server')
+        assert.equal(uploaded.authority.state, 'active')
+        assert.equal(uploaded.handoff.direction, 'local_to_server')
+        assert.equal(uploaded.handoff.state, 'applied')
+        assert.equal(uploaded.handoff.requestedRebind, true)
+        const serverAfterUpload = await readAuthorityRow(fixture.dbPath)
+        const uploadedPet = await readPetState(fixture.dbPath)
+        const localArchivedAfterUpload = await waitFor(async () => {
+          const document = await readLocalDocument(fixture.userData)
+          return document.authority.state === 'archived' ? document : null
+        }, 'local authority archived after upload', 10_000)
+        assert.equal(serverAfterUpload.owner, 'server')
+        assert.equal(serverAfterUpload.state, 'active')
+        assert.equal(serverAfterUpload.epoch, uploaded.handoff.nextEpoch)
+        assert.ok(serverAfterUpload.epoch > sourceLocalEpoch)
+        assert.equal(uploadedPet.revision > sourceLocalRevision, true, 'server import must fence source revision')
+        assert.notEqual(serverAfterUpload.handoffId, sourceBundle.authority.handoffId)
+        assert.equal(localArchivedAfterUpload.authority.stamp.owner, 'local')
+        assert.ok(Number(localArchivedAfterUpload.authority.stamp.epoch) > sourceLocalEpoch)
+        await waitForClients(server, 1, 'handoff owner connection after upload')
+        await sleep(250)
+        const archivedLocalHashAfterUpload = await fileSha256(localDocumentPath(fixture.userData))
+        await sleep(1_200)
+        const archivedLocalFrozenAfterUpload = await fileSha256(localDocumentPath(fixture.userData)) === archivedLocalHashAfterUpload
+        assert.equal(archivedLocalFrozenAfterUpload, true, 'archived local authority must not tick or mutate while server owns canon')
+
+        // The now-active server must reject a stale real local export before
+        // any canonical mutation, then remain writable when the import fails.
+        const serverBeforeStaleImport = await readPetState(fixture.dbPath)
+        const staleServerImport = await app.importBundle({
+          json: JSON.stringify(sourceBundle),
+          allowClamp: true,
+          rebindLocalSessions: true,
+        })
+        assert.equal(staleServerImport.status, 'rejected')
+        assert.equal(staleServerImport.errorCode, 'authority_fork_risk')
+        const serverAfterStaleImport = await readPetState(fixture.dbPath)
+        assert.equal(serverAfterStaleImport.gameTimeMs, serverBeforeStaleImport.gameTimeMs)
+        assert.equal(serverAfterStaleImport.revision, serverBeforeStaleImport.revision)
+        assert.equal(serverAfterStaleImport.eventSeq, serverBeforeStaleImport.eventSeq)
+        const serverStillWritable = await app.command(
+          { type: 'admin.grantCheat', payload: { stat: 'mood', amount: 1 } },
+          'handoff-server-after-stale-import',
+        )
+        assert.equal(serverStillWritable.status, 'applied')
+        await waitFor(async () => (await app.projection())?.revision >= serverStillWritable.revision, 'server projection after stale import', 10_000)
+
+        // Production StorageController server -> local detach. This calls the
+        // owner-only exportForDetach command, archives the server, then imports
+        // the exact detached bundle through LocalRepository.
+        const detached = await app.setMode({ mode: 'local' })
+        assert.equal(detached.mode, 'local')
+        assert.equal(detached.activeMode, 'local')
+        assert.equal(detached.authority.owner, 'local')
+        assert.equal(detached.authority.state, 'active')
+        assert.equal(detached.handoff.direction, 'server_to_local')
+        assert.equal(detached.handoff.state, 'applied')
+        const serverArchived = await readAuthorityRow(fixture.dbPath)
+        const serverStateWhenArchived = await readPetState(fixture.dbPath)
+        const localAfterDetach = await readLocalDocument(fixture.userData)
+        assert.equal(serverArchived.owner, 'local')
+        assert.equal(serverArchived.state, 'archived')
+        assert.equal(serverArchived.handoffEpoch, detached.handoff.nextEpoch)
+        assert.equal(localAfterDetach.authority.state, 'active')
+        assert.equal(localAfterDetach.authority.stamp.owner, 'local')
+        assert.equal(localAfterDetach.authority.stamp.epoch, detached.handoff.nextEpoch)
+        assert.equal(localAfterDetach.revision, serverStateWhenArchived.revision)
+        const archivedHealth = await server.health()
+        assert.equal(archivedHealth.authorityState, 'archived')
+        assert.equal(archivedHealth.activeClientCount, 0)
+
+        // Advancing the injected server clock while archived must advance
+        // neither game time nor revision/eventSeq.
+        await fixture.setClock(handoffClockBase + 5 * 60_000)
+        await sleep(1_500)
+        const serverStateAfterFrozenWait = await readPetState(fixture.dbPath)
+        assert.equal(serverStateAfterFrozenWait.gameTimeMs, serverStateWhenArchived.gameTimeMs)
+        assert.equal(serverStateAfterFrozenWait.revision, serverStateWhenArchived.revision)
+        assert.equal(serverStateAfterFrozenWait.eventSeq, serverStateWhenArchived.eventSeq)
+
+        // A stale local export is rejected through the production local import
+        // planner before touching the document or canonical revision.
+        const staleLocalBundle = JSON.parse((await app.exportBundle()).json)
+        const localMutation = await app.command(
+          { type: 'admin.grantCheat', payload: { stat: 'mood', amount: 1 } },
+          'handoff-local-mutation-before-stale-import',
+        )
+        assert.equal(localMutation.status, 'applied')
+        const localProjectionBeforeStaleImport = await waitFor(async () => {
+          const projection = await app.projection()
+          return projection?.revision >= localMutation.revision ? projection : null
+        }, 'local projection after mutation', 10_000)
+        const localDocumentBeforeStaleImport = await readLocalDocument(fixture.userData)
+        const localHashBeforeStaleImport = await fileSha256(localDocumentPath(fixture.userData))
+        const staleLocalImport = await app.importBundle({
+          json: JSON.stringify(staleLocalBundle),
+          allowClamp: true,
+          rebindLocalSessions: true,
+        })
+        assert.equal(staleLocalImport.status, 'rejected')
+        assert.equal(staleLocalImport.errorCode, 'authority_fork_risk')
+        const localDocumentAfterStaleImport = await readLocalDocument(fixture.userData)
+        assert.equal(localDocumentAfterStaleImport.revision, localDocumentBeforeStaleImport.revision)
+        const staleLocalImportFileUnchanged = await fileSha256(localDocumentPath(fixture.userData)) === localHashBeforeStaleImport
+        assert.equal(staleLocalImportFileUnchanged, true)
+        const localProjectionAfterStaleImport = await app.projection()
+        assert.equal(localProjectionAfterStaleImport.revision, localProjectionBeforeStaleImport.revision)
+        const localStillWritable = await app.command(
+          { type: 'admin.grantCheat', payload: { stat: 'mood', amount: 1 } },
+          'handoff-local-after-stale-import',
+        )
+        assert.equal(localStillWritable.status, 'applied')
+        await waitFor(async () => (await app.projection())?.revision >= localStillWritable.revision, 'local projection after failed import', 10_000)
+
+        // Resume local -> archived server, but fault-inject a fenced
+        // expectedEpoch on the already-exported command. The bundle itself is
+        // the production LocalRepository export and is not edited.
+        await app.armCommandDrop('admin.resumeServer')
+        const resumeInput = {
+          mode: 'server',
+          initialSource: 'upload-local',
+          rebindLocalSessions: true,
+        }
+        await app.page.evaluate(input => {
+          const scope = window
+          scope.__C12_HANDOFF_RESULT__ = { done: false }
+          void scope.qqpet.storage.setMode(input).then(status => {
+            scope.__C12_HANDOFF_RESULT__ = {
+              done: true,
+              ok: true,
+              mode: status.mode,
+              activeMode: status.activeMode,
+              handoffState: status.handoff.state,
+              handoffReason: status.handoff.reason,
+            }
+          }).catch(error => {
+            scope.__C12_HANDOFF_RESULT__ = { done: true, ok: false, error: String(error?.message ?? error) }
+          })
+        }, resumeInput)
+        let frozenObserved = null
+        const frozen = await waitFor(async () => {
+          try {
+            const document = await readLocalDocument(fixture.userData)
+            const faultState = await app.websocketFaultState()
+            frozenObserved = {
+              documentAuthority: document.authority,
+              documentRevision: document.revision,
+              faultState,
+            }
+            return document.authority.state === 'handoff_pending'
+              && faultState.droppedCommands === 1
+              ? { document, faultState }
+              : null
+          } catch (error) {
+            frozenObserved = { error: error instanceof Error ? error.message : String(error) }
+            return null
+          }
+        }, 'frozen local authority with dropped resume command', 20_000).catch(error => {
+          throw new Error(error instanceof Error ? error.message : String(error)
+            + ' observed=' + JSON.stringify(frozenObserved))
+        })
+        const frozenStatus = await app.storageStatus()
+        assert.equal(frozenStatus.handoff.state, 'pending')
+        assert.equal(frozenStatus.readOnly, true)
+        frozen.status = frozenStatus
+        const frozenDocumentHash = await fileSha256(localDocumentPath(fixture.userData))
+        const frozenRevision = Number(frozen.document.revision)
+        const frozenEpoch = Number(frozen.document.authority.stamp.epoch)
+        const frozenCanonicalCommand = await app.command(
+          { type: 'admin.grantCheat', payload: { stat: 'mood', amount: 1 } },
+          'handoff-local-command-while-frozen',
+        )
+        assert.equal(frozenCanonicalCommand.status, 'rejected')
+        assert.ok(
+          ['authority_not_active', 'not_available'].includes(frozenCanonicalCommand.error?.code),
+          'frozen local command must fail closed, got ' + JSON.stringify(frozenCanonicalCommand.error),
+        )
+        assert.equal(frozen.status.readOnly, true)
+        assert.equal(await fileSha256(localDocumentPath(fixture.userData)), frozenDocumentHash)
+        assert.equal(Number((await readLocalDocument(fixture.userData)).revision), frozenRevision)
+        const replay = await app.replayDroppedCommand({ expectedEpochDelta: 1 })
+        assert.equal(replay.commandType, 'admin.resumeServer')
+        const rolledBack = await waitFor(async () => {
+          const result = await app.page.evaluate(() => window.__C12_HANDOFF_RESULT__ ?? null)
+          const status = await app.storageStatus()
+          const document = await readLocalDocument(fixture.userData)
+          return result?.done === true
+            && status.handoff.state === 'rolled_back'
+            && document.authority.state === 'active'
+            ? { result, status, document }
+            : null
+        }, 'definitive server rejection rolls back frozen local authority', 20_000)
+        assert.equal(rolledBack.result.ok, true)
+        assert.equal(rolledBack.status.mode, 'local')
+        assert.equal(rolledBack.status.activeMode, 'local')
+        assert.equal(rolledBack.status.authority.owner, 'local')
+        assert.equal(rolledBack.status.authority.state, 'active')
+        assert.equal(rolledBack.status.handoff.direction, 'local_to_server')
+        assert.equal(rolledBack.status.handoff.state, 'rolled_back')
+        assert.equal(rolledBack.status.handoff.reason, 'authority_fork_risk')
+        assert.equal(Number(rolledBack.document.revision), frozenRevision - 1, 'rollback must restore the pre-export document exactly')
+        assert.equal(Number(rolledBack.document.authority.stamp.epoch), frozenEpoch - 1)
+        const serverAfterRollback = await readAuthorityRow(fixture.dbPath)
+        const serverStateAfterRollback = await readPetState(fixture.dbPath)
+        assert.equal(serverAfterRollback.owner, 'local')
+        assert.equal(serverAfterRollback.state, 'archived')
+        assert.equal(serverAfterRollback.epoch, serverArchived.epoch)
+        assert.equal(serverAfterRollback.handoffId, serverArchived.handoffId)
+        assert.equal(serverStateAfterRollback.gameTimeMs, serverStateWhenArchived.gameTimeMs)
+        assert.equal(serverStateAfterRollback.revision, serverStateWhenArchived.revision)
+        assert.equal(serverStateAfterRollback.eventSeq, serverStateWhenArchived.eventSeq)
+
+        // Retry the same production handoff without the injected fence. It must
+        // converge to one active server authority with a higher epoch.
+        await sleep(500)
+        const resumed = await app.setMode(resumeInput)
+        const resumedDiagnostic = {
+          mode: resumed.mode,
+          activeMode: resumed.activeMode,
+          connection: resumed.connection,
+          authority: resumed.authority,
+          handoff: resumed.handoff,
+          revision: resumed.revision,
+          eventSeq: resumed.eventSeq,
+        }
+        assert.equal(resumed.mode, 'server', 'retry failed: ' + JSON.stringify(resumedDiagnostic))
+        assert.equal(resumed.activeMode, 'server')
+        assert.equal(resumed.handoff.direction, 'local_to_server')
+        assert.equal(resumed.handoff.state, 'applied')
+        const resumedActive = await waitFor(async () => {
+          const status = await app.storageStatus()
+          return status.mode === 'server'
+            && status.activeMode === 'server'
+            && status.authority.owner === 'server'
+            && status.authority.state === 'active'
+            && status.authority.epoch === resumed.handoff.nextEpoch
+            ? status
+            : null
+        }, 'active server authority projection after resume', 20_000)
+        assert.equal(resumedActive.authority.owner, 'server')
+        assert.equal(resumedActive.authority.state, 'active')
+        const finalAuthority = await readAuthorityRow(fixture.dbPath)
+        const finalState = await readPetState(fixture.dbPath)
+        const finalLocalArchived = await waitFor(async () => {
+          const document = await readLocalDocument(fixture.userData)
+          return document.authority.state === 'archived' ? document : null
+        }, 'local authority archived after successful resume', 10_000)
+        assert.equal(finalAuthority.owner, 'server')
+        assert.equal(finalAuthority.state, 'active')
+        assert.equal(finalAuthority.handoffEpoch, null)
+        assert.equal(finalAuthority.epoch, resumed.handoff.nextEpoch)
+        assert.ok(finalAuthority.epoch > frozenEpoch, 'resume epoch must advance beyond the frozen local epoch')
+        assert.ok(finalAuthority.epoch > serverArchived.epoch)
+        assert.notEqual(finalAuthority.handoffId, serverArchived.handoffId)
+        assert.ok(finalAuthority.sourceRevision >= rolledBack.document.revision)
+        assert.ok(finalState.revision > rolledBack.document.revision, 'resume must fence and advance canonical revision')
+        assert.equal(finalLocalArchived.authority.state, 'archived')
+        await sleep(250)
+        const finalArchivedLocalHash = await fileSha256(localDocumentPath(fixture.userData))
+        await sleep(1_200)
+        assert.equal(
+          await fileSha256(localDocumentPath(fixture.userData)),
+          finalArchivedLocalHash,
+          'local archive must remain frozen while resumed server is active',
+        )
+        const finalServerMutation = await app.command(
+          { type: 'admin.grantCheat', payload: { stat: 'mood', amount: 1 } },
+          'handoff-final-server-mutation',
+        )
+        assert.equal(finalServerMutation.status, 'applied')
+        await waitFor(async () => (await app.projection())?.revision >= finalServerMutation.revision, 'final active server mutation projection', 10_000)
+        const finalStateAfterMutation = await readPetState(fixture.dbPath)
+        assert.ok(finalStateAfterMutation.revision > finalState.revision, 'active server command must advance canonical revision')
+        assert.equal(await fileSha256(localDocumentPath(fixture.userData)), finalArchivedLocalHash)
+        assert.equal((await server.health()).authorityState, 'active')
+        return {
+          sourceLocalRevision,
+          sourceLocalEpoch,
+          sourceAuthorityIdHash: hash(sourceBundle.authority.authorityId),
+          sourceHandoffIdHash: hash(sourceBundle.authority.handoffId),
+          uploadHandoffState: uploaded.handoff.state,
+          uploadNextEpoch: uploaded.handoff.nextEpoch,
+          uploadServerEpoch: serverAfterUpload.epoch,
+          uploadServerRevision: uploadedPet.revision,
+          uploadRevisionFenced: uploadedPet.revision > sourceLocalRevision,
+          uploadHandoffIdChanged: serverAfterUpload.handoffId !== sourceBundle.authority.handoffId,
+          localArchivedAfterUpload: localArchivedAfterUpload.authority.state,
+          archivedLocalFrozenAfterUpload,
+          staleServerImportStatus: staleServerImport.status,
+          staleServerImportErrorCode: staleServerImport.errorCode,
+          staleServerImportRevisionDelta: serverAfterStaleImport.revision - serverBeforeStaleImport.revision,
+          staleServerImportEventSeqDelta: serverAfterStaleImport.eventSeq - serverBeforeStaleImport.eventSeq,
+          serverWritableAfterFailedImport: serverStillWritable.status,
+          detachHandoffState: detached.handoff.state,
+          detachedServerEpoch: serverArchived.epoch,
+          detachedServerHandoffEpoch: serverArchived.handoffEpoch,
+          detachedLocalEpoch: localAfterDetach.authority.stamp.epoch,
+          detachedLocalRevision: localAfterDetach.revision,
+          detachedRevisionMatchesArchivedSource: localAfterDetach.revision === serverStateWhenArchived.revision,
+          archivedServerFrozen: serverStateAfterFrozenWait.gameTimeMs === serverStateWhenArchived.gameTimeMs
+            && serverStateAfterFrozenWait.revision === serverStateWhenArchived.revision
+            && serverStateAfterFrozenWait.eventSeq === serverStateWhenArchived.eventSeq,
+          archivedServerGameTimeDelta: serverStateAfterFrozenWait.gameTimeMs - serverStateWhenArchived.gameTimeMs,
+          archivedServerRevisionDelta: serverStateAfterFrozenWait.revision - serverStateWhenArchived.revision,
+          archivedServerEventSeqDelta: serverStateAfterFrozenWait.eventSeq - serverStateWhenArchived.eventSeq,
+          staleLocalImportStatus: staleLocalImport.status,
+          staleLocalImportErrorCode: staleLocalImport.errorCode,
+          staleLocalImportRevisionDelta: localDocumentAfterStaleImport.revision - localDocumentBeforeStaleImport.revision,
+          staleLocalImportFileUnchanged,
+          localWritableAfterFailedImport: localStillWritable.status,
+          frozenHandoffState: frozen.status.handoff.state,
+          frozenDocumentState: frozen.document.authority.state,
+          frozenCommandRejectedCode: frozenCanonicalCommand.error?.code,
+          frozenDocumentRevision: frozenRevision,
+          frozenEpoch,
+          injectedResumeFence: replay.expectedEpoch,
+          rollbackHandoffState: rolledBack.status.handoff.state,
+          rollbackReason: rolledBack.status.handoff.reason,
+          rollbackLocalRevision: rolledBack.document.revision,
+          rollbackRestoredRevision: rolledBack.document.revision === frozenRevision - 1,
+          rollbackRestoredEpoch: rolledBack.document.authority.stamp.epoch === frozenEpoch - 1,
+          serverUnchangedAfterRollback: serverStateAfterRollback.gameTimeMs === serverStateWhenArchived.gameTimeMs
+            && serverStateAfterRollback.revision === serverStateWhenArchived.revision
+            && serverStateAfterRollback.eventSeq === serverStateWhenArchived.eventSeq,
+          resumeHandoffState: resumed.handoff.state,
+          resumeNextEpoch: resumed.handoff.nextEpoch,
+          finalServerEpoch: finalAuthority.epoch,
+          finalServerRevision: finalState.revision,
+          finalServerHandoffIdChanged: finalAuthority.handoffId !== serverArchived.handoffId,
+          finalEpochMonotonic: finalAuthority.epoch > frozenEpoch && frozenEpoch > serverArchived.epoch,
+          finalLocalArchivedState: finalLocalArchived.authority.state,
+          localFrozenAfterFinalResume: true,
+          finalServerMutationStatus: finalServerMutation.status,
+          finalServerMutationRevisionDelta: finalStateAfterMutation.revision - finalState.revision,
+          finalAuthorityOwner: finalAuthority.owner,
+          finalAuthorityState: finalAuthority.state,
+          handWrittenBundleFieldsUsed: false,
+        }
+      } finally {
+        await fixture.cleanup()
+      }
+    })
+
     await step('real BrowserWindow/preload/renderer proof and evidence hygiene', async () => {
       const ownerMain = await owner.mainProof()
       const playerMain = await player.mainProof()
@@ -2276,6 +3799,10 @@ async function main() {
       startupCrashRepairHeartbeatGrace: true,
       deterministicRestartExact: true,
       revokedRendererReconnectRejected: true,
+      timedWorkServerDeadlineExact: true,
+      advanceWhileEmptyZeroClientExact: true,
+      onlineTimeSigninCoverageSplit: true,
+      localAuthorityDetachResumeFenced: true,
     }
     report.evidence.competingActionsCovered = true
     report.evidence.sessionTokenAbuseCovered = true
@@ -2285,6 +3812,10 @@ async function main() {
     report.evidence.deterministicRestartCovered = true
     report.evidence.revokedReconnectCovered = true
     report.evidence.feedLatencyP95Covered = true
+    report.evidence.timedServerDeadlineCovered = true
+    report.evidence.advanceWhileEmptyZeroClientCovered = true
+    report.evidence.onlineTimeSigninSplitCovered = true
+    report.evidence.localAuthorityHandoffCovered = true
     report.evidence.answerKeysAbsent = true
     report.evidence.hygiene = {
       pairingCodesAbsent: true,
