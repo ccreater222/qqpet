@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import {
+  PUBLIC_HEALTH_FIELDS,
+  validatePublicHealthResponse,
+} from '../../scripts/e2e/proxy-health-contract.mjs'
 
 const read = path => readFile(new URL('../../' + path, import.meta.url), 'utf8')
 
@@ -65,6 +69,53 @@ test('Nginx example proxies every documented health and WebSocket route with upg
     assert.match(block, /proxy_pass http:\/\/qqpet_sync;/)
   }
   assert.match(nginx, /location \/ \{\s+return 404;/)
+})
+
+test('proxy smoke validates only the redacted public health schema', async () => {
+  const publicHealth = {
+    ok: true,
+    service: 'qqpet-server',
+    live: true,
+    ready: true,
+    pets: 1,
+    catchingUp: false,
+    databaseReady: true,
+    hasError: false,
+  }
+  assert.deepEqual(PUBLIC_HEALTH_FIELDS, Object.keys(publicHealth))
+  assert.deepEqual(validatePublicHealthResponse(200, publicHealth), { ok: true, errors: [] })
+
+  const rejected = [
+    ['non-200 status', 503, publicHealth, /status must be 200/],
+    ['failed ok flag', 200, { ...publicHealth, ok: false }, /ok must be true/],
+    ['wrong service', 200, { ...publicHealth, service: 'other' }, /service must be/],
+    ['failed liveness', 200, { ...publicHealth, live: false }, /live must be true/],
+    ['unready database', 200, { ...publicHealth, databaseReady: false }, /databaseReady must be true/],
+    ['old journalMode field', 200, { ...publicHealth, journalMode: 'wal' }, /journalMode/],
+    ['pet identity field', 200, { ...publicHealth, petId: 'default' }, /petId/],
+    ['detailed pet health field', 200, { ...publicHealth, petHealth: [] }, /petHealth/],
+    ['raw error field', 200, { ...publicHealth, lastError: 'secret' }, /lastError/],
+    ['wrong pets type', 200, { ...publicHealth, pets: '1' }, /pets must be a non-negative integer/],
+    ['wrong readiness type', 200, { ...publicHealth, ready: 'yes' }, /ready must be a boolean/],
+  ]
+  for (const [name, status, body, pattern] of rejected) {
+    const result = validatePublicHealthResponse(status, body)
+    assert.equal(result.ok, false, name)
+    assert.match(result.errors.join('\n'), pattern, name)
+  }
+
+  for (const field of ['ready', 'pets']) {
+    const withoutField = { ...publicHealth }
+    delete withoutField[field]
+    const result = validatePublicHealthResponse(200, withoutField)
+    assert.equal(result.ok, false, 'missing ' + field)
+    assert.match(result.errors.join('\n'), new RegExp(field), 'missing ' + field)
+  }
+
+  const proxySmoke = await read('scripts/e2e/proxy-smoke.mjs')
+  assert.match(proxySmoke, /validatePublicHealthResponse\(health\.status, health\.json\)/)
+  assert.match(proxySmoke, /report\.evidence\.healthRoute = healthContract\.ok/)
+  assert.doesNotMatch(proxySmoke, /journalMode/)
 })
 
 test('Caddy keeps the same health routes and proxies WebSocket traffic automatically', async () => {

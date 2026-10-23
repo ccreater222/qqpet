@@ -12,6 +12,7 @@ import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import https from 'node:https'
+import { validatePublicHealthResponse } from './proxy-health-contract.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '../..')
@@ -358,8 +359,12 @@ async function main() {
     serverContainerId = await startServerContainer()
     report.evidence.containerStarted = true
     const upstreamHealth = await waitForServerReady(serverContainerId)
-    report.evidence.upstreamJournalMode = String(upstreamHealth.journalMode)
-    report.evidence.upstreamSynchronous = String(upstreamHealth.synchronous)
+    const upstreamHealthContract = validatePublicHealthResponse(200, upstreamHealth)
+    report.evidence.upstreamPublicHealthSchema = upstreamHealthContract.ok
+    if (upstreamHealthContract.ok === false) {
+      throw new Error('/readyz returned an invalid redacted public health body: '
+        + upstreamHealthContract.errors.join('; '))
+    }
     process.stdout.write('[proxy-smoke] upstream server ready behind private Docker network\n')
 
     const nginxExample = await readFile(join(ROOT, 'server/deploy/nginx.conf.example'), 'utf8')
@@ -407,13 +412,15 @@ async function main() {
     report.evidence.tlsProtocol = String(healthz.tlsProtocol ?? 'unknown')
 
     const health = await httpsGet(proxyPort, '/health')
-    report.evidence.healthRoute = health.status === 200
-      && health.json?.service === 'qqpet-server'
-      && health.json?.journalMode === 'wal'
+    const healthContract = validatePublicHealthResponse(health.status, health.json)
+    report.evidence.healthRoute = healthContract.ok
     const ready = await httpsGet(proxyPort, '/readyz')
     report.evidence.readyzRoute = ready.status === 200 && ready.json?.ready === true
     if (report.evidence.healthzRoute === false) throw new Error('/healthz did not pass through Nginx')
-    if (report.evidence.healthRoute === false) throw new Error('/health alias did not pass through Nginx')
+    if (report.evidence.healthRoute === false) {
+      throw new Error('/health alias did not pass through Nginx with the redacted public health schema: '
+        + healthContract.errors.join('; '))
+    }
     if (report.evidence.readyzRoute === false) throw new Error('/readyz did not pass through Nginx')
     process.stdout.write('[proxy-smoke] HTTPS routes passed through Nginx\n')
 

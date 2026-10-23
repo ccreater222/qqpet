@@ -83,11 +83,14 @@ A player may submit ordinary gameplay commands.
 
 Do not expose `/v1/sync` publicly as plain `ws://`. Use Caddy/Nginx or another
 TLS terminator and forward WebSocket upgrade headers. Public health responses
-are aggregate and non-identifying; owner-authenticated detailed responses include
-revision, command/event sequence numbers, game time, scheduler catch-up state,
-per-pet connection count, authority state/epoch/generation, and operational
-metrics.
-they never include save JSON, pairing codes, device tokens, or session tokens.
+are aggregate and non-identifying; their unauthenticated `/health` and `/readyz`
+bodies contain only `ok`, `service`, `live`, `ready`, `pets`, `catchingUp`,
+`databaseReady`, and `hasError`. SQLite pragma details such as `journalMode` are
+not part of the public response. Owner-authenticated detailed responses include
+those diagnostics plus revision, command/event sequence numbers, game time,
+scheduler catch-up state, per-pet connection count, authority
+state/epoch/generation, and operational metrics. They never include save JSON,
+pairing codes, device tokens, or session tokens.
 
 ## WebSocket protocol
 
