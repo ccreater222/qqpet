@@ -14,8 +14,8 @@ import { isDeepStrictEqual } from 'node:util'
 export const E2E_MIN_STEPS = 36
 export const EVIDENCE_MAX_AGE_MS = 30 * 60_000
 export const EVIDENCE_FUTURE_SKEW_MS = 2 * 60_000
-const GENERATED_ACCEPTANCE_EVIDENCE_PREFIX = 'docs/superpowers/acceptance/artifacts/'
-const GENERATED_ACCEPTANCE_REPORT_PATTERN = /^docs\/superpowers\/acceptance\/\d{4}-\d{2}-\d{2}-c12-final-gate\.md$/
+const GENERATED_ACCEPTANCE_EVIDENCE_PREFIX = '.agent-reports/acceptance/artifacts/'
+const GENERATED_ACCEPTANCE_REPORT_PATTERN = /^\.agent-reports\/acceptance\/\d{4}-\d{2}-\d{2}-c12-final-gate\.md$/
 const GENERATED_TEMP_PATH_PATTERN = /^out\/(?:docker-smoke-|compose-smoke-|proxy-smoke-|acceptance-gate-)/
 export const REQUIRED_E2E_SCENARIO_NAMES = Object.freeze([
   'two-renderer competing actions reject exactly one canonical mutation',

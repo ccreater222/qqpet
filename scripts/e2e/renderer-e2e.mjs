@@ -6271,7 +6271,7 @@ async function main() {
       }
     }
     const artifactDir = process.env.QQPET_E2E_ARTIFACTS?.trim()
-      || join(ROOT, 'docs/superpowers/acceptance/artifacts/c12-e2e')
+      || join(ROOT, '.agent-reports/acceptance/artifacts/c12-e2e')
     await mkdir(artifactDir, { recursive: true })
     const reportPath = join(artifactDir, 'c12-e2e-report.json')
     await writeFile(reportPath, JSON.stringify(report, null, 2))

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const VALIDATOR_SOURCE = resolve(HERE, '../validate-evidence.mjs')
 const VALIDATOR_LIB_SOURCE = resolve(HERE, '../lib/acceptance-evidence.mjs')
-const REPORT_RELATIVE_PATH = 'docs/superpowers/acceptance/artifacts/c12-docker/docker-smoke-report.json'
+const REPORT_RELATIVE_PATH = '.agent-reports/acceptance/artifacts/c12-docker/docker-smoke-report.json'
 
 function runGit(cwd, args) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
@@ -118,8 +118,8 @@ test('descendant that changes source is rejected with the strict revision error'
 test('unrelated sibling/branch revision is rejected with the strict revision error', async () => {
   const { root, testedRevision: baseRevision } = await createRepository()
   runGit(root, ['checkout', '-b', 'tested'])
-  await mkdir(join(root, 'docs/superpowers/acceptance'), { recursive: true })
-  await writeFile(join(root, 'docs/superpowers/acceptance/tested-branch.txt'), 'tested\n')
+  await mkdir(join(root, '.agent-reports/acceptance'), { recursive: true })
+  await writeFile(join(root, '.agent-reports/acceptance/tested-branch.txt'), 'tested\n')
   const testedRevision = commitAll(root, 'tested branch evidence')
   assert.notEqual(testedRevision, baseRevision)
 
@@ -165,7 +165,7 @@ test('untracked replacement report invalidates the evidence-only descendant allo
   const { root, testedRevision } = await createRepository()
   await writeReport(root, testedRevision)
   const headRevision = commitAll(root, 'record acceptance evidence')
-  const replacementRelativePath = 'docs/superpowers/acceptance/artifacts/c12-docker/replacement-report.json'
+  const replacementRelativePath = '.agent-reports/acceptance/artifacts/c12-docker/replacement-report.json'
   const replacementPath = await writeReport(root, testedRevision, replacementRelativePath)
 
   const result = validateDocker(root, replacementPath)

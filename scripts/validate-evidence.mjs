@@ -15,12 +15,12 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
 const DEFAULT_REPORTS = {
-  e2e: resolve(ROOT, 'docs/superpowers/acceptance/artifacts/c12-e2e/c12-e2e-report.json'),
-  docker: resolve(ROOT, 'docs/superpowers/acceptance/artifacts/c12-docker/docker-smoke-report.json'),
-  proxy: resolve(ROOT, 'docs/superpowers/acceptance/artifacts/c12-proxy/proxy-smoke-report.json'),
-  gate: resolve(ROOT, 'docs/superpowers/acceptance/artifacts/c12-gate/gate-summary.json'),
+  e2e: resolve(ROOT, '.agent-reports/acceptance/artifacts/c12-e2e/c12-e2e-report.json'),
+  docker: resolve(ROOT, '.agent-reports/acceptance/artifacts/c12-docker/docker-smoke-report.json'),
+  proxy: resolve(ROOT, '.agent-reports/acceptance/artifacts/c12-proxy/proxy-smoke-report.json'),
+  gate: resolve(ROOT, '.agent-reports/acceptance/artifacts/c12-gate/gate-summary.json'),
 }
-const ACCEPTANCE_EVIDENCE_PREFIX = 'docs/superpowers/acceptance/'
+const ACCEPTANCE_EVIDENCE_PREFIX = '.agent-reports/acceptance/'
 const COMMIT_REVISION_PATTERN = /^[0-9a-f]{40}$/i
 
 function gitHeadRevision() {

@@ -2,7 +2,7 @@
  * C12 final acceptance gate.
  *
  * Runs the release-blocking commands in one place and writes concise evidence
- * to docs/superpowers/acceptance/. A zero command exit status is not enough:
+ * to .agent-reports/acceptance/. A zero command exit status is not enough:
  * fresh E2E, Docker backup/restore and TLS/WSS proxy reports are parsed and must
  * independently prove their required evidence at the exact current revision.
  * The tree must also remain free of non-generated changes before and after the
@@ -27,7 +27,7 @@ const ROOT = resolve(HERE, '..')
 const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const STAMP = new Date().toISOString()
 const DATE = STAMP.slice(0, 10)
-const ACCEPTANCE_DIR = join(ROOT, 'docs/superpowers/acceptance')
+const ACCEPTANCE_DIR = join(ROOT, '.agent-reports/acceptance')
 const REPORT_PATH = join(ACCEPTANCE_DIR, DATE + '-c12-final-gate.md')
 const E2E_ARTIFACT_DIR = join(ACCEPTANCE_DIR, 'artifacts/c12-e2e')
 const E2E_REPORT_PATH = join(E2E_ARTIFACT_DIR, 'c12-e2e-report.json')
@@ -304,7 +304,7 @@ async function main() {
   lines.push('# C12 final acceptance gate')
   lines.push('')
   lines.push('- Result: **' + finalStatus + '**')
-  lines.push('- Machine-readable authoritative summary: `docs/superpowers/acceptance/artifacts/c12-gate/gate-summary.json`')
+  lines.push('- Machine-readable authoritative summary: `.agent-reports/acceptance/artifacts/c12-gate/gate-summary.json`')
   lines.push('- Generated at: `' + gateSummary.startedAt + '`')
   lines.push('- Branch: `' + branch.stdout + '`')
   lines.push('- Code revision under test: `' + revision.stdout + '`')
@@ -392,7 +392,7 @@ async function main() {
   if (e2eReport !== null) {
     lines.push('## Real-server Electron E2E evidence')
     lines.push('')
-    lines.push('- Evidence JSON: `docs/superpowers/acceptance/artifacts/c12-e2e/c12-e2e-report.json`')
+    lines.push('- Evidence JSON: `.agent-reports/acceptance/artifacts/c12-e2e/c12-e2e-report.json`')
     lines.push('- Result: **' + String(e2eReport.result).toUpperCase() + '**')
     lines.push('- Tested code revision: `' + String(e2eReport.codeRevision ?? 'missing') + '`')
     lines.push('- Named scenarios: `' + String(Array.isArray(e2eReport.steps) ? e2eReport.steps.length : 0) + '`')
@@ -467,7 +467,7 @@ async function main() {
   lines.push('')
   if (dockerReport !== null) {
     const evidence = dockerReport.evidence ?? {}
-    lines.push('- Evidence JSON: `docs/superpowers/acceptance/artifacts/c12-docker/docker-smoke-report.json`')
+    lines.push('- Evidence JSON: `.agent-reports/acceptance/artifacts/c12-docker/docker-smoke-report.json`')
     lines.push('- Result: **' + String(dockerReport.result) + '**')
     lines.push('- Tested code revision: `' + String(dockerReport.codeRevision ?? 'missing') + '`')
     lines.push('- Image built: `' + String(evidence.imageBuilt === true) + '`')
@@ -486,7 +486,7 @@ async function main() {
   lines.push('')
   if (proxyReport !== null) {
     const evidence = proxyReport.evidence ?? {}
-    lines.push('- Evidence JSON: `docs/superpowers/acceptance/artifacts/c12-proxy/proxy-smoke-report.json`')
+    lines.push('- Evidence JSON: `.agent-reports/acceptance/artifacts/c12-proxy/proxy-smoke-report.json`')
     lines.push('- Result: **' + String(proxyReport.result) + '**')
     lines.push('- Tested code revision: `' + String(proxyReport.codeRevision ?? 'missing') + '`')
     lines.push('- Nginx proxy: `' + String(evidence.nginxProxy === true) + '`')

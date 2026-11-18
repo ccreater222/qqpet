@@ -153,7 +153,7 @@ function invalidPayload(payload) {
 }
 
 test('the complete normative command catalog is present and every payload validates', () => {
-  const spec = readFileSync(new URL('../../docs/superpowers/specs/2026-10-20-local-or-server-pet-data-design.md', import.meta.url), 'utf8')
+  const spec = readFileSync(new URL('../../docs/reviews/legacy/2026-10-20-local-or-server-pet-data-design.md', import.meta.url), 'utf8')
   const payloadMapBlock = spec.split('export interface CommandPayloadMap {', 2)[1].split('\n}', 1)[0]
   const specCommands = [...payloadMapBlock.matchAll(/^\s*'([^']+)':/gm)].map(match => match[1])
   assert.equal(COMMAND_TYPES.length, 75)
