@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "startedAt": "2026-11-18T07:22:27.042Z",
-  "codeRevision": "f864c843a692eae49431f74ffdb1e25e5f9441db",
+  "startedAt": "2026-11-18T09:23:42.588Z",
+  "codeRevision": "200b175c6d75b47e915505bc7220239cf05ea855",
   "result": "PASS",
-  "serverImage": "qqpet-server:proxy-smoke-61281-1794986547042",
+  "serverImage": "qqpet-server:proxy-smoke-15545-1794993822588",
   "nginxImage": "nginx:1.27-alpine",
   "evidence": {
     "tlsTerminated": true,
@@ -22,8 +22,8 @@
     "containerStarted": true,
     "upstreamPublicHealthSchema": true,
     "tlsProtocol": "TLSv1.3",
-    "syncAliasDeviceIdHash": "e4fcc001e360d161ace27e98285f91d70deab73177c97ffd272f7f6100c8f465",
+    "syncAliasDeviceIdHash": "117e06b3e91fa4610931f967df69b290406179ca2773bc34e479e34836b6a1dc",
     "teardown": true
   },
-  "finishedAt": "2026-11-18T07:22:40.669Z"
+  "finishedAt": "2026-11-18T09:23:58.402Z"
 }
