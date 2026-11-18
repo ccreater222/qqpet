@@ -1,17 +1,20 @@
 import assert from 'node:assert/strict'
-import { access, mkdtemp, readdir, writeFile } from 'node:fs/promises'
+import { access, copyFile, mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   cleanEvidenceDirectory,
   evaluateAcceptanceGate,
   evaluateWorkingTree,
   parseGitStatusPorcelain,
   REQUIRED_E2E_SCENARIO_NAMES,
+  REQUIRED_GATE_COMMANDS,
   validateDockerSmokeReport,
   validateE2EReport,
+  validateGateSummary,
   validateProxySmokeReport,
 } from '../lib/acceptance-evidence.mjs'
 
@@ -25,11 +28,13 @@ function e2eSteps(count = 36) {
     name,
     status: 'pass',
     durationMs: index + 1,
+    detail: { requiredIndex: index, projectionHash: String(index).padStart(64, '0') },
   }))
   const generated = Array.from({ length: Math.max(0, count - required.length) }, (_, index) => ({
     name: 'scenario-' + String(index + 1),
     status: 'pass',
     durationMs: required.length + index + 1,
+    detail: { generated: true },
   }))
   return [...required, ...generated].slice(0, count)
 }
@@ -142,6 +147,35 @@ function proxyReport() {
   }
 }
 
+function gateSummary() {
+  const commandStartMs = NOW - 100_000
+  return {
+    schemaVersion: 1,
+    result: 'PASS',
+    codeRevision: REV,
+    startedAt: startedAt,
+    finishedAt: finishedAt,
+    cleanTree: { before: true, after: true },
+    head: { before: REV, after: REV },
+    commands: REQUIRED_GATE_COMMANDS.map((required, index) => ({
+      id: required.id,
+      label: required.id,
+      command: required.command,
+      exitCode: 0,
+      durationMs: 500,
+      startedAt: new Date(commandStartMs + index * 1_000).toISOString(),
+      finishedAt: new Date(commandStartMs + index * 1_000 + 500).toISOString(),
+      status: 'PASS',
+    })),
+    scenarios: REQUIRED_E2E_SCENARIO_NAMES.map((name, index) => ({
+      name,
+      status: 'pass',
+      durationMs: index + 1,
+      detail: { requiredIndex: index },
+    })),
+  }
+}
+
 const options = { currentRevision: REV, nowMs: NOW }
 
 test('valid fresh E2E evidence passes all fail-closed checks', () => {
@@ -196,6 +230,11 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
       report.steps[index] = { ...report.steps[index], name: 'the last different passing scenario' }
       return report
     }, /missing mandatory scenario "server SQLite device fields logs and projections/],
+    ['mandatory scenario missing selected detail', () => {
+      const report = e2eReport()
+      delete report.steps[0].detail
+      return report
+    }, /missing its gate detail/],
     ['failed step', () => {
       const report = e2eReport()
       report.steps[4].status = 'fail'
@@ -330,6 +369,9 @@ test('Docker smoke evidence requires boot, WAL/FULL, non-root and backup/restore
     ['unreadable runtime credential', report => { report.evidence.credentialReadableByRuntime = false }, /credentialReadableByRuntime/],
     ['credential read by the wrong uid', report => { report.evidence.credentialRuntimeUid = 1001 }, /runtime uid/],
     ['credential readable through group/world bits', report => { report.evidence.credentialRuntimeMode = 0o644 }, /mode must be 0400/],
+    ['raw owner device UUID', report => {
+      report.evidence.ownerAdminDeviceId = 'ed7e7711-849c-4238-8b19-ac23dbf271a8'
+    }, /raw UUID/],
     ['missing backup assertion', report => { report.evidence.backupContentAsserted = false }, /backupContentAsserted/],
     ['restore content mismatch', report => { report.evidence.restoreContentMatched = false }, /restoreContentMatched/],
     ['tea down not proven', report => { report.evidence.teardown = false }, /teardown/],
@@ -350,11 +392,53 @@ test('TLS/WSS proxy evidence requires every documented Nginx route and authentic
     ['sync alias upgrade', report => { report.evidence.syncAliasUpgrade = false }, /syncAliasUpgrade/],
     ['sync alias authentication', report => { report.evidence.syncAliasAuthenticated = false }, /syncAliasAuthenticated/],
     ['v1 sync route', report => { report.evidence.v1SyncRoute = false }, /v1SyncRoute/],
+    ['raw sync alias device UUID', report => {
+      report.evidence.syncAliasDeviceId = 'f5c5e19e-17cf-44bd-b3ef-b9502bdbc32c'
+    }, /raw UUID/],
   ]
   for (const [name, mutate, pattern] of cases) {
     const report = proxyReport()
     mutate(report)
     const result = validateProxySmokeReport(report, options)
+    assert.equal(result.ok, false, name)
+    assert.match(result.errors.join('\n'), pattern, name)
+  }
+})
+
+test('machine-readable gate summary is authoritative for commands, revisions and scenarios', () => {
+  const summaryOptions = { currentRevision: REV, nowMs: NOW, notBeforeMs: NOW - 180_000 }
+  const valid = validateGateSummary(gateSummary(), summaryOptions)
+  assert.equal(valid.ok, true, valid.errors.join('\n'))
+  assert.equal(valid.commandCount, REQUIRED_GATE_COMMANDS.length)
+  assert.equal(valid.scenarioCount, REQUIRED_E2E_SCENARIO_NAMES.length)
+
+  const cases = [
+    ['failed gate result', summary => { summary.result = 'FAIL' }, /result must be exactly "PASS"/],
+    ['wrong tested revision', summary => { summary.codeRevision = 'b'.repeat(40) }, /does not match current HEAD/],
+    ['stale summary', summary => {
+      summary.finishedAt = new Date(NOW - 31 * 60_000).toISOString()
+    }, /stale/],
+    ['dirty tree before', summary => { summary.cleanTree.before = false }, /cleanTree.before/],
+    ['dirty tree after', summary => { summary.cleanTree.after = false }, /cleanTree.after/],
+    ['changed head', summary => { summary.head.after = 'b'.repeat(40) }, /HEAD changed/],
+    ['missing required command', summary => {
+      summary.commands = summary.commands.filter(command => command.id !== 'server-tests')
+    }, /missing required command id server-tests/],
+    ['failed internal command', summary => { summary.commands[3].exitCode = 1 }, /must exit 0/],
+    ['missing command duration', summary => { delete summary.commands[4].durationMs }, /durationMs/],
+    ['missing command timestamp', summary => { delete summary.commands[5].startedAt }, /startedAt/],
+    ['required scenario renamed', summary => {
+      summary.scenarios[0].name = 'renamed mandatory scenario'
+    }, /missing mandatory scenario/],
+    ['required scenario did not pass', summary => { summary.scenarios[1].status = 'fail' }, /did not pass/],
+    ['required scenario detail disappeared', summary => {
+      delete summary.scenarios[2].detail
+    }, /missing its detail/],
+  ]
+  for (const [name, mutate, pattern] of cases) {
+    const summary = gateSummary()
+    mutate(summary)
+    const result = validateGateSummary(summary, summaryOptions)
     assert.equal(result.ok, false, name)
     assert.match(result.errors.join('\n'), pattern, name)
   }
@@ -489,26 +573,47 @@ test('the pure acceptance decision fails closed for every command/evidence condi
 
 test('the evidence validator CLI exits non-zero for a report that is present but not passing', async () => {
   const root = await mkdtemp(join(tmpdir(), 'qqpet-evidence-cli-'))
-  const reportPath = join(root, 'report.json')
+  await mkdir(join(root, 'scripts/lib'), { recursive: true })
+  await mkdir(join(root, 'src'), { recursive: true })
+  await copyFile(fileURLToPath(new URL('../validate-evidence.mjs', import.meta.url)),
+    join(root, 'scripts/validate-evidence.mjs'))
+  await copyFile(fileURLToPath(new URL('../lib/acceptance-evidence.mjs', import.meta.url)),
+    join(root, 'scripts/lib/acceptance-evidence.mjs'))
+  await writeFile(join(root, 'src/main.ts'), 'export const value = 1\n')
+  const git = args => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    return result.stdout.trim()
+  }
+  git(['init', '--initial-branch=main'])
+  git(['config', 'user.name', 'Evidence Test'])
+  git(['config', 'user.email', 'evidence-test@example.invalid'])
+  git(['add', '-A'])
+  git(['commit', '-m', 'tested source tree'])
+  const revision = git(['rev-parse', 'HEAD'])
+
+  const reportDirectory = await mkdtemp(join(tmpdir(), 'qqpet-evidence-cli-report-'))
+  const reportPath = join(reportDirectory, 'report.json')
   const now = Date.now()
   const report = {
     ...e2eReport(),
     startedAt: new Date(now - 2_000).toISOString(),
     finishedAt: new Date(now - 1_000).toISOString(),
-    codeRevision: REV,
+    codeRevision: revision,
   }
+  const { QQPET_CODE_REVISION, ...cleanEnv } = process.env
   await writeFile(reportPath, JSON.stringify(report))
   const valid = spawnSync(process.execPath, ['scripts/validate-evidence.mjs', 'e2e', reportPath], {
-    cwd: new URL('../..', import.meta.url),
-    env: { ...process.env, QQPET_CODE_REVISION: REV },
+    cwd: root,
+    env: cleanEnv,
     encoding: 'utf8',
   })
   assert.equal(valid.status, 0, valid.stderr)
   report.result = 'FAIL'
   await writeFile(reportPath, JSON.stringify(report))
   const invalid = spawnSync(process.execPath, ['scripts/validate-evidence.mjs', 'e2e', reportPath], {
-    cwd: new URL('../..', import.meta.url),
-    env: { ...process.env, QQPET_CODE_REVISION: REV },
+    cwd: root,
+    env: cleanEnv,
     encoding: 'utf8',
   })
   assert.equal(invalid.status, 1)

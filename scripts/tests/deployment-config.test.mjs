@@ -118,6 +118,20 @@ test('proxy smoke validates only the redacted public health schema', async () =>
   assert.doesNotMatch(proxySmoke, /journalMode/)
 })
 
+test('Docker and proxy smoke reports hash device and authority identifiers', async () => {
+  const docker = await read('scripts/docker-smoke.mjs')
+  assert.match(docker, /report\.evidence\.ownerAdminDeviceIdHash = hashIdentifier\(/)
+  assert.match(docker, /report\.evidence\.initialAuthorityIdHash = hashIdentifier\(/)
+  assert.match(docker, /report\.evidence\.restoredAuthorityIdHash = hashIdentifier\(/)
+  assert.doesNotMatch(docker, /report\.evidence\.ownerAdminDeviceId\s*=/)
+  assert.doesNotMatch(docker, /report\.evidence\.initialAuthorityId\s*=/)
+  assert.doesNotMatch(docker, /report\.evidence\.restoredAuthorityId\s*=/)
+
+  const proxy = await read('scripts/e2e/proxy-smoke.mjs')
+  assert.match(proxy, /report\.evidence\.syncAliasDeviceIdHash = hashIdentifier\(/)
+  assert.doesNotMatch(proxy, /report\.evidence\.syncAliasDeviceId\s*=/)
+})
+
 test('Caddy keeps the same health routes and proxies WebSocket traffic automatically', async () => {
   const caddy = await read('server/deploy/Caddyfile')
   const healthMatcher = caddy.match(/^@health path((?: \/[^\s]+)+)$/m)

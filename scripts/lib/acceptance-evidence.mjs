@@ -95,6 +95,40 @@ export const REQUIRED_PROXY_EVIDENCE_FLAGS = [
   'syncRoute',
 ]
 
+/** Stable command identifiers that an authoritative C12 gate summary must contain. */
+export const REQUIRED_GATE_COMMANDS = Object.freeze([
+  Object.freeze({ id: 'root-typecheck', command: 'npm run typecheck' }),
+  Object.freeze({ id: 'root-compatibility-tests', command: 'npm run test:compat' }),
+  Object.freeze({ id: 'desktop-build', command: 'npm run build' }),
+  Object.freeze({ id: 'android-web-build', command: 'npm run build:android-web' }),
+  Object.freeze({ id: 'harmony-web-build', command: 'npm run build:harmony-web' }),
+  Object.freeze({ id: 'ios-web-build', command: 'npm run build:ios-web' }),
+  Object.freeze({ id: 'server-typecheck', command: 'npm --prefix server run typecheck' }),
+  Object.freeze({ id: 'server-tests', command: 'npm --prefix server test' }),
+  Object.freeze({ id: 'real-server-two-electron-e2e', command: 'npm run test:e2e' }),
+  Object.freeze({ id: 'docker-compose-credential-smoke', command: 'npm run smoke:compose' }),
+  Object.freeze({ id: 'docker-image-backup-restore-smoke', command: 'npm run smoke:docker' }),
+  Object.freeze({ id: 'tls-wss-proxy-smoke', command: 'npm run smoke:proxy' }),
+])
+export const REQUIRED_GATE_COMMAND_IDS = Object.freeze(
+  REQUIRED_GATE_COMMANDS.map(command => command.id),
+)
+export const GATE_SUMMARY_SCHEMA_VERSION = 1
+
+const GATE_REVISION_PATTERN = /^[0-9a-f]{40}$/i
+const RAW_UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+
+function rawUuidPaths(value, path = '$') {
+  if (typeof value === 'string') return RAW_UUID_PATTERN.test(value) ? [path] : []
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => rawUuidPaths(item, path + '[' + index + ']'))
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.entries(value).flatMap(([key, item]) => rawUuidPaths(item, path + '.' + key))
+  }
+  return []
+}
+
 /**
  * Parse `git status --porcelain=v1 -z --untracked-files=all`. Rename/copy
  * records carry the previous path in the following NUL-delimited token.
@@ -194,6 +228,12 @@ function validateCommon(report, options = {}) {
     return { errors, report: null, evidence: null, finishedAtMs: null }
   }
 
+  const uuidPaths = rawUuidPaths(parsed)
+  if (uuidPaths.length > 0) {
+    errors.push(kind + ' report contains raw UUID identifier(s) at '
+      + uuidPaths.join(', ') + '; hash or omit them')
+  }
+
   if (parsed.result !== 'PASS') {
     errors.push(kind + ' result must be exactly "PASS" (got ' + JSON.stringify(parsed.result) + ')')
   }
@@ -264,6 +304,8 @@ export function validateE2EReport(report, options = {}) {
         errors.push('E2E report is missing mandatory scenario "' + name + '"')
       } else if (String(required.status).toLowerCase() !== 'pass') {
         errors.push('E2E mandatory scenario "' + name + '" did not pass')
+      } else if (required.detail === undefined || required.detail === null) {
+        errors.push('E2E mandatory scenario "' + name + '" is missing its gate detail')
       }
     }
     for (const step of namedSteps) {
@@ -368,6 +410,206 @@ export function validateProxySmokeReport(report, options = {}) {
     }
   }
   return validationResult(errors)
+}
+
+function validIsoTimestamp(value) {
+  if (typeof value !== 'string') return Number.NaN
+  return Date.parse(value)
+}
+
+/**
+ * Validate the machine-readable gate summary. The markdown report is human
+ * convenience only; this summary is authoritative for command completion,
+ * revision binding, cleanliness, timestamps and mandatory scenario details.
+ */
+export function validateGateSummary(summary, options = {}) {
+  const errors = []
+  const kind = 'Gate summary'
+  const nowMs = options.nowMs ?? Date.now()
+  const maxAgeMs = options.maxAgeMs ?? EVIDENCE_MAX_AGE_MS
+  const futureSkewMs = options.futureSkewMs ?? EVIDENCE_FUTURE_SKEW_MS
+  const parsed = objectValue(summary)
+  if (parsed === null) {
+    return validationResult([kind + ' is missing or not a JSON object'])
+  }
+
+  const uuidPaths = rawUuidPaths(parsed)
+  if (uuidPaths.length > 0) {
+    errors.push(kind + ' contains raw UUID identifier(s) at '
+      + uuidPaths.join(', ') + '; hash or omit them')
+  }
+
+  if (parsed.schemaVersion !== GATE_SUMMARY_SCHEMA_VERSION) {
+    errors.push(kind + ' schemaVersion must be ' + GATE_SUMMARY_SCHEMA_VERSION)
+  }
+  if (parsed.result !== 'PASS') {
+    errors.push(kind + ' result must be exactly "PASS" (got ' + JSON.stringify(parsed.result) + ')')
+  }
+  if (typeof parsed.codeRevision !== 'string' || GATE_REVISION_PATTERN.test(parsed.codeRevision) === false) {
+    errors.push(kind + ' must include a 40-character hexadecimal codeRevision')
+  } else if (typeof options.currentRevision !== 'string' || options.currentRevision.length === 0) {
+    errors.push('current HEAD revision is unavailable for ' + kind + ' comparison')
+  } else if (parsed.codeRevision.toLowerCase() !== options.currentRevision.toLowerCase()) {
+    errors.push(kind + ' codeRevision ' + parsed.codeRevision
+      + ' does not match current HEAD ' + options.currentRevision)
+  }
+
+  const startedAtMs = validIsoTimestamp(parsed.startedAt)
+  const finishedAtMs = validIsoTimestamp(parsed.finishedAt)
+  if (Number.isFinite(startedAtMs) === false) {
+    errors.push(kind + ' must include a valid startedAt timestamp')
+  }
+  if (Number.isFinite(finishedAtMs) === false) {
+    errors.push(kind + ' must include a valid finishedAt timestamp')
+  } else {
+    const ageMs = nowMs - finishedAtMs
+    if (ageMs > maxAgeMs) {
+      errors.push(kind + ' is stale: finishedAt is older than ' + Math.round(maxAgeMs / 60_000) + ' minutes')
+    }
+    if (ageMs < -futureSkewMs) {
+      errors.push(kind + ' finishedAt is in the future by more than ' + Math.round(futureSkewMs / 60_000) + ' minutes')
+    }
+    if (Number.isFinite(startedAtMs) && finishedAtMs < startedAtMs) {
+      errors.push(kind + ' finishedAt precedes startedAt')
+    }
+    if (options.notBeforeMs !== undefined && finishedAtMs < options.notBeforeMs) {
+      errors.push(kind + ' was not produced by this gate run (finishedAt precedes gate start)')
+    }
+  }
+
+  const cleanTree = objectValue(parsed.cleanTree)
+  if (cleanTree === null) {
+    errors.push(kind + ' must include a cleanTree object with before and after')
+  } else {
+    if (cleanTree.before !== true) errors.push(kind + ' cleanTree.before must be true')
+    if (cleanTree.after !== true) errors.push(kind + ' cleanTree.after must be true')
+  }
+
+  const head = objectValue(parsed.head)
+  if (head === null) {
+    errors.push(kind + ' must include a head object with before and after')
+  } else {
+    for (const key of ['before', 'after']) {
+      if (typeof head[key] !== 'string' || GATE_REVISION_PATTERN.test(head[key]) === false) {
+        errors.push(kind + ' head.' + key + ' must be a 40-character hexadecimal revision')
+      } else if (typeof parsed.codeRevision === 'string'
+        && head[key].toLowerCase() !== parsed.codeRevision.toLowerCase()) {
+        errors.push(kind + ' head.' + key + ' must equal codeRevision')
+      }
+    }
+    if (typeof head.before === 'string' && typeof head.after === 'string'
+      && head.before.toLowerCase() !== head.after.toLowerCase()) {
+      errors.push(kind + ' HEAD changed while the acceptance gate was running')
+    }
+  }
+
+  const commands = Array.isArray(parsed.commands) ? parsed.commands : null
+  if (commands === null) {
+    errors.push(kind + ' must include a commands array')
+  } else {
+    const commandById = new Map()
+    for (const command of commands) {
+      const item = objectValue(command)
+      if (item === null || typeof item.id !== 'string' || item.id.length === 0) {
+        errors.push(kind + ' commands must each include a non-empty id')
+        continue
+      }
+      if (commandById.has(item.id)) {
+        errors.push(kind + ' contains duplicate command id ' + item.id)
+        continue
+      }
+      commandById.set(item.id, item)
+    }
+    for (const required of REQUIRED_GATE_COMMANDS) {
+      const command = commandById.get(required.id)
+      if (command === undefined) {
+        errors.push(kind + ' is missing required command id ' + required.id)
+        continue
+      }
+      if (command.exitCode !== 0) {
+        errors.push(kind + ' command ' + required.id + ' must exit 0 (got '
+          + JSON.stringify(command.exitCode) + ')')
+      }
+      if (Number.isSafeInteger(command.durationMs) === false || command.durationMs < 0) {
+        errors.push(kind + ' command ' + required.id + ' must include a non-negative integer durationMs')
+      }
+      if (typeof command.command !== 'string' || command.command.trim().length === 0) {
+        errors.push(kind + ' command ' + required.id + ' must include its command line')
+      }
+      const commandStartedMs = validIsoTimestamp(command.startedAt)
+      const commandFinishedMs = validIsoTimestamp(command.finishedAt)
+      if (Number.isFinite(commandStartedMs) === false) {
+        errors.push(kind + ' command ' + required.id + ' must include a valid startedAt timestamp')
+      }
+      if (Number.isFinite(commandFinishedMs) === false) {
+        errors.push(kind + ' command ' + required.id + ' must include a valid finishedAt timestamp')
+      }
+      if (Number.isFinite(commandStartedMs) && Number.isFinite(commandFinishedMs)
+        && commandFinishedMs < commandStartedMs) {
+        errors.push(kind + ' command ' + required.id + ' finishedAt precedes startedAt')
+      }
+      if (Number.isFinite(commandStartedMs) && Number.isFinite(startedAtMs)
+        && commandStartedMs < startedAtMs) {
+        errors.push(kind + ' command ' + required.id + ' started before the gate summary')
+      }
+      if (Number.isFinite(commandFinishedMs) && Number.isFinite(finishedAtMs)
+        && commandFinishedMs > finishedAtMs) {
+        errors.push(kind + ' command ' + required.id + ' finished after the gate summary')
+      }
+    }
+    for (const id of commandById.keys()) {
+      if (REQUIRED_GATE_COMMAND_IDS.includes(id) === false) {
+        errors.push(kind + ' contains unknown command id ' + id)
+      }
+    }
+  }
+
+  const scenarios = Array.isArray(parsed.scenarios) ? parsed.scenarios : null
+  if (scenarios === null) {
+    errors.push(kind + ' must include a scenarios array covering every mandatory scenario')
+  } else {
+    const scenarioByName = new Map()
+    for (const scenario of scenarios) {
+      const item = objectValue(scenario)
+      if (item === null || typeof item.name !== 'string' || item.name.trim().length === 0) {
+        errors.push(kind + ' scenarios must each include a non-empty name')
+        continue
+      }
+      if (scenarioByName.has(item.name)) {
+        errors.push(kind + ' contains duplicate scenario ' + JSON.stringify(item.name))
+        continue
+      }
+      scenarioByName.set(item.name, item)
+    }
+    for (const name of REQUIRED_E2E_SCENARIO_NAMES) {
+      const scenario = scenarioByName.get(name)
+      if (scenario === undefined) {
+        errors.push(kind + ' is missing mandatory scenario "' + name + '"')
+        continue
+      }
+      if (String(scenario.status).toLowerCase() !== 'pass') {
+        errors.push(kind + ' mandatory scenario "' + name + '" did not pass')
+      }
+      if (Number.isFinite(scenario.durationMs) === false || scenario.durationMs < 0) {
+        errors.push(kind + ' mandatory scenario "' + name + '" has an invalid durationMs')
+      }
+      if (scenario.detail === undefined || scenario.detail === null) {
+        errors.push(kind + ' mandatory scenario "' + name + '" is missing its detail')
+      }
+    }
+    for (const name of scenarioByName.keys()) {
+      if (REQUIRED_E2E_SCENARIO_NAMES.includes(name) === false) {
+        errors.push(kind + ' contains unknown scenario ' + JSON.stringify(name))
+      }
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    commandCount: commands?.length ?? 0,
+    scenarioCount: scenarios?.length ?? 0,
+  }
 }
 
 /** Remove every old artifact before a gate run so a missing/failed run cannot reuse evidence. */

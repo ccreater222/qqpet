@@ -6,6 +6,7 @@
  * WebSocket upgrades for both /v1/sync and its /sync alias.
  */
 import { execFileSync, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { createRequire } from 'node:module'
@@ -44,6 +45,8 @@ function gitRevision() {
     return ''
   }
 }
+
+const hashIdentifier = value => createHash('sha256').update(String(value)).digest('hex')
 
 function tail(text, max = MAX_OUTPUT_CHARS) {
   if (text.length <= max) return text
@@ -445,7 +448,7 @@ async function main() {
     report.evidence.syncRoute = true
     report.evidence.syncAliasUpgrade = true
     report.evidence.syncAliasAuthenticated = true
-    report.evidence.syncAliasDeviceId = String(alias.welcome.deviceId)
+    report.evidence.syncAliasDeviceIdHash = hashIdentifier(alias.welcome.deviceId)
     alias.close()
     process.stdout.write('[proxy-smoke] authenticated WSS upgrades passed for /v1/sync and /sync\n')
     report.result = 'PASS'

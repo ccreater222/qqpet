@@ -68,11 +68,18 @@ async function writeReport(root, codeRevision, relativePath = REPORT_RELATIVE_PA
   return reportPath
 }
 
-function validateDocker(root, reportPath) {
+async function writeExternalReport(codeRevision) {
+  const root = await mkdtemp(join(tmpdir(), 'qqpet-evidence-report-'))
+  const reportPath = join(root, 'report.json')
+  await writeFile(reportPath, JSON.stringify(dockerReport(codeRevision), null, 2) + '\n')
+  return reportPath
+}
+
+function validateDocker(root, reportPath, extraEnv = {}) {
   const { QQPET_CODE_REVISION, ...env } = process.env
   return spawnSync(process.execPath, ['scripts/validate-evidence.mjs', 'docker', reportPath], {
     cwd: root,
-    env,
+    env: { ...env, ...extraEnv },
     encoding: 'utf8',
   })
 }
@@ -176,4 +183,33 @@ test('missing report revision is still rejected', async () => {
   const result = validateDocker(root, reportPath)
   assert.equal(result.status, 1)
   assert.match(result.stderr, /must include a non-empty codeRevision/)
+})
+
+test('fabricated configured revision equal to the report revision cannot replace real HEAD', async () => {
+  const { root } = await createRepository()
+  const fabricatedRevision = '1'.repeat(40)
+  const realHead = runGit(root, ['rev-parse', 'HEAD'])
+  const reportPath = await writeExternalReport(fabricatedRevision)
+
+  const result = validateDocker(root, reportPath, { QQPET_CODE_REVISION: fabricatedRevision })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, new RegExp('configured revision ' + fabricatedRevision
+    + ' differs from real HEAD ' + realHead))
+  assert.match(result.stderr, /not a clean evidence-only descendant/)
+  assert.match(result.stderr, /does not match current HEAD/)
+  assert.doesNotMatch(result.stdout, /\[evidence\] PASS docker:/)
+})
+
+test('untracked source is rejected when the report revision equals real HEAD', async () => {
+  const { root, testedRevision } = await createRepository()
+  const reportPath = await writeExternalReport(testedRevision)
+  const cleanResult = validateDocker(root, reportPath)
+  assert.equal(cleanResult.status, 0, cleanResult.stderr)
+
+  await writeFile(join(root, 'src/untracked-equal-revision.ts'), 'export const bypass = true\n')
+  const result = validateDocker(root, reportPath)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /working tree must be clean before evidence validation/)
+  assert.match(result.stderr, /src\/untracked-equal-revision\.ts/)
+  assert.doesNotMatch(result.stdout, /\[evidence\] PASS docker:/)
 })

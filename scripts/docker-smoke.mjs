@@ -8,6 +8,7 @@
  * fence. It writes machine-readable evidence for the gate.
  */
 import { execFileSync, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -46,6 +47,8 @@ function gitRevision() {
     return ''
   }
 }
+
+const hashIdentifier = value => createHash('sha256').update(String(value)).digest('hex')
 
 function tail(text, max = MAX_OUTPUT_CHARS) {
   if (text.length <= max) return text
@@ -328,7 +331,7 @@ async function main() {
     const initialized = parseJsonOutput(init.stdout)
     if (initialized.ok === true) { /* expected */ } else { throw new Error('init did not return ok:true') }
     report.evidence.initializedPetId = String(initialized.petId)
-    report.evidence.initialAuthorityId = String(initialized.authority?.authorityId ?? '')
+    report.evidence.initialAuthorityIdHash = hashIdentifier(initialized.authority?.authorityId ?? '')
     const owner = await run(DOCKER, [
       'run', '--rm', '--read-only',
       '--tmpfs', '/tmp:rw,noexec,nosuid,size=32m',
@@ -346,7 +349,7 @@ async function main() {
     }
     ownerAdminCredential = createdOwner.token
     await writeFile(credentialFile, ownerAdminCredential + '\n', { mode: 0o600 })
-    report.evidence.ownerAdminDeviceId = String(createdOwner.deviceId)
+    report.evidence.ownerAdminDeviceIdHash = hashIdentifier(createdOwner.deviceId)
     report.evidence.ownerAdminCredentialHashed = true
     process.stdout.write('[docker-smoke] image built, volume initialized and owner credential hashed\n')
 
@@ -452,7 +455,7 @@ async function main() {
     }
     if (restored.authorityId === before.authorityId) throw new Error('restore did not rotate authority id')
     report.evidence.restoreContentMatched = true
-    report.evidence.restoredAuthorityId = restored.authorityId
+    report.evidence.restoredAuthorityIdHash = hashIdentifier(restored.authorityId)
     report.evidence.restoreGeneration = restored.restoreGeneration
     process.stdout.write('[docker-smoke] restore content matched backup; authority generation=1\n')
 

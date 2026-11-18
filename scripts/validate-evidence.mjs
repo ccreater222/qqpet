@@ -7,6 +7,7 @@ import {
   parseGitStatusPorcelain,
   validateDockerSmokeReport,
   validateE2EReport,
+  validateGateSummary,
   validateProxySmokeReport,
 } from './lib/acceptance-evidence.mjs'
 
@@ -16,18 +17,20 @@ const DEFAULT_REPORTS = {
   e2e: resolve(ROOT, 'docs/superpowers/acceptance/artifacts/c12-e2e/c12-e2e-report.json'),
   docker: resolve(ROOT, 'docs/superpowers/acceptance/artifacts/c12-docker/docker-smoke-report.json'),
   proxy: resolve(ROOT, 'docs/superpowers/acceptance/artifacts/c12-proxy/proxy-smoke-report.json'),
+  gate: resolve(ROOT, 'docs/superpowers/acceptance/artifacts/c12-gate/gate-summary.json'),
 }
 const ACCEPTANCE_EVIDENCE_PREFIX = 'docs/superpowers/acceptance/'
 const COMMIT_REVISION_PATTERN = /^[0-9a-f]{40}$/i
 
-function gitRevision(env = process.env) {
-  const configured = env.QQPET_CODE_REVISION?.trim()
-  if (configured) return configured
-  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim()
-}
-
 function gitHeadRevision() {
-  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim()
+  const revision = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  }).trim()
+  if (COMMIT_REVISION_PATTERN.test(revision) === false) {
+    throw new Error('git rev-parse HEAD did not return a commit revision')
+  }
+  return revision
 }
 
 function isAncestorRevision(testedRevision, headRevision) {
@@ -79,56 +82,71 @@ function isAcceptanceEvidencePath(path) {
 
 /**
  * An evidence report may lag HEAD only by the commit that checked it in. The
- * tested revision must be a real ancestor of HEAD, the working tree must be
- * clean (tracked modifications and untracked files are both dirty), and the
+ * tested revision must be a real ancestor of the real checked-out HEAD, the
+ * working tree (including untracked files) must be completely clean, and the
  * committed tested..HEAD diff must touch only acceptance evidence/docs. This
- * keeps source/scripts/config/test changes and uncommitted replacement reports
- * fail-closed while allowing the evidence-only child commit itself.
+ * keeps source/scripts/config/test changes fail-closed while allowing the
+ * evidence-only child commit itself.
  */
-function evidenceOnlyDescendant(testedRevision, currentRevision) {
+function evidenceOnlyDescendant(testedRevision, headRevision, dirtyPaths) {
   if (typeof testedRevision !== 'string'
-    || typeof currentRevision !== 'string'
     || COMMIT_REVISION_PATTERN.test(testedRevision) === false
-    || COMMIT_REVISION_PATTERN.test(currentRevision) === false
-    || testedRevision.toLowerCase() === currentRevision.toLowerCase()) {
+    || testedRevision.toLowerCase() === headRevision.toLowerCase()
+    || dirtyPaths.length > 0
+    || isAncestorRevision(testedRevision, headRevision) === false) {
     return null
   }
-  let headRevision
-  try {
-    headRevision = gitHeadRevision()
-  } catch {
-    return null
-  }
-  // QQPET_CODE_REVISION is a report-generation override, not a replacement for
-  // proving the checked-out HEAD's ancestry. Descendant acceptance always uses
-  // the actual checked-out commit.
-  if (headRevision.toLowerCase() !== currentRevision.toLowerCase()) return null
-  if (isAncestorRevision(testedRevision, headRevision) === false) return null
-
   let committedPaths
-  let workingTreePaths
-  let dirtyPaths
   try {
     committedPaths = changedTrackedPaths(testedRevision, headRevision)
-    workingTreePaths = changedTrackedPaths(testedRevision)
-    dirtyPaths = workingTreeStatusPaths()
   } catch {
     return null
   }
-  // The allowance is commit-based. Any tracked modification or untracked file,
-  // including a replacement report under the acceptance directory, can alter
-  // what the validator reads and therefore invalidates the allowance.
-  if (dirtyPaths.length > 0) return null
-  const changedPaths = [...new Set([...committedPaths, ...workingTreePaths])]
-  if (changedPaths.every(isAcceptanceEvidencePath) === false) return null
-  return { testedRevision, headRevision, changedPaths }
+  if (committedPaths.length === 0 || committedPaths.every(isAcceptanceEvidencePath) === false) {
+    return null
+  }
+  return { testedRevision, headRevision, changedPaths: committedPaths }
+}
+
+function revisionBinding(revision, label, headRevision, dirtyPaths) {
+  if (typeof revision !== 'string' || revision.length === 0) {
+    return {
+      ok: false,
+      expectedRevision: headRevision,
+      descendant: null,
+      error: label + ' revision must be a non-empty 40-character hexadecimal commit revision',
+    }
+  }
+  if (COMMIT_REVISION_PATTERN.test(revision) === false) {
+    return {
+      ok: false,
+      expectedRevision: headRevision,
+      descendant: null,
+      error: label + ' revision ' + JSON.stringify(revision)
+        + ' is not a 40-character hexadecimal commit revision',
+    }
+  }
+  if (revision.toLowerCase() === headRevision.toLowerCase()) {
+    return { ok: true, expectedRevision: headRevision, descendant: null, error: null }
+  }
+  const descendant = evidenceOnlyDescendant(revision, headRevision, dirtyPaths)
+  if (descendant !== null) {
+    return { ok: true, expectedRevision: revision, descendant, error: null }
+  }
+  return {
+    ok: false,
+    expectedRevision: headRevision,
+    descendant: null,
+    error: label + ' revision ' + revision + ' differs from real HEAD ' + headRevision
+      + ' and is not a clean evidence-only descendant',
+  }
 }
 
 async function main() {
   const kind = process.argv[2] ?? ''
   const reportPath = process.argv[3] ?? DEFAULT_REPORTS[kind]
-  if (['e2e', 'docker', 'proxy'].includes(kind) === false || typeof reportPath !== 'string') {
-    throw new Error('usage: node scripts/validate-evidence.mjs <e2e|docker|proxy> [report-path]')
+  if (['e2e', 'docker', 'proxy', 'gate'].includes(kind) === false || typeof reportPath !== 'string') {
+    throw new Error('usage: node scripts/validate-evidence.mjs <e2e|docker|proxy|gate> [report-path]')
   }
   let report
   try {
@@ -137,25 +155,56 @@ async function main() {
     throw new Error('could not read ' + reportPath + ': ' + (error instanceof Error ? error.message : String(error)))
   }
 
-  const configuredRevision = gitRevision()
+  // Resolve the checked-out revision unconditionally. QQPET_CODE_REVISION is
+  // only a report-generation override; it never replaces proof against HEAD.
+  const headRevision = gitHeadRevision()
+  const configuredEnv = process.env.QQPET_CODE_REVISION?.trim()
+  const configuredRevision = configuredEnv || headRevision
+  const dirtyPaths = workingTreeStatusPaths()
+  const configuredBinding = revisionBinding(configuredRevision, 'configured', headRevision, dirtyPaths)
   const reportRevision = typeof report?.codeRevision === 'string' ? report.codeRevision : ''
-  let acceptedDescendant = null
-  if (reportRevision.length > 0 && reportRevision !== configuredRevision) {
-    acceptedDescendant = evidenceOnlyDescendant(reportRevision, configuredRevision)
-    if (acceptedDescendant !== null) {
-      process.stdout.write('[evidence] evidence-only descendant accepted: tested='
-        + acceptedDescendant.testedRevision + ' head=' + acceptedDescendant.headRevision
-        + ' changedPaths=' + acceptedDescendant.changedPaths.length + '\n')
-    }
+  const reportBinding = revisionBinding(reportRevision, 'report', headRevision, dirtyPaths)
+
+  const cliErrors = []
+  if (configuredBinding.ok === false) cliErrors.push(configuredBinding.error)
+  if (reportBinding.ok === false) cliErrors.push(reportBinding.error)
+  if (configuredEnv !== undefined && configuredEnv.length > 0 && reportRevision.length > 0
+    && configuredRevision.toLowerCase() !== reportRevision.toLowerCase()) {
+    cliErrors.push('report codeRevision ' + reportRevision
+      + ' does not match configured revision ' + configuredRevision)
   }
-  // The pure reports validator stays strict: it is only given the tested
+  if (dirtyPaths.length > 0) {
+    cliErrors.push('working tree must be clean before evidence validation; changed/untracked paths: '
+      + dirtyPaths.join(', '))
+  }
+  if (reportBinding.descendant !== null) {
+    process.stdout.write('[evidence] evidence-only descendant accepted: tested='
+      + reportBinding.descendant.testedRevision + ' head=' + reportBinding.descendant.headRevision
+      + ' changedPaths=' + reportBinding.descendant.changedPaths.length + '\n')
+  }
+
+  // The pure report validators stay strict: they are only given the tested
   // revision after the CLI has proved the evidence-only descendant relation.
-  const options = {
-    currentRevision: acceptedDescendant?.testedRevision ?? configuredRevision,
+  const validationOptions = {
+    currentRevision: reportBinding.expectedRevision,
     nowMs: Date.now(),
     notBeforeMs: process.env.QQPET_EVIDENCE_NOT_BEFORE_MS === undefined
       ? undefined
       : Number(process.env.QQPET_EVIDENCE_NOT_BEFORE_MS),
+  }
+  const validation = kind === 'e2e'
+    ? validateE2EReport(report, validationOptions)
+    : kind === 'docker'
+      ? validateDockerSmokeReport(report, validationOptions)
+      : kind === 'proxy'
+        ? validateProxySmokeReport(report, validationOptions)
+        : validateGateSummary(report, validationOptions)
+  const errors = [...cliErrors, ...validation.errors]
+  if (errors.length > 0) {
+    process.stderr.write('[evidence] FAIL ' + kind + ': ' + reportPath + '\n')
+    for (const error of errors) process.stderr.write('- ' + error + '\n')
+    process.exitCode = 1
+    return
   }
   if (kind === 'e2e') {
     // C12 acceptance requires provable real BrowserWindow/preload/renderer
@@ -167,17 +216,6 @@ async function main() {
       + ' browserWindows=' + String(evidence.rendererProof?.browserWindowCount ?? 'missing')
       + ' rendererProcesses=' + String(evidence.rendererProof?.rendererProcessCount ?? 'missing')
       + '\n')
-  }
-  const validation = kind === 'e2e'
-    ? validateE2EReport(report, options)
-    : kind === 'docker'
-      ? validateDockerSmokeReport(report, options)
-      : validateProxySmokeReport(report, options)
-  if (validation.ok === false) {
-    process.stderr.write('[evidence] FAIL ' + kind + ': ' + reportPath + '\n')
-    for (const error of validation.errors) process.stderr.write('- ' + error + '\n')
-    process.exitCode = 1
-    return
   }
   process.stdout.write('[evidence] PASS ' + kind + ': ' + reportPath + '\n')
 }

@@ -13,9 +13,13 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  GATE_SUMMARY_SCHEMA_VERSION,
+  REQUIRED_E2E_SCENARIO_NAMES,
+  REQUIRED_GATE_COMMAND_IDS,
   cleanEvidenceDirectory,
   evaluateAcceptanceGate,
   parseGitStatusPorcelain,
+  validateGateSummary,
 } from './lib/acceptance-evidence.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -31,6 +35,8 @@ const DOCKER_ARTIFACT_DIR = join(ACCEPTANCE_DIR, 'artifacts/c12-docker')
 const DOCKER_REPORT_PATH = join(DOCKER_ARTIFACT_DIR, 'docker-smoke-report.json')
 const PROXY_ARTIFACT_DIR = join(ACCEPTANCE_DIR, 'artifacts/c12-proxy')
 const PROXY_REPORT_PATH = join(PROXY_ARTIFACT_DIR, 'proxy-smoke-report.json')
+const GATE_ARTIFACT_DIR = join(ACCEPTANCE_DIR, 'artifacts/c12-gate')
+const GATE_SUMMARY_PATH = join(GATE_ARTIFACT_DIR, 'gate-summary.json')
 const FAILURE_TAIL_CHARS = 4000
 
 function runGit(args, options = {}) {
@@ -57,9 +63,25 @@ function gitStatusEntries(result) {
   }
 }
 
-function runCommand(label, command, args, options = {}) {
+function runCommand(id, label, command, args, options = {}) {
   return new Promise(resolveRun => {
-    const startedAt = Date.now()
+    const startedAtMs = Date.now()
+    const startedAt = new Date(startedAtMs).toISOString()
+    let settled = false
+    const finish = result => {
+      if (settled) return
+      settled = true
+      const finishedAtMs = Date.now()
+      resolveRun({
+        id,
+        label,
+        command: [command, ...args].join(' '),
+        ...result,
+        durationMs: finishedAtMs - startedAtMs,
+        startedAt,
+        finishedAt: new Date(finishedAtMs).toISOString(),
+      })
+    }
     process.stdout.write('\n[gate] >>> ' + label + '\n')
     const child = spawn(command, args, {
       cwd: options.cwd ?? ROOT,
@@ -79,27 +101,17 @@ function runCommand(label, command, args, options = {}) {
       process.stderr.write(text)
     })
     child.once('error', error => {
-      resolveRun({
-        label,
-        command: [command, ...args].join(' '),
+      finish({
         code: -1,
-        durationMs: Date.now() - startedAt,
         stdout,
         stderr,
         error: error.message,
       })
+      process.stdout.write('[gate] <<< ' + label + ' spawn error\n')
     })
     child.once('close', code => {
-      const result = {
-        label,
-        command: [command, ...args].join(' '),
-        code,
-        durationMs: Date.now() - startedAt,
-        stdout,
-        stderr,
-      }
-      process.stdout.write('[gate] <<< ' + label + ' exit=' + code + ' (' + result.durationMs + 'ms)\n')
-      resolveRun(result)
+      finish({ code, stdout, stderr })
+      process.stdout.write('[gate] <<< ' + label + ' exit=' + code + '\n')
     })
   })
 }
@@ -136,6 +148,68 @@ function validationLine(label, validation) {
   return '- ' + label + ': **' + (validation.ok ? 'PASS' : 'FAIL') + '**'
 }
 
+/**
+ * Build the authoritative machine summary from the exact objects that the
+ * human-readable markdown is rendered from. The summary intentionally carries
+ * all mandatory scenario details so a rename cannot silently drop one.
+ */
+function buildGateSummary(options) {
+  const resultsById = new Map((options.results ?? []).map(result => [result.id, result]))
+  const steps = options.steps ?? []
+  const commands = steps.map(step => {
+    const result = resultsById.get(step.id)
+    if (result === undefined) {
+      return {
+        id: step.id,
+        label: step.label,
+        command: [step.command, ...step.args].join(' '),
+        exitCode: null,
+        durationMs: 0,
+        startedAt: null,
+        finishedAt: null,
+        status: 'NOT_RUN',
+      }
+    }
+    return {
+      id: step.id,
+      label: step.label,
+      command: result.command,
+      exitCode: result.code,
+      durationMs: result.durationMs,
+      startedAt: result.startedAt,
+      finishedAt: result.finishedAt,
+      status: result.code === 0 ? 'PASS' : 'FAIL',
+    }
+  })
+  const stepByName = new Map((options.e2eReport?.steps ?? []).map(step => [step.name, step]))
+  const scenarios = REQUIRED_E2E_SCENARIO_NAMES.map(name => {
+    const step = stepByName.get(name)
+    return {
+      name,
+      status: typeof step?.status === 'string' ? step.status.toLowerCase() : 'missing',
+      durationMs: Number.isFinite(step?.durationMs) ? step.durationMs : null,
+      detail: step?.detail ?? null,
+    }
+  })
+  return {
+    schemaVersion: GATE_SUMMARY_SCHEMA_VERSION,
+    result: options.gateEvaluation.ok ? 'PASS' : 'FAIL',
+    codeRevision: options.revision,
+    startedAt: new Date(options.startedAtMs).toISOString(),
+    finishedAt: new Date(options.finishedAtMs).toISOString(),
+    cleanTree: {
+      before: options.gateEvaluation.workingTreeBefore.clean === true,
+      after: options.gateEvaluation.workingTreeAfter.clean === true,
+    },
+    head: {
+      before: options.revision,
+      after: options.revisionAfter,
+    },
+    commands,
+    scenarios,
+  }
+}
+
 async function main() {
   const revision = await runGit(['rev-parse', 'HEAD'])
   const branch = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'])
@@ -154,46 +228,56 @@ async function main() {
     cleanEvidenceDirectory(E2E_ARTIFACT_DIR),
     cleanEvidenceDirectory(DOCKER_ARTIFACT_DIR),
     cleanEvidenceDirectory(PROXY_ARTIFACT_DIR),
+    cleanEvidenceDirectory(GATE_ARTIFACT_DIR),
   ])
   const gateStartedAtMs = Date.now()
   const evidenceEnv = { QQPET_CODE_REVISION: revision.stdout }
   const results = []
   const steps = [
-    { label: 'root typecheck', command: 'npm', args: ['run', 'typecheck'] },
-    { label: 'root compatibility tests', command: 'npm', args: ['run', 'test:compat'] },
-    { label: 'desktop build', command: 'npm', args: ['run', 'build'] },
-    { label: 'Android web build', command: 'npm', args: ['run', 'build:android-web'] },
-    { label: 'Harmony web build', command: 'npm', args: ['run', 'build:harmony-web'] },
-    { label: 'iOS web build', command: 'npm', args: ['run', 'build:ios-web'] },
-    { label: 'server typecheck', command: NPM, args: ['--prefix', 'server', 'run', 'typecheck'] },
-    { label: 'server tests', command: NPM, args: ['--prefix', 'server', 'test'] },
+    { id: 'root-typecheck', label: 'root typecheck', command: 'npm', args: ['run', 'typecheck'] },
+    { id: 'root-compatibility-tests', label: 'root compatibility tests', command: 'npm', args: ['run', 'test:compat'] },
+    { id: 'desktop-build', label: 'desktop build', command: 'npm', args: ['run', 'build'] },
+    { id: 'android-web-build', label: 'Android web build', command: 'npm', args: ['run', 'build:android-web'] },
+    { id: 'harmony-web-build', label: 'Harmony web build', command: 'npm', args: ['run', 'build:harmony-web'] },
+    { id: 'ios-web-build', label: 'iOS web build', command: 'npm', args: ['run', 'build:ios-web'] },
+    { id: 'server-typecheck', label: 'server typecheck', command: NPM, args: ['--prefix', 'server', 'run', 'typecheck'] },
+    { id: 'server-tests', label: 'server tests', command: NPM, args: ['--prefix', 'server', 'test'] },
     {
+      id: 'real-server-two-electron-e2e',
       label: 'real-server two-Electron E2E',
       command: NPM,
       args: ['run', 'test:e2e'],
       env: { ...evidenceEnv, QQPET_E2E_ARTIFACTS: E2E_ARTIFACT_DIR },
     },
     {
+      id: 'docker-compose-credential-smoke',
       label: 'Docker Compose required-credential config smoke',
       command: NPM,
       args: ['run', 'smoke:compose'],
     },
     {
+      id: 'docker-image-backup-restore-smoke',
       label: 'Docker image/boot/health/backup/restore smoke',
       command: NPM,
       args: ['run', 'smoke:docker'],
       env: { ...evidenceEnv, QQPET_DOCKER_SMOKE_REPORT: DOCKER_REPORT_PATH },
     },
     {
+      id: 'tls-wss-proxy-smoke',
       label: 'TLS/WSS Nginx proxy smoke',
       command: NPM,
       args: ['run', 'smoke:proxy'],
       env: { ...evidenceEnv, QQPET_PROXY_REPORT: PROXY_REPORT_PATH },
     },
   ]
+  const actualStepIds = steps.map(step => step.id)
+  if (actualStepIds.length !== REQUIRED_GATE_COMMAND_IDS.length
+    || actualStepIds.some((id, index) => id !== REQUIRED_GATE_COMMAND_IDS[index])) {
+    throw new Error('acceptance gate steps do not match the required command ids')
+  }
 
   for (const step of steps) {
-    const result = await runCommand(step.label, step.command, step.args, { env: step.env })
+    const result = await runCommand(step.id, step.label, step.command, step.args, { env: step.env })
     results.push(result)
     if (result.code !== 0) break
   }
@@ -231,13 +315,40 @@ async function main() {
   const e2eValidation = gateEvaluation.e2e
   const dockerValidation = gateEvaluation.docker
   const proxyValidation = gateEvaluation.proxy
-  const allPassed = gateEvaluation.ok
+  const gateFinishedAtMs = Date.now()
+  let gateSummary = buildGateSummary({
+    results,
+    steps,
+    revision: revision.stdout,
+    revisionAfter: revisionAfter.code === 0 ? revisionAfter.stdout : '',
+    startedAtMs: gateStartedAtMs,
+    finishedAtMs: gateFinishedAtMs,
+    gateEvaluation,
+    e2eReport,
+  })
+  const gateSummaryValidation = validateGateSummary(gateSummary, {
+    currentRevision: revision.stdout,
+    nowMs: Date.now(),
+    notBeforeMs: gateStartedAtMs,
+  })
+  let allPassed = gateEvaluation.ok && gateSummaryValidation.ok
+  if (allPassed === false && gateSummary.result === 'PASS') {
+    gateSummary = { ...gateSummary, result: 'FAIL' }
+  }
+  const validationErrors = [
+    ...gateEvaluation.errors,
+    ...gateSummaryValidation.errors.map(error => 'Gate summary: ' + error),
+  ]
+  if (validationErrors.length > 0) gateSummary = { ...gateSummary, errors: validationErrors }
+  await mkdir(GATE_ARTIFACT_DIR, { recursive: true })
+  await writeFile(GATE_SUMMARY_PATH, JSON.stringify(gateSummary, null, 2) + '\n')
   const finalStatus = allPassed ? 'PASS' : 'FAIL'
   const lines = []
   lines.push('# C12 final acceptance gate')
   lines.push('')
   lines.push('- Result: **' + finalStatus + '**')
-  lines.push('- Generated at: `' + STAMP + '`')
+  lines.push('- Machine-readable authoritative summary: `docs/superpowers/acceptance/artifacts/c12-gate/gate-summary.json`')
+  lines.push('- Generated at: `' + gateSummary.startedAt + '`')
   lines.push('- Branch: `' + branch.stdout + '`')
   lines.push('- Code revision under test: `' + revision.stdout + '`')
   lines.push('- Working tree before gate: **'
@@ -257,15 +368,21 @@ async function main() {
   lines.push('')
   lines.push('## Commands and results')
   lines.push('')
-  lines.push(markdownRow(['#', 'Command', 'Result', 'Duration']))
-  lines.push(markdownRow(['---', '---', '---', '---:']))
-  for (let index = 0; index < results.length; index += 1) {
-    const result = results[index]
+  lines.push(markdownRow(['#', 'Command id', 'Command', 'Result', 'Duration']))
+  lines.push(markdownRow(['---', '---', '---', '---', '---:']))
+  for (let index = 0; index < gateSummary.commands.length; index += 1) {
+    const command = gateSummary.commands[index]
+    const result = command.exitCode === 0
+      ? 'PASS'
+      : command.exitCode === null
+        ? 'NOT RUN'
+        : 'FAIL (' + command.exitCode + ')'
     lines.push(markdownRow([
       String(index + 1),
-      '`' + result.command + '`',
-      result.code === 0 ? 'PASS' : 'FAIL (' + result.code + ')',
-      String((result.durationMs / 1000).toFixed(1)) + 's',
+      '`' + command.id + '`',
+      '`' + command.command + '`',
+      result,
+      command.exitCode === null ? '—' : String((command.durationMs / 1000).toFixed(1)) + 's',
     ]))
   }
   if (results.length < steps.length) {
@@ -291,11 +408,13 @@ async function main() {
   lines.push(validationLine('Fresh E2E report', e2eValidation))
   lines.push(validationLine('Docker smoke report', dockerValidation))
   lines.push(validationLine('TLS/WSS proxy smoke report', proxyValidation))
+  lines.push('- Machine-readable gate summary: **' + (allPassed ? 'PASS' : 'FAIL')
+    + '** (authoritative; `gate-summary.json`)')
+  lines.push('- Markdown gate report: explanatory only; validation reads the JSON summary')
   lines.push('- HEAD unchanged during gate: **' + (revisionStable ? 'PASS' : 'FAIL') + '**')
   lines.push('- Non-generated working tree before/after commands: **'
     + (gateEvaluation.workingTreeClean ? 'PASS' : 'FAIL') + '**')
   lines.push('- Current HEAD after commands: `' + revisionAfter.stdout + '`')
-  const validationErrors = gateEvaluation.errors
   if (validationErrors.length > 0) {
     lines.push('')
     lines.push('Validation errors:')
@@ -344,40 +463,6 @@ async function main() {
         String(((scenario.durationMs ?? 0) / 1000).toFixed(2)) + 's',
       ]))
     }
-    const detailByStep = new Map((e2eReport.steps ?? []).map(step => [step.name, step.detail]))
-    const selected = [
-      'pair owner via real renderer window.qqpet.storage API',
-      'switch owner renderer to server mode with use-server source',
-      'pair player via real renderer storage API and switch to server mode',
-      'initial two-renderer projection convergence over real WebSocket',
-      'canonical feed from owner renderer reaches player renderer within 3s',
-      'duplicate opId through renderer is idempotent',
-      'dropped projection frame triggers renderer revision-gap resync',
-      'two-renderer competing actions reject exactly one canonical mutation',
-      'game diudiule exam island-quiz session token abuse is rejected without answer keys',
-      'fresh-host portable import clamps and preserves canonical projection',
-      'connected reset reopens exact survivor coverage',
-      'startup crash repair uses heartbeat grace and reconnects without duplicate events',
-      'deterministic restart catch-up has exact state and active clients',
-      'revoked renderer reconnect is rejected after relaunch',
-      'feed latency p95 across ten renderer commands',
-      'timed work completes exactly once at server-owned deadline across restart',
-      'advanceWhileEmpty true and false have exact zero-client state deltas',
-      'online-time and sign-in gift split credits only covered intervals exactly once',
-      'real LocalRepository authority detach resume fences epochs and failed imports',
-      'owner detach then resume restores authority and both renderer projections converge',
-      'device revoke disconnects player renderer and forces read-only',
-      'real BrowserWindow/preload/renderer proof and evidence hygiene',
-    ]
-    lines.push('')
-    lines.push('### Selected hash/revision evidence')
-    lines.push('')
-    for (const name of selected) {
-      const detail = detailByStep.get(name)
-      if (detail === undefined) continue
-      const compact = JSON.stringify(detail)
-      lines.push('- `' + name + '`: `' + compact + '`')
-    }
     if (Array.isArray(e2eReport.residualGap)) {
       lines.push('')
       lines.push('### Honest residual gaps')
@@ -389,6 +474,26 @@ async function main() {
     lines.push('')
     lines.push('No E2E JSON report was produced. Treat the gate as failed unless the command'
       + ' failure above is explained and the E2E is rerun successfully.')
+  }
+  lines.push('')
+  lines.push('## Mandatory scenario coverage (authoritative gate summary)')
+  lines.push('')
+  const coveredScenarioCount = gateSummary.scenarios.filter(scenario =>
+    String(scenario.status).toLowerCase() === 'pass'
+    && scenario.detail !== null
+    && scenario.detail !== undefined).length
+  lines.push('- Required scenarios covered in JSON: **' + coveredScenarioCount
+    + '/' + REQUIRED_E2E_SCENARIO_NAMES.length + '**')
+  lines.push('- Details below are rendered from `gate-summary.json`; no separate selected-name'
+    + ' list can silently skip a renamed scenario.')
+  lines.push('')
+  for (const scenario of gateSummary.scenarios) {
+    const result = String(scenario.status).toUpperCase()
+    const detail = scenario.detail === null || scenario.detail === undefined
+      ? '**MISSING DETAIL**'
+      : '`' + JSON.stringify(scenario.detail) + '`'
+    lines.push('- `' + scenario.name + '` [' + result + ', '
+      + String((scenario.durationMs ?? 0) / 1000) + 's]: ' + detail)
   }
   lines.push('')
   lines.push('## Docker build/boot/backup/restore smoke')
