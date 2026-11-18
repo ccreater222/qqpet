@@ -74,7 +74,7 @@ const HIDDEN_ACTIVITY_MEASURE_MS = 1_000
  * rather than text somewhere in the file.
  */
 const RESIDUAL_GAP_HIDDEN_SHOW_PATH = 'The hidden-window run never shows a BrowserWindow, so the production ready-to-show/showInactive (and game-window show) path is not covered by this hidden-window run; it needs a human check or a separate show-mode smoke that is intentionally not part of the headless acceptance evidence.'
-const RESIDUAL_GAP_RENDERER_ACTIVITY = 'Hidden-window rendering is proven behaviourally by an in-renderer probe (document.visibilityState plus requestAnimationFrame/timer counts over ~1s). document.visibilityState is platform-dependent for never-shown windows and is asserted only on macOS where it was measured; it is recorded but not used as cross-platform evidence, while the rAF and timer counts are the cross-platform still-rendering proof. The rAF/timer floors are calibrated per platform: macOS observed values, Linux and other platforms use conservative lower floors that still separate a throttled page (~0-1 frames/ticks) from a live renderer. Electron does not reflect backgroundThrottling through getLastWebPreferences(), so no preference read is claimed as evidence; window.ts still sets backgroundThrottling: false in hidden mode as a cross-platform safety net and the probe verifies the observable result.'
+const RESIDUAL_GAP_RENDERER_ACTIVITY = 'Hidden-window rendering is proven behaviourally by an in-renderer probe (document.visibilityState plus requestAnimationFrame/timer counts over ~1s). document.visibilityState is platform-dependent for never-shown windows and is asserted only on macOS where it was measured; it is recorded but not used as cross-platform evidence, while the rAF and timer counts are the cross-platform still-rendering proof. The rAF/timer floors are calibrated per platform: macOS observed values; Linux and other platforms have not been measured yet and use conservative lower floors that still separate a throttled page (~0-1 frames/ticks) from a live renderer. Electron does not reflect backgroundThrottling through getLastWebPreferences(), so no preference read is claimed as evidence; window.ts still sets backgroundThrottling: false in hidden mode as a cross-platform safety net and the probe verifies the observable result.'
 
 const [
   SCENARIO_COMPETING,
@@ -6217,6 +6217,12 @@ async function main() {
       authTokensHashOnlyInSqlite: true,
     }
     report.evidence.stepCount = report.steps.length
+    // No command runs after the proof step, so this is final. Assign it before
+    // finalEvidenceText so the evidence-hygiene assertions below also cover it.
+    report.evidence.commandRetries = {
+      total: commandRetryLog.length,
+      entries: commandRetryLog.map(entry => ({ ...entry })),
+    }
     report.finishedAt = new Date().toISOString()
     const finalEvidenceText = JSON.stringify(report)
     for (const secret of [
@@ -6256,11 +6262,13 @@ async function main() {
     }
     if (report.finishedAt === undefined) report.finishedAt = new Date().toISOString()
     report.evidence.stepCount = report.steps.length
-    // Authoritative retry evidence from the shared collector: includes replaced,
-    // fresh-host and kill-survivor renderers, not just the final owner/player.
-    report.evidence.commandRetries = {
-      total: commandRetryLog.length,
-      entries: commandRetryLog.map(entry => ({ ...entry })),
+    // Failure-path fallback: on success the identical value was already set in
+    // try before the evidence-hygiene assertions, and must not be replaced.
+    if (report.evidence.commandRetries === undefined) {
+      report.evidence.commandRetries = {
+        total: commandRetryLog.length,
+        entries: commandRetryLog.map(entry => ({ ...entry })),
+      }
     }
     const artifactDir = process.env.QQPET_E2E_ARTIFACTS?.trim()
       || join(ROOT, 'docs/superpowers/acceptance/artifacts/c12-e2e')
