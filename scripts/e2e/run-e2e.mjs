@@ -13,9 +13,9 @@ import { createRequire } from 'node:module'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
-import { E2E_MIN_STEPS } from '../lib/acceptance-evidence.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '../..')
@@ -24,6 +24,13 @@ const ELECTRON = require('electron')
 const SERVER_ENTRY = join(ROOT, 'server/dist/server/src/index.js')
 const HARNESS_ENTRY = join(ROOT, 'out/e2e/electron-harness.mjs')
 const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+/**
+ * This main-process harness has 15 steps (setup + main-process scenarios).
+ * E2E_MIN_STEPS in acceptance-evidence describes the separate 36-step renderer
+ * suite and must not gate this script; importing it made every successful
+ * main-process run fail on step count.
+ */
+const MAIN_PROCESS_E2E_MIN_STEPS = 15
 const CATCHUP_WAIT_MS = Number(process.env.QQPET_E2E_CATCHUP_WAIT_MS ?? '62000')
 const CODE_REVISION = process.env.QQPET_CODE_REVISION?.trim()
   || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim()
@@ -265,6 +272,7 @@ class ServerProcess {
     this.stdout = []
     this.stderr = []
     this.exitPromise = null
+    this.authToken = ''
   }
 
   async start() {
@@ -304,9 +312,33 @@ class ServerProcess {
     throw new Error('server did not become ready: ' + lastError + '\n' + this.stderr.join(''))
   }
 
+  /**
+   * Detailed health is owner-only. Until the owner device has paired, only the
+   * redacted public /health contract is available; later steps already hold the
+   * owner token, so they get authoritative fields from /health/detail.
+   */
+  setHealthToken(token) {
+    const value = typeof token === 'string' ? token.trim() : ''
+    if (value.length === 0) throw new Error('health token must be a non-empty string')
+    this.authToken = value
+  }
+
   async health() {
-    const response = await fetch('http://127.0.0.1:' + this.options.port + '/health')
-    if (response.ok === false) throw new Error('health returned ' + response.status)
+    const detailed = this.authToken.length > 0
+    const url = 'http://127.0.0.1:' + this.options.port + (detailed ? '/health/detail' : '/health')
+    const response = await fetch(url, detailed
+      ? { headers: { authorization: 'Bearer ' + this.authToken } }
+      : undefined)
+    if (response.ok === false) {
+      let detail = ''
+      try {
+        const body = await response.json()
+        if (typeof body?.error === 'string') detail = ': ' + body.error
+      } catch {
+        // The status code is authoritative; the body is only diagnostic.
+      }
+      throw new Error('health returned ' + response.status + detail)
+    }
     return await response.json()
   }
 
@@ -472,17 +504,32 @@ async function main() {
 
     await step('start real standalone server and verify WAL + synchronous=FULL health', async () => {
       server = await new ServerProcess({ port, env: baseEnv }).start()
+      // Public /health is intentionally redacted: it no longer exposes PRAGMA or
+      // authority details. Prove the database mode directly against the real
+      // temporary SQLite file, then assert only the documented public fields.
+      const database = new DatabaseSync(dbPath, { readOnly: true })
+      let journalMode
+      let synchronous
+      try {
+        journalMode = String(Object.values(database.prepare('PRAGMA journal_mode').get() ?? {})[0] ?? '').toLowerCase()
+        synchronous = Number(Object.values(database.prepare('PRAGMA synchronous').get() ?? {})[0])
+      } finally {
+        database.close()
+      }
+      assert.equal(journalMode, 'wal')
+      assert.equal(synchronous, 2)
       const health = await server.health()
-      assert.equal(health.journalMode, 'wal')
-      assert.equal(health.synchronous, 'full')
       assert.equal(health.ready, true)
-      assert.equal(health.activeClientCount, 0)
+      assert.equal(health.databaseReady, true)
+      assert.equal(health.pets, 1)
+      assert.equal(health.catchingUp, false)
       return {
-        journalMode: health.journalMode,
-        synchronous: health.synchronous,
-        authorityId: health.authorityId,
-        revision: health.revision,
-        gameTimeMs: health.gameTimeMs,
+        journalMode,
+        synchronous: synchronous === 2 ? 'full' : String(synchronous),
+        ready: health.ready,
+        databaseReady: health.databaseReady,
+        pets: health.pets,
+        catchingUp: health.catchingUp,
       }
     })
 
@@ -510,6 +557,9 @@ async function main() {
       assert.notEqual(ownerProfile, playerProfile)
       ownerToken = (await readFile(join(ownerProfile, 'e2e-device-token.txt'), 'utf8')).trim()
       assert.ok(ownerToken.length >= 43)
+      // Later steps read detailed health (active clients, authority epoch,
+      // restore generation). Only the paired owner token may see those fields.
+      server.setHealthToken(ownerToken)
       // The restore CLI authorizes against the owner device's hashed token in
       // the backup. Persist the real paired token only after pairing succeeds.
       await writeFile(credentialFile, ownerToken + '\n', { mode: 0o600 })
@@ -803,6 +853,7 @@ async function main() {
       await sleep(CATCHUP_WAIT_MS)
       server = new ServerProcess({ port, env: baseEnv })
       await server.start()
+      server.setHealthToken(ownerToken)
       const caughtUpHealth = await server.health()
       assert.equal(caughtUpHealth.ready, true)
       assert.equal(caughtUpHealth.authorityId, preStopHealth.authorityId)
@@ -856,6 +907,7 @@ async function main() {
       assert.equal(restored.restoreGeneration, 1)
       server = new ServerProcess({ port, env: baseEnv })
       await server.start()
+      server.setHealthToken(ownerToken)
       const resetHealth = await server.health()
       assert.equal(resetHealth.authorityState, 'active')
       assert.equal(resetHealth.restoreGeneration, 1)
@@ -917,8 +969,8 @@ async function main() {
       }
     })
 
-    if (report.steps.length < E2E_MIN_STEPS) {
-      throw new Error('E2E completed only ' + report.steps.length + ' steps; minimum is ' + E2E_MIN_STEPS)
+    if (report.steps.length < MAIN_PROCESS_E2E_MIN_STEPS) {
+      throw new Error('E2E completed only ' + report.steps.length + ' steps; minimum is ' + MAIN_PROCESS_E2E_MIN_STEPS)
     }
     if (report.steps.every(step => step.status === 'pass') === false) {
       throw new Error('E2E report contains a non-passing scenario')
