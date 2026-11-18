@@ -142,6 +142,11 @@ export const GATE_EVIDENCE_MIN_E2E_STEPS = 18
 export const GATE_COMMAND_DURATION_TOLERANCE_MS = 2_000
 
 const GATE_REVISION_PATTERN = /^[0-9a-f]{40}$/i
+const UUID_TEXT_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
+const LONG_HEX_TEXT_PATTERN = /[0-9a-f]{32,}/gi
+
+/** A retry count above this means a reconciliation loop, not transport flakiness. */
+export const GATE_MAX_COMMAND_RETRIES = 5
 const GATE_REPORT_SHA256_PATTERN = /^[0-9a-f]{64}$/
 const RAW_UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
 
@@ -286,6 +291,26 @@ export function shouldRetryReconciledCommand(result) {
     && error.message === RECONCILIATION_RETRY_MESSAGE
 }
 
+/**
+ * Sanitize captured diagnostics before they may enter evidence. UUIDs and any
+ * 32+ character hex string are redacted generically, then caller-supplied known
+ * secrets are redacted too. `safe` is false when a known secret survived the
+ * generic pass (i.e. it is neither UUID- nor long-hex-shaped); callers must
+ * then keep the text local (stderr) instead of writing it into the report.
+ */
+export function sanitizeEvidenceText(text, knownSecrets = []) {
+  const raw = typeof text === 'string' ? text : ''
+  const generic = raw
+    .replace(UUID_TEXT_PATTERN, '[redacted]')
+    .replace(LONG_HEX_TEXT_PATTERN, '[redacted]')
+  const secrets = (Array.isArray(knownSecrets) ? knownSecrets : [])
+    .filter(value => typeof value === 'string' && value.length > 0)
+  const knownSecretHits = secrets.filter(value => generic.includes(value)).length
+  let sanitized = generic
+  for (const value of secrets) sanitized = sanitized.split(value).join('[redacted]')
+  return { text: sanitized, safe: knownSecretHits === 0, knownSecretHits }
+}
+
 function isSha256Hex(value) {
   return typeof value === 'string' && GATE_REPORT_SHA256_PATTERN.test(value)
 }
@@ -414,6 +439,25 @@ export function validateE2EReport(report, options = {}) {
         + ' does not match the ' + parsed.steps.length + ' reported steps')
     }
 
+    const commandRetries = objectValue(evidence.commandRetries)
+    if (commandRetries === null) {
+      errors.push('E2E evidence requires a commandRetries object with total and entries')
+    } else {
+      if (Number.isSafeInteger(commandRetries.total) === false
+        || commandRetries.total < 0
+        || commandRetries.total > GATE_MAX_COMMAND_RETRIES) {
+        errors.push('E2E evidence commandRetries.total must be an integer between 0 and '
+          + GATE_MAX_COMMAND_RETRIES + ' (a higher count indicates a retry storm)')
+      }
+      if (Array.isArray(commandRetries.entries) === false) {
+        errors.push('E2E evidence commandRetries must include an entries array')
+      } else if (Number.isSafeInteger(commandRetries.total)
+        && commandRetries.entries.length !== commandRetries.total) {
+        errors.push('E2E evidence commandRetries.entries length '
+          + commandRetries.entries.length + ' does not match total ' + commandRetries.total)
+      }
+    }
+
     const rendererProof = objectValue(evidence.rendererProof)
     if (rendererProof === null) {
       errors.push('E2E evidence requires a rendererProof object')
@@ -534,6 +578,9 @@ export function buildGateEvidenceSnapshot(reports = {}) {
       result: typeof e2eReport.result === 'string' ? e2eReport.result : null,
       codeRevision: typeof e2eReport.codeRevision === 'string' ? e2eReport.codeRevision : null,
       stepCount: Number.isSafeInteger(e2eEvidence.stepCount) ? e2eEvidence.stepCount : null,
+      commandRetries: Number.isSafeInteger(e2eEvidence.commandRetries?.total)
+        ? e2eEvidence.commandRetries.total
+        : null,
       flags: evidenceFlagSnapshot(e2eEvidence, GATE_EVIDENCE_E2E_FLAGS),
       rendererProof: {
         browserWindowCount: Number.isSafeInteger(rendererProof.browserWindowCount)
@@ -692,6 +739,13 @@ function appendGateEvidenceErrors(errors, evidence, summaryRevision, kind) {
       || e2e.stepCount < GATE_EVIDENCE_MIN_E2E_STEPS) {
       errors.push(kind + ' evidence.e2e.stepCount must be an integer >= '
         + GATE_EVIDENCE_MIN_E2E_STEPS)
+    }
+    if (Number.isSafeInteger(e2e.commandRetries) === false || e2e.commandRetries < 0) {
+      errors.push(kind + ' evidence.e2e.commandRetries must be an integer retry count')
+    } else if (e2e.commandRetries > GATE_MAX_COMMAND_RETRIES) {
+      errors.push(kind + ' evidence.e2e.commandRetries ' + e2e.commandRetries
+        + ' exceeds ' + GATE_MAX_COMMAND_RETRIES
+        + ' (retry storm: reconciliation is looping instead of recovering once)')
     }
     if (isSha256Hex(e2e.reportSha256) === false) {
       errors.push(kind + ' evidence.e2e.reportSha256 must be a 64-character lowercase sha256 digest')

@@ -21,6 +21,7 @@ import {
   E2E_MIN_STEPS,
   RECONCILIATION_RETRY_DELAY_MS,
   REQUIRED_E2E_SCENARIO_NAMES,
+  sanitizeEvidenceText,
   shouldRetryReconciledCommand,
 } from '../lib/acceptance-evidence.mjs'
 
@@ -43,9 +44,22 @@ const WINDOWS_ENV = {
   QQPET_E2E_HIDE_WINDOWS: process.env.QQPET_E2E_SHOW_WINDOWS === '1' ? '0' : '1',
 }
 
-/** Behavioural hidden-window thresholds: a throttled Chromium renderer yields ~0-1. */
-const MIN_HIDDEN_RAF_FRAMES = 10
-const MIN_HIDDEN_TIMER_TICKS = 8
+/**
+ * Behavioural hidden-window floors, calibrated per platform. macOS values are
+ * measured (see residual gap); Linux/other platforms are not yet measured, so
+ * they use conservative floors that still separate a throttled page (~0-1
+ * frames/ticks) from a live renderer.
+ */
+const HIDDEN_RAF_FLOOR = process.platform === 'darwin' ? 10 : 5
+const HIDDEN_TIMER_FLOOR = process.platform === 'darwin' ? 8 : 4
+
+/**
+ * Shared retry collector. Every RendererApp instance -- including replaced,
+ * fresh-host and kill-survivor instances -- appends here, so the authoritative
+ * evidence is not limited to whichever owner/player variables exist at proof
+ * time. Entries hold opId strings only, never tokens.
+ */
+const commandRetryLog = []
 /**
  * Observation window. The real pet renderer's animation loop competes with 20ms
  * timers, so 400ms samples fluctuate around 7-9 ticks; a 1s window keeps the
@@ -60,7 +74,7 @@ const HIDDEN_ACTIVITY_MEASURE_MS = 1_000
  * rather than text somewhere in the file.
  */
 const RESIDUAL_GAP_HIDDEN_SHOW_PATH = 'The hidden-window run never shows a BrowserWindow, so the production ready-to-show/showInactive (and game-window show) path is not covered by this hidden-window run; it needs a human check or a separate show-mode smoke that is intentionally not part of the headless acceptance evidence.'
-const RESIDUAL_GAP_RENDERER_ACTIVITY = 'Hidden-window rendering is proven behaviourally by an in-renderer probe (document.visibilityState plus requestAnimationFrame/timer counts over ~1s). document.visibilityState is platform-dependent for never-shown windows and is asserted only on macOS where it was measured; it is recorded but not used as cross-platform evidence, while the rAF and timer counts are the cross-platform still-rendering proof. Electron does not reflect backgroundThrottling through getLastWebPreferences(), so no preference read is claimed as evidence; window.ts still sets backgroundThrottling: false in hidden mode as a cross-platform safety net and the probe verifies the observable result.'
+const RESIDUAL_GAP_RENDERER_ACTIVITY = 'Hidden-window rendering is proven behaviourally by an in-renderer probe (document.visibilityState plus requestAnimationFrame/timer counts over ~1s). document.visibilityState is platform-dependent for never-shown windows and is asserted only on macOS where it was measured; it is recorded but not used as cross-platform evidence, while the rAF and timer counts are the cross-platform still-rendering proof. The rAF/timer floors are calibrated per platform: macOS observed values, Linux and other platforms use conservative lower floors that still separate a throttled page (~0-1 frames/ticks) from a live renderer. Electron does not reflect backgroundThrottling through getLastWebPreferences(), so no preference read is claimed as evidence; window.ts still sets backgroundThrottling: false in hidden mode as a cross-platform safety net and the probe verifies the observable result.'
 
 const [
   SCENARIO_COMPETING,
@@ -1055,7 +1069,6 @@ class RendererApp {
     this.pid = null
     this.closed = false
     this.launchLog = []
-    this.commandRetries = []
   }
 
   async launch() {
@@ -1188,7 +1201,7 @@ class RendererApp {
     // one explicit retry with a fresh opId; every other not_available stays
     // un-retried so real rejections are still proven.
     const retriedAs = opId + '-retry'
-    this.commandRetries.push({ opId, retriedAs })
+    commandRetryLog.push({ app: this.label, opId, retriedAs })
     await sleep(RECONCILIATION_RETRY_DELAY_MS)
     return await this.page.evaluate(
       async input => await window.qqpet.command(input.command, { opId: input.opId }),
@@ -1874,9 +1887,13 @@ async function main() {
       }
       const logTail = failureServerLogTail()
       if (logTail !== null) {
-        failure.serverLogTail = logTail
         process.stderr.write('[renderer-e2e] server log tail for "' + name + '":\n'
-          + logTail.join('\n') + '\n')
+          + logTail.lines.join('\n') + '\n')
+        if (logTail.safe) {
+          failure.serverLogTail = logTail.lines
+        } else {
+          failure.serverLogTailOmitted = 'known-secret'
+        }
       }
       report.failures.push(failure)
       process.stdout.write('[renderer-e2e] FAIL ' + name + ': '
@@ -1901,39 +1918,37 @@ async function main() {
   let freshPlayerDeviceId = ''
   const rawSessionTokens = []
   let rendererProof = null
-  let commandRetryEvidence = { owner: [], player: [] }
+  let commandRetryEvidence = { total: 0, entries: [] }
   let teardownComplete = false
   let timedBothRendererEvidence = null
   let sessionGradingEvidence = null
   let restartEngineStateEvidence = null
   let importEngineStateEvidence = null
 
-  const redactEvidenceSecrets = text => {
-    let redacted = text
-    for (const secret of [
-      ownerPairingCode,
-      playerPairingCode,
-      freshOwnerPairingCode,
-      freshPlayerPairingCode,
-      ownerDeviceId,
-      playerDeviceId,
-      freshOwnerDeviceId,
-      freshPlayerDeviceId,
-      ...rawSessionTokens,
-    ]) {
-      if (typeof secret === 'string' && secret.length > 0) {
-        redacted = redacted.split(secret).join('[redacted]')
-      }
-    }
-    return redacted
-  }
-  /** Last 40 non-empty server log lines, redacted, for failed-step diagnostics. */
+  const failureServerLogSecrets = () => [
+    ownerPairingCode,
+    playerPairingCode,
+    freshOwnerPairingCode,
+    freshPlayerPairingCode,
+    ownerDeviceId,
+    playerDeviceId,
+    freshOwnerDeviceId,
+    freshPlayerDeviceId,
+    ...rawSessionTokens,
+  ]
+  /**
+   * Last 40 non-empty sanitized server log lines for failed-step diagnostics.
+   * `safe` is false when a known secret survived the generic UUID/long-hex
+   * pass; such a tail is printed locally but never written into the report.
+   */
   const failureServerLogTail = () => {
     if (server === null) return null
-    const lines = redactEvidenceSecrets(server.logText()).split('\n')
+    const sanitized = sanitizeEvidenceText(server.logText(), failureServerLogSecrets())
+    const lines = sanitized.text.split('\n')
       .filter(line => line.length > 0)
       .slice(-40)
-    return lines.length > 0 ? lines : null
+    if (lines.length === 0) return null
+    return { lines, safe: sanitized.safe }
   }
 
   try {
@@ -5941,32 +5956,35 @@ async function main() {
               appLabel + ' hidden renderer must report document.visibilityState=visible (got '
               + activity.visibilityState + ')')
           }
-          assert.ok(activity.rafFrames >= MIN_HIDDEN_RAF_FRAMES,
+          assert.ok(activity.rafFrames >= HIDDEN_RAF_FLOOR,
             appLabel + ' hidden renderer ran only ' + activity.rafFrames + ' rAF frames in '
-            + activity.elapsedMs + 'ms (>= ' + MIN_HIDDEN_RAF_FRAMES
-            + ' required; a throttled hidden window produces ~0-1)')
-          assert.ok(activity.timerTicks >= MIN_HIDDEN_TIMER_TICKS,
+            + activity.elapsedMs + 'ms (>= ' + HIDDEN_RAF_FLOOR
+            + ' required on ' + process.platform + '; a throttled hidden window produces ~0-1)')
+          assert.ok(activity.timerTicks >= HIDDEN_TIMER_FLOOR,
             appLabel + ' hidden renderer ran only ' + activity.timerTicks + ' 20ms timer ticks in '
-            + activity.elapsedMs + 'ms (>= ' + MIN_HIDDEN_TIMER_TICKS
-            + ' required; a throttled hidden window produces ~0-1)')
+            + activity.elapsedMs + 'ms (>= ' + HIDDEN_TIMER_FLOOR
+            + ' required on ' + process.platform + '; a throttled hidden window produces ~0-1)')
         }
       }
       const rendererActive = [ownerActivity, playerActivity].every(activity =>
-        activity.rafFrames >= MIN_HIDDEN_RAF_FRAMES
-        && activity.timerTicks >= MIN_HIDDEN_TIMER_TICKS)
+        activity.rafFrames >= HIDDEN_RAF_FLOOR
+        && activity.timerTicks >= HIDDEN_TIMER_FLOOR)
       process.stdout.write('[renderer-e2e] hidden renderer activity=' + JSON.stringify({
         hiddenMode,
+        thresholds: { rafFrames: HIDDEN_RAF_FLOOR, timerTicks: HIDDEN_TIMER_FLOOR },
         owner: ownerActivity,
         player: playerActivity,
       }) + '\n')
       commandRetryEvidence = {
-        owner: owner.commandRetries.map(entry => ({ ...entry })),
-        player: player.commandRetries.map(entry => ({ ...entry })),
+        total: commandRetryLog.length,
+        entries: commandRetryLog.map(entry => ({ ...entry })),
       }
+      const retriesByApp = commandRetryEvidence.entries.reduce((counts, entry) => {
+        counts[entry.app] = (counts[entry.app] ?? 0) + 1
+        return counts
+      }, {})
       process.stdout.write('[renderer-e2e] WARN reconciliation retries='
-        + (commandRetryEvidence.owner.length + commandRetryEvidence.player.length)
-        + ' owner=' + commandRetryEvidence.owner.length
-        + ' player=' + commandRetryEvidence.player.length + '\n')
+        + commandRetryEvidence.total + ' byApp=' + JSON.stringify(retriesByApp) + '\n')
       const windowsHidden = hiddenMode && allWindows.every(window => window.visible === false)
       for (const renderer of [ownerRenderer, playerRenderer]) {
         assert.equal(renderer.readyState, 'complete')
@@ -6005,7 +6023,10 @@ async function main() {
         guiElementPresent: ownerRenderer.petElementPresent && playerRenderer.petElementPresent,
         windowsHidden,
         hiddenRendererActive: hiddenMode && rendererActive,
-        rendererActivity: { owner: ownerActivity, player: playerActivity },
+        rendererActivity: {
+          thresholds: { rafFrames: HIDDEN_RAF_FLOOR, timerTicks: HIDDEN_TIMER_FLOOR },
+          apps: { owner: ownerActivity, player: playerActivity },
+        },
         urls: [...new Set(allWindows.map(window => window.url))],
         titles: [...new Set([ownerRenderer.title, playerRenderer.title])],
         electronVersion: ownerMain.electronVersion,
@@ -6071,7 +6092,6 @@ async function main() {
     report.evidence.ownerPid = owner.pid
     report.evidence.playerPid = player.pid
     report.evidence.rendererProof = rendererProof
-    report.evidence.commandRetries = commandRetryEvidence
     report.evidence.websocket = websocketEvidence
     assert.equal(timedBothRendererEvidence?.bothRenderersSawServerDeadline, true, 'timed work must be observed by both renderers')
     assert.equal(timedBothRendererEvidence?.exactlyOneCompletionPerRenderer, true, 'each renderer must observe exactly one work completion')
@@ -6236,6 +6256,12 @@ async function main() {
     }
     if (report.finishedAt === undefined) report.finishedAt = new Date().toISOString()
     report.evidence.stepCount = report.steps.length
+    // Authoritative retry evidence from the shared collector: includes replaced,
+    // fresh-host and kill-survivor renderers, not just the final owner/player.
+    report.evidence.commandRetries = {
+      total: commandRetryLog.length,
+      entries: commandRetryLog.map(entry => ({ ...entry })),
+    }
     const artifactDir = process.env.QQPET_E2E_ARTIFACTS?.trim()
       || join(ROOT, 'docs/superpowers/acceptance/artifacts/c12-e2e')
     await mkdir(artifactDir, { recursive: true })

@@ -375,6 +375,8 @@ async function main() {
     lines.push('- ' + digestLabel + ' report sha256: `'
       + String(gateSummary.evidence?.[digestKey]?.reportSha256 ?? 'missing') + '`')
   }
+  lines.push('- Reconciliation retries: **'
+    + String(gateSummary.evidence?.e2e?.commandRetries ?? 'missing') + '**')
   lines.push('- Markdown gate report: explanatory only; validation reads the JSON summary')
   lines.push('- HEAD unchanged during gate: **' + (revisionStable ? 'PASS' : 'FAIL') + '**')
   lines.push('- Non-generated working tree before/after commands: **'

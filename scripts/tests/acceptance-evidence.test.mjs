@@ -17,6 +17,7 @@ import {
   REQUIRED_E2E_SCENARIO_NAMES,
   REQUIRED_GATE_COMMANDS,
   REQUIRED_PROXY_EVIDENCE_FLAGS,
+  sanitizeEvidenceText,
   shouldRetryReconciledCommand,
   validateDockerSmokeReport,
   validateE2EReport,
@@ -97,6 +98,7 @@ function e2eReport() {
       portableImportEngineStatePreservedCovered: true,
       noDuplicateCatchUpCovered: true,
       stepCount: 36,
+      commandRetries: { total: 0, entries: [] },
       rendererProof: {
         electronMainPidsDistinct: true,
         browserWindowCount: 2,
@@ -175,6 +177,7 @@ function summaryEvidence() {
       result: 'PASS',
       codeRevision: REV,
       stepCount: 36,
+      commandRetries: 0,
       flags: Object.fromEntries(GATE_E2E_FLAGS.map(flag => [flag, true])),
       rendererProof: {
         browserWindowCount: 2,
@@ -426,6 +429,26 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
       report.evidence.rendererProof.hiddenRendererActive = false
       return report
     }, /hiddenRendererActive/],
+    ['retry evidence missing', () => {
+      const report = e2eReport()
+      delete report.evidence.commandRetries
+      return report
+    }, /commandRetries/],
+    ['retry evidence is not an integer total', () => {
+      const report = e2eReport()
+      report.evidence.commandRetries = { total: '0', entries: [] }
+      return report
+    }, /commandRetries/],
+    ['retry evidence storms', () => {
+      const report = e2eReport()
+      report.evidence.commandRetries = { total: 6, entries: Array.from({ length: 6 }, () => ({ opId: 'x' })) }
+      return report
+    }, /commandRetries.*5|retry storm/],
+    ['retry evidence entries disagree with its total', () => {
+      const report = e2eReport()
+      report.evidence.commandRetries = { total: 1, entries: [] }
+      return report
+    }, /commandRetries/],
     ['unthrottled proof absent', () => {
       const report = e2eReport()
       delete report.evidence.rendererProof.hiddenRendererActive
@@ -472,6 +495,36 @@ test('only the exact synthetic not_applied reconciliation error is retried', () 
     error: { code: 'not_available' },
   }), false)
   assert.equal(shouldRetryReconciledCommand(null), false)
+})
+
+test('diagnostic text sanitizer redacts hex/UUID identifiers and known secrets', () => {
+  const uuid = 'f5c5e19e-17cf-44bd-b3ef-b9502bdbc32c'
+  const longHex = '0123456789abcdef'.repeat(4)
+  const secret = 'pairing-code-SECRET-7f3a'
+  const sanitized = sanitizeEvidenceText(
+    'server ready id=' + uuid + ' hash=' + longHex + ' code=' + secret + ' port=8080 ok',
+    [secret],
+  )
+  assert.equal(sanitized.text.includes(uuid), false, 'UUIDs must be redacted')
+  assert.equal(sanitized.text.includes(longHex), false, '32+ char hex identifiers must be redacted')
+  assert.equal(sanitized.text.includes(secret), false, 'known secrets must be redacted')
+  assert.ok(sanitized.text.includes('port=8080 ok'), 'ordinary text must survive')
+  assert.equal(sanitized.safe, false, 'a known secret hit must mark the tail unsafe')
+  assert.ok(sanitized.knownSecretHits >= 1)
+
+  const clean = sanitizeEvidenceText('plain line port=8080 ok', [secret])
+  assert.equal(clean.text, 'plain line port=8080 ok')
+  assert.equal(clean.safe, true)
+  assert.equal(clean.knownSecretHits, 0)
+
+  // Hex/UUID secrets are gone after the generic pass and no longer count as hits.
+  const hexSecret = sanitizeEvidenceText('token=' + longHex, [longHex])
+  assert.equal(hexSecret.text.includes(longHex), false)
+  assert.equal(hexSecret.safe, true)
+  assert.equal(hexSecret.knownSecretHits, 0)
+
+  const short = sanitizeEvidenceText('level=abc123', [])
+  assert.equal(short.text, 'level=abc123', 'short hex-like words stay readable')
 })
 
 function countOccurrences(source, needle) {
@@ -538,10 +591,17 @@ test('hidden-window mode guards every programmatic focus and records the uncover
     'activity proof must assert a real requestAnimationFrame frame count')
   assert.ok(rendererSource.includes('timerTicks >='),
     'activity proof must assert a real timer tick count')
+  assert.ok(rendererSource.includes("process.platform === 'darwin' ? 10 : 5"),
+    'rAF floors must be calibrated per platform (macOS measured, Linux conservative)')
+  assert.ok(rendererSource.includes("process.platform === 'darwin' ? 8 : 4"),
+    'timer floors must be calibrated per platform (macOS measured, Linux conservative)')
   assert.ok(rendererSource.includes('hiddenRendererActive: hiddenMode'),
     'renderer proof must gate hiddenRendererActive on hidden mode')
   assert.ok(rendererSource.includes(
-    'rendererActivity: { owner: ownerActivity, player: playerActivity }'),
+    'thresholds: { rafFrames: HIDDEN_RAF_FLOOR, timerTicks: HIDDEN_TIMER_FLOOR }'),
+    'renderer activity evidence must record the applied thresholds')
+  assert.ok(rendererSource.includes(
+    'apps: { owner: ownerActivity, player: playerActivity }'),
     'renderer proof must carry both apps\' measured activity')
   assert.ok(rendererSource.includes("if (process.platform === 'darwin')"),
     'visibilityState may only be asserted on the platform where it was measured')
@@ -549,8 +609,8 @@ test('hidden-window mode guards every programmatic focus and records the uncover
   assert.ok(rendererActiveStart >= 0, 'rendererActive must be computed from behaviour')
   const rendererActiveBlock = rendererSource.slice(rendererActiveStart,
     rendererSource.indexOf('\n      process.stdout.write', rendererActiveStart))
-  assert.ok(rendererActiveBlock.includes('activity.rafFrames >= MIN_HIDDEN_RAF_FRAMES'))
-  assert.ok(rendererActiveBlock.includes('activity.timerTicks >= MIN_HIDDEN_TIMER_TICKS'))
+  assert.ok(rendererActiveBlock.includes('activity.rafFrames >= HIDDEN_RAF_FLOOR'))
+  assert.ok(rendererActiveBlock.includes('activity.timerTicks >= HIDDEN_TIMER_FLOOR'))
   assert.equal(rendererActiveBlock.includes('visibilityState'), false,
     'rendererActive must rely on rAF/timer behaviour, not platform-dependent visibilityState')
 
@@ -572,6 +632,7 @@ test('hidden-window mode guards every programmatic focus and records the uncover
   assert.ok(gapActivityMatch[1].includes('getLastWebPreferences'))
   assert.ok(gapActivityMatch[1].includes('visibilityState'))
   assert.ok(gapActivityMatch[1].includes('platform-dependent'))
+  assert.ok(gapActivityMatch[1].includes('calibrated'))
 })
 
 test('Docker smoke evidence requires boot, WAL/FULL, non-root and backup/restore content assertions', () => {
@@ -685,9 +746,18 @@ test('machine-readable gate summary is authoritative for commands, revisions and
     ['e2e evidence windows not proven hidden', summary => {
       summary.evidence.e2e.rendererProof.windowsHidden = false
     }, /rendererProof\.windowsHidden/],
-    ['e2e evidence background throttling not disabled', summary => {
+    ['e2e evidence hidden renderer not proven active', summary => {
       summary.evidence.e2e.rendererProof.hiddenRendererActive = false
     }, /rendererProof\.hiddenRendererActive/],
+    ['e2e evidence retry storm', summary => {
+      summary.evidence.e2e.commandRetries = 6
+    }, /commandRetries.*retry storm/],
+    ['e2e evidence retry count missing', summary => {
+      delete summary.evidence.e2e.commandRetries
+    }, /commandRetries/],
+    ['e2e evidence retry count not an integer', summary => {
+      summary.evidence.e2e.commandRetries = '0'
+    }, /commandRetries/],
     ['e2e evidence renderer process proof too weak', summary => {
       summary.evidence.e2e.rendererProof.rendererProcessCount = 1
     }, /rendererProof\.rendererProcessCount/],
@@ -747,6 +817,7 @@ test('the gate summary records the real report evidence and report digests', () 
   assert.equal(snapshot.e2e.rendererProof.windowsHidden, true)
   assert.equal(snapshot.e2e.rendererProof.hiddenRendererActive, true)
   assert.equal(snapshot.e2e.stepCount, 36)
+  assert.equal(snapshot.e2e.commandRetries, 0)
   assert.deepEqual(snapshot.docker.flags,
     Object.fromEntries(REQUIRED_DOCKER_EVIDENCE_FLAGS.map(flag => [flag, true])))
   assert.deepEqual(snapshot.proxy.flags,
@@ -759,6 +830,7 @@ test('the gate summary records the real report evidence and report digests', () 
   failing.evidence.rendererProof.windowsHidden = false
   failing.evidence.rendererProof.hiddenRendererActive = false
   failing.evidence.stepCount = 1
+  failing.evidence.commandRetries = { total: 2, entries: [{ opId: 'a' }, { opId: 'b' }] }
   const failingSnapshot = buildGateEvidenceSnapshot({
     e2e: { bytes: Buffer.from('tampered report bytes'), report: failing },
     docker: null,
@@ -769,6 +841,7 @@ test('the gate summary records the real report evidence and report digests', () 
   assert.equal(failingSnapshot.e2e.rendererProof.windowsHidden, false)
   assert.equal(failingSnapshot.e2e.rendererProof.hiddenRendererActive, false)
   assert.equal(failingSnapshot.e2e.stepCount, 1)
+  assert.equal(failingSnapshot.e2e.commandRetries, 2, 'the retry total must be copied from the report')
   assert.equal(failingSnapshot.e2e.reportSha256, sha256(Buffer.from('tampered report bytes')))
   assert.equal(failingSnapshot.docker.reportSha256, null)
   assert.equal(failingSnapshot.proxy.reportSha256, null)

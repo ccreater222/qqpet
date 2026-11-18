@@ -107,6 +107,7 @@ function e2eReport(revision, now) {
       // gate itself, so a digest-bound report must satisfy every required flag.
       ...Object.fromEntries(REQUIRED_E2E_EVIDENCE_FLAGS.map(flag => [flag, true])),
       stepCount: steps.length,
+      commandRetries: { total: 0, entries: [] },
       rendererProof: {
         electronMainPidsDistinct: true,
         browserWindowCount: 2,
@@ -182,6 +183,7 @@ function gateSummary({ revision, now, digests, reports }) {
         result: reports.e2e.result,
         codeRevision: reports.e2e.codeRevision,
         stepCount: reports.e2e.evidence.stepCount,
+        commandRetries: reports.e2e.evidence.commandRetries.total,
         flags: Object.fromEntries(
           GATE_E2E_FLAGS.map(flag => [flag, reports.e2e.evidence[flag] === true]),
         ),
@@ -428,5 +430,22 @@ test('gate CLI rejects summary scenarios that do not match the digest-bound E2E 
   assert.equal(result.status, 1)
   assert.match(result.stderr, /does not match the digest-bound E2E report step/)
   assert.doesNotMatch(result.stderr, /sha256 digest/)
+  assert.doesNotMatch(result.stdout, /\[evidence\] PASS gate:/)
+})
+
+test('gate CLI rejects a retry-storm summary', async () => {
+  const { root, summary } = await setupGate()
+  const storm = {
+    ...summary,
+    evidence: {
+      ...summary.evidence,
+      e2e: { ...summary.evidence.e2e, commandRetries: 6 },
+    },
+  }
+  await writeReport(root, REPORT_PATHS.gate, storm)
+  commitAll(root, 'forge a retry storm count')
+  const result = validateGate(root)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /commandRetries.*retry storm/)
   assert.doesNotMatch(result.stdout, /\[evidence\] PASS gate:/)
 })
