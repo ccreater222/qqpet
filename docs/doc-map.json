@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "include": [
+        "src/main/**/*.ts",
+        "src/preload/**/*.ts",
+        "src/shared/ipc.ts",
+        "src/shared/renderer-api.ts",
+        "src/shared/renderer-projection.ts"
+      ],
+      "exclude": [
+        "src/main/remote-*.ts",
+        "src/main/storage-*.ts",
+        "src/main/save.ts",
+        "src/main/local-repository.ts",
+        "src/main/atomic-write.ts",
+        "src/main/pairing-store.ts",
+        "src/main/content.ts",
+        "src/main/content-pack.ts",
+        "src/main/first-run.ts"
+      ],
+      "docs": [
+        "docs/architecture/desktop-ipc-and-preload.md"
+      ],
+      "mode": "require",
+      "reason": "桌面主进程窗口/托盘/协议、IPC 通道、preload 白名单与渲染层投影是跨进程契约；改动必须同步桌面 IPC 架构文档。"
+    },
+    {
+      "include": [
+        "src/shared/save.ts",
+        "src/shared/save-logic.ts",
+        "src/shared/storage.ts",
+        "src/shared/pet-runtime/**/*.ts",
+        "src/shared/local-repository/**/*.ts",
+        "src/main/save.ts",
+        "src/main/local-repository.ts",
+        "src/main/atomic-write.ts"
+      ],
+      "exclude": [],
+      "docs": [
+        "docs/architecture/pet-runtime-and-save.md"
+      ],
+      "mode": "require",
+      "reason": "共享宠物运行时、存档 schema、本地 v2 权威与原子写决定进度正确性和升级兼容性；改动必须同步运行时与存档文档。"
+    },
+    {
+      "include": [
+        "src/shared/sync/**/*.ts",
+        "src/main/remote-*.ts",
+        "src/main/storage-ipc.ts",
+        "src/main/storage-controller.ts",
+        "src/main/pairing-store.ts",
+        "server/src/session.ts",
+        "server/src/command-service.ts",
+        "server/src/hub.ts",
+        "server/src/index.ts",
+        "server/src/auth.ts",
+        "server/src/validation.ts",
+        "server/src/runtime-host.ts"
+      ],
+      "exclude": [],
+      "docs": [
+        "docs/architecture/sync-protocol.md"
+      ],
+      "mode": "require",
+      "reason": "WebSocket 协议、命令幂等、认证/配对、revision 与 resync 是桌面与服务端之间的线格式契约；改动必须同步同步协议文档。"
+    },
+    {
+      "include": [
+        "server/src/db.ts",
+        "server/src/db-lock.ts",
+        "server/src/coverage.ts",
+        "server/src/portable-import.ts",
+        "server/src/cli.ts",
+        "server/src/scheduler.ts",
+        "server/deploy/qqpet-sync-backup.service",
+        "server/deploy/qqpet-sync-backup.timer"
+      ],
+      "exclude": [],
+      "docs": [
+        "docs/architecture/server-data.md"
+      ],
+      "mode": "require",
+      "reason": "SQLite schema、数据库生命周期锁、覆盖度、portable import、调度追赶与备份恢复世代属于持久化契约；改动必须同步服务端数据文档。"
+    },
+    {
+      "include": [
+        "src/android/**/*.ts",
+        "src/ios/**/*.ts",
+        "src/harmony/**/*.ts",
+        "src/mobile/**/*.ts",
+        "ios/audio-policy.js",
+        "android/app/src/main/java/**/*.kt",
+        "harmony/entry/src/main/ets/**/*.ets",
+        "ios/native/*.m",
+        "ios/native/*.h"
+      ],
+      "exclude": [],
+      "docs": [
+        "docs/architecture/native-bridge.md"
+      ],
+      "mode": "warn",
+      "reason": "Android/iOS/Harmony 原生桥必须与共享 window.qqpet 契约双侧对齐；桥接或能力降级变化应同步原生桥文档。"
+    },
+    {
+      "include": [
+        "scripts/pack-content.mjs",
+        "scripts/pack-harmony.mjs",
+        "scripts/prepare-ios-assets.mjs",
+        "scripts/import-assets.mjs",
+        "scripts/app-version.ts",
+        "src/main/first-run.ts",
+        "ios/build.sh",
+        "android/app/build.gradle.kts",
+        "harmony/build-profile.json5",
+        "electron-builder.yml",
+        "electron-builder.lite.yml",
+        "electron.vite.config.ts",
+        "vite.android.config.ts",
+        "vite.harmony.config.ts",
+        "vite.ios.config.ts",
+        "src/main/content-pack.ts",
+        "src/main/content.ts"
+      ],
+      "exclude": [],
+      "docs": [
+        "docs/guides/content-packs-and-builds.md"
+      ],
+      "mode": "warn",
+      "reason": "内容包 manifest/base-deletes/minShell 与各平台构建产物影响发布可用性；相关脚本或构建配置变化应同步内容包与构建指南。"
+    },
+    {
+      "include": [
+        "server/Dockerfile",
+        "server/docker-compose.yml",
+        "server/docker-entrypoint.sh",
+        "server/deploy/Caddyfile",
+        "server/deploy/nginx.conf.example",
+        "server/deploy/qqpet-sync.service",
+        "server/src/config.ts",
+        "server/src/logging.ts",
+        "server/src/metrics.ts",
+        ".dockerignore",
+        "server/.env.example"
+      ],
+      "exclude": [],
+      "docs": [
+        "docs/guides/server-deployment.md",
+        "docs/runbooks/server-recovery.md"
+      ],
+      "mode": "warn",
+      "reason": "部署配置、TLS/WSS 反代、secret 挂载与 systemd 单元决定服务能否安全启动和恢复；变化应同步部署指南与恢复手册。"
+    },
+    {
+      "include": [
+        "scripts/acceptance-gate.mjs",
+        "scripts/validate-evidence.mjs",
+        "scripts/lib/acceptance-evidence.mjs",
+        "scripts/docs/*.mjs",
+        ".githooks/**",
+        "docs/doc-map.json",
+        ".github/workflows/ci.yml"
+      ],
+      "exclude": [],
+      "docs": [
+        "docs/standards/documentation.md",
+        "docs/guides/quality-gates.md"
+      ],
+      "mode": "warn",
+      "reason": "验收门禁、证据格式与 CI 作业定义质量门禁和文档证据规则；变化应同步文档规范与质量门禁指南。"
+    }
+  ]
+}
