@@ -13,8 +13,10 @@ billing, public account hosting, or a client-side simulation fallback.
 
 - Node.js 22 or newer. The server uses the built-in `node:sqlite` module, so the
   current release does not compile a native SQLite addon.
-- One TLS WebSocket endpoint in production. Plain `ws://` is accepted only for
-  loopback/self-test endpoints.
+- One TLS WebSocket endpoint in production. The desktop client accepts plain
+  `ws://` only for loopback and private/LAN address literals (RFC1918, IPv4
+  link-local, CGNAT/Tailscale `100.64.0.0/10`, IPv6 ULA/link-local); public
+  addresses and hostnames require `wss://`.
 - Durable storage for the SQLite database and backups.
 - For Docker, build from the repository root so the server can import
   `src/shared/**` at build time.
@@ -595,8 +597,11 @@ shutdown path runs.
 
 ## Security notes
 
-- Production uses `wss://` only. Plain `ws://` is allowed only for loopback or
-  explicitly self-testing endpoints; use a TLS proxy for any remote client.
+- Production uses `wss://` only. The desktop client accepts plain `ws://` only
+  for loopback and address literals in private/local ranges (RFC1918, IPv4
+  link-local, CGNAT/Tailscale `100.64.0.0/10`, IPv6 ULA/link-local). Those
+  connections are still unencrypted and must stay on a trusted LAN; use a TLS
+  proxy for any remote, routed, or untrusted network.
 - Do not expose the server port or `/health` publicly without edge controls.
   Caddy/Nginx should proxy only the intended host and paths.
 - Pairing codes travel only inside the first WebSocket frame. Device tokens

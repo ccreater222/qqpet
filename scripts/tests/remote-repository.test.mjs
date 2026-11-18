@@ -1130,7 +1130,7 @@ test('reconnect uses capped jittered exponential backoff', async t => {
   assert.ok(sleeps.every(delay => delay >= 50 && delay <= 10_000))
 })
 
-test('remote endpoint validation requires wss for non-loopback hosts at every boundary', async () => {
+test('remote endpoint validation requires wss for public hosts but allows loopback and private networks', async () => {
   const valid = [
     'wss://pet.example/v1/sync',
     'wss://127.0.0.1:8443/v1/sync',
@@ -1139,12 +1139,45 @@ test('remote endpoint validation requires wss for non-loopback hosts at every bo
     'ws://127.0.0.1:8080/v1/sync',
     'ws://127.2.3.4:8080/v1/sync',
     'ws://[::1]:8080/v1/sync',
+    // RFC1918 private networks.
+    'ws://10.0.0.5:8787/v1/sync',
+    'ws://10.255.255.255:8787/v1/sync',
+    'ws://172.16.0.1:8787/v1/sync',
+    'ws://172.31.255.255:8787/v1/sync',
+    'ws://192.168.1.20:8787/v1/sync',
+    'ws://192.168.255.254:8787/v1/sync',
+    // IPv4 link-local.
+    'ws://169.254.10.20:8787/v1/sync',
+    // CGNAT range used by Tailscale device addresses.
+    'ws://100.64.0.1:8787/v1/sync',
+    'ws://100.101.102.103:8787/v1/sync',
+    'ws://100.127.255.254:8787/v1/sync',
+    // IPv6 unique-local and link-local literals.
+    'ws://[fc00::1]:8787/v1/sync',
+    'ws://[fd7a:115c:a1e0::1]:8787/v1/sync',
+    'ws://[fe80::1]:8787/v1/sync',
   ]
   for (const url of valid) assert.equal(assertRemoteServerUrl(url), url)
   const insecure = [
     'ws://pet.example/v1/sync',
     'ws://localhost.evil.example/v1/sync',
     'ws://127.0.0.1.evil.example/v1/sync',
+    // Hostnames are never resolved by URL validation, so intranet names still
+    // require wss even when they usually point at a private address.
+    'ws://pet.lan/v1/sync',
+    'ws://nas.local/v1/sync',
+    // Public addresses and values just outside each allowed private range.
+    'ws://8.8.8.8/v1/sync',
+    'ws://11.0.0.1/v1/sync',
+    'ws://172.15.255.255/v1/sync',
+    'ws://172.32.0.1/v1/sync',
+    'ws://192.169.0.1/v1/sync',
+    'ws://169.253.0.1/v1/sync',
+    'ws://169.255.0.1/v1/sync',
+    'ws://100.63.255.255/v1/sync',
+    'ws://100.128.0.0/v1/sync',
+    'ws://[2001:db8::1]/v1/sync',
+    'ws://[fec0::1]/v1/sync',
     'https://pet.example/v1/sync',
     'wss://user:pass@pet.example/v1/sync',
     'ws://user:pass@127.0.0.1:8080/v1/sync',
@@ -1174,6 +1207,18 @@ test('remote endpoint validation requires wss for non-loopback hosts at every bo
     transport: noopTransport,
   }))
   assert.doesNotThrow(() => new mod.RemoteRepository({
+    serverUrl: 'ws://192.168.1.20:8787/v1/sync',
+    appVersion: 'test',
+    tokenStore: store,
+    transport: noopTransport,
+  }))
+  assert.doesNotThrow(() => new mod.RemoteRepository({
+    serverUrl: 'ws://100.101.102.103:8787/v1/sync',
+    appVersion: 'test',
+    tokenStore: store,
+    transport: noopTransport,
+  }))
+  assert.doesNotThrow(() => new mod.RemoteRepository({
     serverUrl: 'wss://pet.example/v1/sync',
     appVersion: 'test',
     tokenStore: store,
@@ -1198,8 +1243,9 @@ test('remote endpoint validation requires wss for non-loopback hosts at every bo
   assert.throws(() => transport.connect('ws://pet.example/v1/sync', null, handlers), /loopback|wss/i)
   assert.equal(socketsCreated, 0, 'the transport must reject before constructing a socket')
   transport.connect('ws://127.0.0.1:8080/v1/sync', null, handlers)
+  transport.connect('ws://192.168.1.20:8787/v1/sync', null, handlers)
   transport.connect('wss://pet.example/v1/sync', null, handlers)
-  assert.equal(socketsCreated, 2)
+  assert.equal(socketsCreated, 3)
 })
 
 test('fatal hello closes reject start and do not reconnect', async t => {

@@ -1486,7 +1486,7 @@ Metrics/logs:
 
 ### 10.1 General rules
 
-- Endpoint: `/v1/sync` over WSS in production. Plain `ws://` only for loopback/self-tests.
+- Endpoint: `/v1/sync` over WSS in production. Plain `ws://` only for loopback and private/local address literals (RFC1918, IPv4 link-local, CGNAT/Tailscale `100.64.0.0/10`, IPv6 ULA/link-local); hostnames still require `wss://`.
 - JSON UTF-8 frames. No binary encoding in the MVP.
 - The first frame must be `hello` with a device token or pairing code within 5 seconds; unauthenticated sockets are closed.
 - Long-lived tokens are never in query strings, paths, or HTTP headers; they travel only in the WSS `hello` frame.
@@ -1956,7 +1956,7 @@ Malformed frames may be dropped or closed; oversized frames are closed with `400
 
 ### 11.3 Transport and server secrets
 
-- Production is WSS only, behind a TLS reverse proxy (Caddy/Nginx). Plain WS is allowed only for loopback/self-tests.
+- Production is WSS only, behind a TLS reverse proxy (Caddy/Nginx). Plain WS is allowed only for loopback and private/local address literals (RFC1918, IPv4 link-local, CGNAT/Tailscale `100.64.0.0/10`, IPv6 ULA/link-local); it is unencrypted and must stay on a trusted LAN.
 - Long-lived tokens/pairing codes never appear in URLs, query strings, paths, or HTTP headers. They travel only in the first WSS frame.
 - Server logs redact auth frames, command payloads, save bodies, and all AI/search/webhook credentials.
 - Server snapshots/commands/events contain no device settings or secrets: no `aiKey`, `searchKey`, `webhookToken`, token values, pairing codes, window position, zoom, or display IDs.

@@ -1234,7 +1234,7 @@ test('pairing/revoke UI state follows paired role and owner list', () => {
   assert.equal(lastOwner.some((warning) => warning.includes('撤销最后一个 owner')), true)
 })
 
-test('pairing IPC requires wss except explicit loopback and validates setMode serverUrl', async () => {
+test('pairing IPC requires wss except loopback and private networks and validates setMode serverUrl', async () => {
   const insecure = makeController()
   await assert.rejects(
     insecure.controller.pair({
@@ -1277,7 +1277,13 @@ test('pairing IPC requires wss except explicit loopback and validates setMode se
   }
   assert.equal(insecure.created.length, 0)
 
-  for (const serverUrl of ['wss://pet.example/v1/sync', 'ws://127.0.0.1:8080/v1/sync', 'ws://[::1]:8080/v1/sync']) {
+  for (const serverUrl of [
+    'wss://pet.example/v1/sync',
+    'ws://127.0.0.1:8080/v1/sync',
+    'ws://[::1]:8080/v1/sync',
+    'ws://192.168.1.20:8787/v1/sync',
+    'ws://100.101.102.103:8787/v1/sync',
+  ]) {
     const harness = makeController()
     await harness.controller.pair({ serverUrl, code: 'pair-code', deviceLabel: 'Desktop' })
     assert.equal(harness.created.length, 1)
