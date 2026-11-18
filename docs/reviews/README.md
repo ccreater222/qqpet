@@ -18,7 +18,7 @@
 | 旧路径 | 新路径 |
 | --- | --- |
 | `docs/superpowers/acceptance/` | `docs/reviews/c12-final-gate/` |
-| `docs/superpowers/specs/2026-10-20-local-or-server-pet-data-design.md` | `docs/reviews/legacy/2026-10-20-local-or-server-pet-data-design.md` |
+| `docs/superpowers/specs/` | `docs/reviews/legacy/2026-10-20-local-or-server-pet-data-design.md` |
 
 冻结文件内容按字节原样迁移（git rename 100%），报告正文中的历史路径字符串保留为历史事实，未做改写。
 
