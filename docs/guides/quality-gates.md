@@ -11,7 +11,7 @@
 | 命令 | 实际执行 | 何时必须 | 退出码 |
 | --- | --- | --- | --- |
 | `npm run typecheck` | 四套 `tsc --noEmit`：node、web、harmony、e2e（`package.json:14`） | 任何 TypeScript 改动 | 0/非 0 |
-| `npm run test:compat` | `node --experimental-strip-types --test scripts/tests/*.test.mjs`（`package.json:26`） | `src/shared/**`、`src/main/**`、移动桥、脚本改动 | 0/1 |
+| `npm run test:compat` | `node --experimental-strip-types --test --test-concurrency=1 scripts/tests/*.test.mjs`（`package.json:30`） | `src/shared/**`、`src/main/**`、移动桥、脚本改动 | 0/1 |
 | `npm run test:docs` | docs 检查器自身的单元/契约测试（`scripts/docs/tests/*.test.mjs`） | 任何 `scripts/docs/**` 改动 | 0/1 |
 | `npm run check:docs` | 全量文档结构、H1/结论/行数、索引、链接、命名、代码注释引用、doc-map 死规则；I/O 错误显式失败 | 任何 `docs/**`、`AGENTS.md`、`CLAUDE.md`、doc-map 改动 | 0/1/2 |
 | `npm run check:docs:staged` | staged 代码是否同步了 `require` 文档、`warn` 提醒、index/worktree 一致性 | 提交前（`pre-commit` 自动执行） | 0/1/2 |
@@ -34,6 +34,8 @@
 ```bash
 node --experimental-strip-types --test scripts/tests/sync-protocol.test.mjs
 ```
+
+兼容测试固定 `--test-concurrency=1`：`lan.test.mjs` 使用真实 UDP 端口 47777 和短时序断言，并行跑其它测试文件会造成假失败；串行后 767 个用例约 90 秒，仍远低于 CI 的 root 作业超时。
 
 ## 2. 退出码语义
 

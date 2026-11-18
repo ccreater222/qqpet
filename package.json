@@ -27,7 +27,7 @@
     "check:ios-assets": "node scripts/prepare-ios-assets.mjs --check",
     "build:ios-web": "vite build -c vite.ios.config.ts",
     "ios": "npm run typecheck && npm run build:ios-web && bash ios/build.sh",
-    "test:compat": "node --experimental-strip-types --test scripts/tests/*.test.mjs",
+    "test:compat": "node --experimental-strip-types --test --test-concurrency=1 scripts/tests/*.test.mjs",
     "dist": "npm run typecheck && electron-vite build && electron-builder --publish never",
     "build:android-web": "vite build -c vite.android.config.ts",
     "android": "npm run typecheck && npm run build:android-web && cd android && ./gradlew assembleDebug",
