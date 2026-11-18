@@ -13,7 +13,9 @@ import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
+  E2E_MIN_STEPS,
   REQUIRED_DOCKER_EVIDENCE_FLAGS,
+  REQUIRED_E2E_EVIDENCE_FLAGS,
   REQUIRED_E2E_SCENARIO_NAMES,
   REQUIRED_GATE_COMMANDS,
   REQUIRED_PROXY_EVIDENCE_FLAGS,
@@ -40,7 +42,7 @@ const GATE_E2E_FLAGS = [
 ]
 const RENDERER_PROOF_FLAGS = [
   'windowsHidden',
-  'backgroundThrottlingDisabled',
+  'hiddenRendererActive',
   'preloadApiExposed',
   'contextIsolation',
   'sandboxedPreload',
@@ -87,25 +89,35 @@ function e2eReport(revision, now) {
     durationMs: index + 1,
     detail: { requiredIndex: index },
   }))
-  const filler = Array.from({ length: 18 }, (_, index) => ({
+  const filler = Array.from({ length: E2E_MIN_STEPS - requiredSteps.length }, (_, index) => ({
     name: 'setup-step-' + String(index + 1),
     status: 'pass',
     durationMs: 100 + index,
     detail: { setup: true },
   }))
+  const steps = [...requiredSteps, ...filler]
   return {
     result: 'PASS',
     codeRevision: revision,
     startedAt: new Date(now - 5_000).toISOString(),
     finishedAt: new Date(now - 4_000).toISOString(),
-    steps: [...requiredSteps, ...filler],
+    steps,
     evidence: {
-      ...Object.fromEntries(GATE_E2E_FLAGS.map(flag => [flag, true])),
-      stepCount: 36,
+      // A full C12 report: the gate CLI now runs the same deep validators as the
+      // gate itself, so a digest-bound report must satisfy every required flag.
+      ...Object.fromEntries(REQUIRED_E2E_EVIDENCE_FLAGS.map(flag => [flag, true])),
+      stepCount: steps.length,
       rendererProof: {
+        electronMainPidsDistinct: true,
         browserWindowCount: 2,
         rendererProcessCount: 2,
         ...Object.fromEntries(RENDERER_PROOF_FLAGS.map(flag => [flag, true])),
+        rendererDocumentLoaded: true,
+        guiElementPresent: true,
+      },
+      websocket: {
+        serverUrl: 'ws://127.0.0.1:1234/v1/sync',
+        activeClientCountAtConvergence: 2,
       },
     },
   }
@@ -320,7 +332,7 @@ test('gate CLI rejects a digest-matched report from another revision', async () 
   assert.doesNotMatch(result.stdout, /\[evidence\] PASS gate:/)
 })
 
-test('gate CLI rejects a summary without the hidden-window unthrottled proof', async () => {
+test('gate CLI rejects a summary that does not prove a live hidden renderer', async () => {
   const { root, summary, reports } = await setupGate()
   const unthrottled = {
     ...reports.e2e,
@@ -328,7 +340,7 @@ test('gate CLI rejects a summary without the hidden-window unthrottled proof', a
       ...reports.e2e.evidence,
       rendererProof: {
         ...reports.e2e.evidence.rendererProof,
-        backgroundThrottlingDisabled: false,
+        hiddenRendererActive: false,
       },
     },
   }
@@ -342,7 +354,7 @@ test('gate CLI rejects a summary without the hidden-window unthrottled proof', a
         reportSha256: file.digest,
         rendererProof: {
           ...summary.evidence.e2e.rendererProof,
-          backgroundThrottlingDisabled: false,
+          hiddenRendererActive: false,
         },
       },
     },
@@ -351,7 +363,70 @@ test('gate CLI rejects a summary without the hidden-window unthrottled proof', a
   commitAll(root, 'record unthrottled hidden-window evidence')
   const result = validateGate(root)
   assert.equal(result.status, 1)
-  assert.match(result.stderr, /rendererProof\.backgroundThrottlingDisabled must be true/)
+  assert.match(result.stderr, /rendererProof\.hiddenRendererActive must be true/)
+  assert.doesNotMatch(result.stderr, /sha256 digest/)
+  assert.doesNotMatch(result.stdout, /\[evidence\] PASS gate:/)
+})
+
+test('gate CLI rejects a digest-matched Docker report that the docker validator rejects', async () => {
+  const { root, summary, reports } = await setupGate()
+  const broken = {
+    ...reports.docker,
+    evidence: { ...reports.docker.evidence, journalMode: 'delete' },
+  }
+  const file = await writeReport(root, REPORT_PATHS.docker, broken)
+  const rebound = {
+    ...summary,
+    evidence: {
+      ...summary.evidence,
+      docker: { ...summary.evidence.docker, reportSha256: file.digest },
+    },
+  }
+  await writeReport(root, REPORT_PATHS.gate, rebound)
+  commitAll(root, 'rebind a docker report without wal journal mode')
+  const result = validateGate(root)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /Docker smoke report validation: .*journalMode/)
+  assert.doesNotMatch(result.stdout, /\[evidence\] PASS gate:/)
+})
+
+test('gate CLI rejects a digest-matched E2E report below the deep step minimum', async () => {
+  const { root, summary, reports } = await setupGate()
+  const shortSteps = reports.e2e.steps.slice(0, REQUIRED_E2E_SCENARIO_NAMES.length)
+  const short = {
+    ...reports.e2e,
+    steps: shortSteps,
+    evidence: { ...reports.e2e.evidence, stepCount: shortSteps.length },
+  }
+  const file = await writeReport(root, REPORT_PATHS.e2e, short)
+  const rebound = {
+    ...summary,
+    evidence: {
+      ...summary.evidence,
+      e2e: { ...summary.evidence.e2e, reportSha256: file.digest },
+    },
+  }
+  await writeReport(root, REPORT_PATHS.gate, rebound)
+  commitAll(root, 'rebind an 18-step E2E report')
+  const result = validateGate(root)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /E2E report validation: .*minimum is 36/)
+  assert.doesNotMatch(result.stdout, /\[evidence\] PASS gate:/)
+})
+
+test('gate CLI rejects summary scenarios that do not match the digest-bound E2E report', async () => {
+  const { root, summary } = await setupGate()
+  const forged = {
+    ...summary,
+    scenarios: summary.scenarios.map((scenario, index) => index === 0
+      ? { ...scenario, detail: { ...scenario.detail, forged: true } }
+      : scenario),
+  }
+  await writeReport(root, REPORT_PATHS.gate, forged)
+  commitAll(root, 'forge a selected scenario detail')
+  const result = validateGate(root)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /does not match the digest-bound E2E report step/)
   assert.doesNotMatch(result.stderr, /sha256 digest/)
   assert.doesNotMatch(result.stdout, /\[evidence\] PASS gate:/)
 })

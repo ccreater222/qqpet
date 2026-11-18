@@ -130,7 +130,7 @@ export const GATE_EVIDENCE_E2E_FLAGS = Object.freeze([
 /** Boolean renderer proof fields copied verbatim from the E2E report. */
 export const GATE_EVIDENCE_RENDERER_PROOF_FLAGS = Object.freeze([
   'windowsHidden',
-  'backgroundThrottlingDisabled',
+  'hiddenRendererActive',
   'preloadApiExposed',
   'contextIsolation',
   'sandboxedPreload',
@@ -263,6 +263,27 @@ export function normalizeGateCommandLine(value) {
 /** Lowercase sha256 of a report file's exact bytes; this binds reports to the summary. */
 export function gateReportSha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
+}
+
+/** Exact client-side message that the server reconciliation path synthesizes for not_applied. */
+export const RECONCILIATION_RETRY_MESSAGE = 'the server did not apply the command; retry with a fresh opId'
+/** Short settle delay before retrying a command whose frame was lost with the connection. */
+export const RECONCILIATION_RETRY_DELAY_MS = 100
+
+/**
+ * Only the synthetic `not_available` produced when a command frame was dropped
+ * while the connection was closing may be retried with a fresh opId. The
+ * documented not_applied semantics are "not applied, retry explicitly"; every
+ * other not_available (expired token, business rule) is deterministic and must
+ * stay un-retried so the E2E still proves the real rejection.
+ */
+export function shouldRetryReconciledCommand(result) {
+  const item = objectValue(result)
+  if (item === null || item.status !== 'rejected') return false
+  const error = objectValue(item.error)
+  return error !== null
+    && error.code === 'not_available'
+    && error.message === RECONCILIATION_RETRY_MESSAGE
 }
 
 function isSha256Hex(value) {
@@ -414,7 +435,7 @@ export function validateE2EReport(report, options = {}) {
         'rendererDocumentLoaded',
         'guiElementPresent',
         'windowsHidden',
-        'backgroundThrottlingDisabled',
+        'hiddenRendererActive',
       ]) {
         if (rendererProof[flag] !== true) {
           errors.push('E2E rendererProof requires ' + flag + ' === true')
@@ -522,7 +543,7 @@ export function buildGateEvidenceSnapshot(reports = {}) {
           ? rendererProof.rendererProcessCount
           : null,
         windowsHidden: rendererProof.windowsHidden === true,
-        backgroundThrottlingDisabled: rendererProof.backgroundThrottlingDisabled === true,
+        hiddenRendererActive: rendererProof.hiddenRendererActive === true,
         preloadApiExposed: rendererProof.preloadApiExposed === true,
         contextIsolation: rendererProof.contextIsolation === true,
         sandboxedPreload: rendererProof.sandboxedPreload === true,
@@ -933,6 +954,45 @@ export function validateGateSummary(summary, options = {}) {
   }
 }
 
+/**
+ * A summary scenario only counts as evidence when it still equals the step in
+ * the digest-bound E2E report. Without this, rewriting only
+ * gate-summary.json scenarios[].detail would fabricate selected-scenario proof.
+ */
+function appendE2EScenarioBindingErrors(errors, summary, report) {
+  const scenarios = Array.isArray(summary.scenarios) ? summary.scenarios : []
+  const steps = Array.isArray(report.steps) ? report.steps : []
+  const stepByName = new Map()
+  for (const step of steps) {
+    const item = objectValue(step)
+    if (item !== null && typeof item.name === 'string') stepByName.set(item.name, item)
+  }
+  for (const scenario of scenarios) {
+    const item = objectValue(scenario)
+    if (item === null || typeof item.name !== 'string') continue
+    const step = stepByName.get(item.name)
+    if (step === undefined) {
+      errors.push('E2E report is missing the step for gate-summary scenario '
+        + JSON.stringify(item.name))
+      continue
+    }
+    const expected = {
+      status: typeof step.status === 'string' ? step.status.toLowerCase() : 'missing',
+      durationMs: Number.isFinite(step.durationMs) ? step.durationMs : null,
+      detail: step.detail ?? null,
+    }
+    const recorded = {
+      status: typeof item.status === 'string' ? item.status.toLowerCase() : item.status,
+      durationMs: item.durationMs ?? null,
+      detail: item.detail ?? null,
+    }
+    if (isDeepStrictEqual(expected, recorded) === false) {
+      errors.push('Gate summary scenario ' + JSON.stringify(item.name)
+        + ' does not match the digest-bound E2E report step')
+    }
+  }
+}
+
 const GATE_EVIDENCE_REPORT_LABELS = Object.freeze({
   e2e: 'E2E',
   docker: 'Docker smoke',
@@ -1003,6 +1063,18 @@ export function validateGateEvidenceFiles(summary, files = {}) {
           + 'gate-summary evidence.' + kind + ' (' + path + ')')
       }
     }
+    // Binding is not enough: the CLI must stand on its own with the same depth
+    // as the in-gate evaluation, otherwise a digest-consistent but invalid
+    // report (e.g. journalMode "delete", 18-step E2E) would pass the gate CLI.
+    const deepValidation = kind === 'e2e'
+      ? validateE2EReport(parsedReport, { currentRevision: summaryRevision })
+      : kind === 'docker'
+        ? validateDockerSmokeReport(parsedReport, { currentRevision: summaryRevision })
+        : validateProxySmokeReport(parsedReport, { currentRevision: summaryRevision })
+    for (const error of deepValidation.errors) {
+      errors.push(label + ' report validation: ' + error)
+    }
+    if (kind === 'e2e') appendE2EScenarioBindingErrors(errors, parsed, parsedReport)
   }
   return validationResult(errors)
 }

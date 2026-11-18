@@ -17,6 +17,7 @@ import {
   REQUIRED_E2E_SCENARIO_NAMES,
   REQUIRED_GATE_COMMANDS,
   REQUIRED_PROXY_EVIDENCE_FLAGS,
+  shouldRetryReconciledCommand,
   validateDockerSmokeReport,
   validateE2EReport,
   validateGateSummary,
@@ -107,7 +108,7 @@ function e2eReport() {
         rendererDocumentLoaded: true,
         guiElementPresent: true,
         windowsHidden: true,
-        backgroundThrottlingDisabled: true,
+        hiddenRendererActive: true,
       },
       websocket: {
         serverUrl: 'ws://127.0.0.1:1234/v1/sync',
@@ -179,7 +180,7 @@ function summaryEvidence() {
         browserWindowCount: 2,
         rendererProcessCount: 2,
         windowsHidden: true,
-        backgroundThrottlingDisabled: true,
+        hiddenRendererActive: true,
         preloadApiExposed: true,
         contextIsolation: true,
         sandboxedPreload: true,
@@ -420,16 +421,16 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
       report.evidence.rendererProof.windowsHidden = false
       return report
     }, /windowsHidden/],
-    ['hidden windows must prove throttling stays disabled', () => {
+    ['hidden windows must prove the renderer stays active', () => {
       const report = e2eReport()
-      report.evidence.rendererProof.backgroundThrottlingDisabled = false
+      report.evidence.rendererProof.hiddenRendererActive = false
       return report
-    }, /backgroundThrottlingDisabled/],
+    }, /hiddenRendererActive/],
     ['unthrottled proof absent', () => {
       const report = e2eReport()
-      delete report.evidence.rendererProof.backgroundThrottlingDisabled
+      delete report.evidence.rendererProof.hiddenRendererActive
       return report
-    }, /backgroundThrottlingDisabled/],
+    }, /hiddenRendererActive/],
     ['stepCount mismatch', () => {
       const report = e2eReport()
       report.evidence.stepCount = 35
@@ -446,6 +447,31 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
     assert.equal(result.ok, false, name)
     assert.match(result.errors.join('\n'), pattern, name)
   }
+})
+
+test('only the exact synthetic not_applied reconciliation error is retried', () => {
+  const exactMessage = 'the server did not apply the command; retry with a fresh opId'
+  assert.equal(shouldRetryReconciledCommand({
+    status: 'rejected',
+    error: { code: 'not_available', message: exactMessage, refreshProjection: true },
+  }), true)
+  assert.equal(shouldRetryReconciledCommand({
+    status: 'applied',
+    error: { code: 'not_available', message: exactMessage },
+  }), false)
+  assert.equal(shouldRetryReconciledCommand({
+    status: 'rejected',
+    error: { code: 'not_available', message: 'session token expired' },
+  }), false)
+  assert.equal(shouldRetryReconciledCommand({
+    status: 'rejected',
+    error: { code: 'already_claimed', message: exactMessage },
+  }), false)
+  assert.equal(shouldRetryReconciledCommand({
+    status: 'rejected',
+    error: { code: 'not_available' },
+  }), false)
+  assert.equal(shouldRetryReconciledCommand(null), false)
 })
 
 function countOccurrences(source, needle) {
@@ -501,17 +527,51 @@ test('hidden-window mode guards every programmatic focus and records the uncover
     'neither focus site may present a hidden E2E window')
 
   const rendererSource = await repoFile('scripts/e2e/renderer-e2e.mjs')
-  assert.ok(rendererSource.includes('backgroundThrottling: preferences.backgroundThrottling'),
-    'mainProof must record the effective backgroundThrottling preference per window')
+  assert.equal(rendererSource.includes('preferences.backgroundThrottling'), false,
+    'Electron does not reflect backgroundThrottling through getLastWebPreferences;'
+    + ' hidden-mode proof must not depend on that reflection')
+  assert.ok(rendererSource.includes('async activityProof()'),
+    'the hidden-window proof must measure live renderer activity')
+  assert.ok(rendererSource.includes("visibilityState: document.visibilityState"),
+    'activity proof must record document.visibilityState')
+  assert.ok(rendererSource.includes('rafFrames >='),
+    'activity proof must assert a real requestAnimationFrame frame count')
+  assert.ok(rendererSource.includes('timerTicks >='),
+    'activity proof must assert a real timer tick count')
+  assert.ok(rendererSource.includes('hiddenRendererActive: hiddenMode'),
+    'renderer proof must gate hiddenRendererActive on hidden mode')
   assert.ok(rendererSource.includes(
-    'backgroundThrottlingDisabled: allWindows.every(window => window.backgroundThrottling === false)'),
-    'renderer proof must record the unthrottled hidden-window precondition')
-  assert.match(rendererSource, /residualGap: \[/,
-    'the honest residual gaps must enter the E2E evidence JSON')
-  assert.ok(rendererSource.includes('ready-to-show/showInactive'),
-    'residual gaps must disclose that hidden runs never exercise the production show path')
-  assert.ok(rendererSource.includes('not covered by this hidden-window run'),
-    'the show-path gap must be stated as uncovered')
+    'rendererActivity: { owner: ownerActivity, player: playerActivity }'),
+    'renderer proof must carry both apps\' measured activity')
+  assert.ok(rendererSource.includes("if (process.platform === 'darwin')"),
+    'visibilityState may only be asserted on the platform where it was measured')
+  const rendererActiveStart = rendererSource.indexOf('const rendererActive')
+  assert.ok(rendererActiveStart >= 0, 'rendererActive must be computed from behaviour')
+  const rendererActiveBlock = rendererSource.slice(rendererActiveStart,
+    rendererSource.indexOf('\n      process.stdout.write', rendererActiveStart))
+  assert.ok(rendererActiveBlock.includes('activity.rafFrames >= MIN_HIDDEN_RAF_FRAMES'))
+  assert.ok(rendererActiveBlock.includes('activity.timerTicks >= MIN_HIDDEN_TIMER_TICKS'))
+  assert.equal(rendererActiveBlock.includes('visibilityState'), false,
+    'rendererActive must rely on rAF/timer behaviour, not platform-dependent visibilityState')
+
+  // residualGap entries are named constants referenced inside the array literal.
+  const gapStart = rendererSource.indexOf('residualGap: [')
+  assert.ok(gapStart >= 0, 'the honest residual gaps must enter the E2E evidence JSON')
+  const gapEnd = rendererSource.indexOf('\n    ],', gapStart)
+  assert.ok(gapEnd > gapStart, 'residualGap must be a single array literal')
+  const residualGapBlock = rendererSource.slice(gapStart, gapEnd)
+  assert.ok(residualGapBlock.includes('RESIDUAL_GAP_HIDDEN_SHOW_PATH'),
+    'the residualGap array must include the uncovered production show path')
+  assert.ok(residualGapBlock.includes('RESIDUAL_GAP_RENDERER_ACTIVITY'),
+    'the residualGap array must document the behavioural activity measurement')
+  assert.match(rendererSource,
+    /const RESIDUAL_GAP_HIDDEN_SHOW_PATH =\s*'[^']*ready-to-show\/showInactive[^']*not covered by this hidden-window run[^']*'/)
+  const gapActivityMatch = rendererSource.match(
+    /const RESIDUAL_GAP_RENDERER_ACTIVITY =\s*'([^']*)'/)
+  assert.ok(gapActivityMatch !== null, 'the renderer-activity residual gap must be a named constant')
+  assert.ok(gapActivityMatch[1].includes('getLastWebPreferences'))
+  assert.ok(gapActivityMatch[1].includes('visibilityState'))
+  assert.ok(gapActivityMatch[1].includes('platform-dependent'))
 })
 
 test('Docker smoke evidence requires boot, WAL/FULL, non-root and backup/restore content assertions', () => {
@@ -626,8 +686,8 @@ test('machine-readable gate summary is authoritative for commands, revisions and
       summary.evidence.e2e.rendererProof.windowsHidden = false
     }, /rendererProof\.windowsHidden/],
     ['e2e evidence background throttling not disabled', summary => {
-      summary.evidence.e2e.rendererProof.backgroundThrottlingDisabled = false
-    }, /rendererProof\.backgroundThrottlingDisabled/],
+      summary.evidence.e2e.rendererProof.hiddenRendererActive = false
+    }, /rendererProof\.hiddenRendererActive/],
     ['e2e evidence renderer process proof too weak', summary => {
       summary.evidence.e2e.rendererProof.rendererProcessCount = 1
     }, /rendererProof\.rendererProcessCount/],
@@ -685,7 +745,7 @@ test('the gate summary records the real report evidence and report digests', () 
     Object.fromEntries(GATE_E2E_FLAGS.map(flag => [flag, true])))
   assert.equal(snapshot.e2e.rendererProof.browserWindowCount, 2)
   assert.equal(snapshot.e2e.rendererProof.windowsHidden, true)
-  assert.equal(snapshot.e2e.rendererProof.backgroundThrottlingDisabled, true)
+  assert.equal(snapshot.e2e.rendererProof.hiddenRendererActive, true)
   assert.equal(snapshot.e2e.stepCount, 36)
   assert.deepEqual(snapshot.docker.flags,
     Object.fromEntries(REQUIRED_DOCKER_EVIDENCE_FLAGS.map(flag => [flag, true])))
@@ -697,7 +757,7 @@ test('the gate summary records the real report evidence and report digests', () 
   failing.result = 'FAIL'
   failing.evidence.realElectron = false
   failing.evidence.rendererProof.windowsHidden = false
-  failing.evidence.rendererProof.backgroundThrottlingDisabled = false
+  failing.evidence.rendererProof.hiddenRendererActive = false
   failing.evidence.stepCount = 1
   const failingSnapshot = buildGateEvidenceSnapshot({
     e2e: { bytes: Buffer.from('tampered report bytes'), report: failing },
@@ -707,7 +767,7 @@ test('the gate summary records the real report evidence and report digests', () 
   assert.equal(failingSnapshot.e2e.result, 'FAIL')
   assert.equal(failingSnapshot.e2e.flags.realElectron, false)
   assert.equal(failingSnapshot.e2e.rendererProof.windowsHidden, false)
-  assert.equal(failingSnapshot.e2e.rendererProof.backgroundThrottlingDisabled, false)
+  assert.equal(failingSnapshot.e2e.rendererProof.hiddenRendererActive, false)
   assert.equal(failingSnapshot.e2e.stepCount, 1)
   assert.equal(failingSnapshot.e2e.reportSha256, sha256(Buffer.from('tampered report bytes')))
   assert.equal(failingSnapshot.docker.reportSha256, null)
