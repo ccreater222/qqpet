@@ -1,7 +1,16 @@
 import type { ShapeRect } from './hit-shape'
 import type { LanPeer } from './lan'
 import type { WebhookMsg } from './webhook'
+import type { OrderedEvent } from './pet-runtime/events'
+import type {
+  RendererProjection,
+  RendererRepositoryStatus,
+  RendererRuntimeInfo,
+} from './renderer-api'
+import type { CommandKey, CommandResult, PetCommand } from './sync/protocol'
+import type { DeviceLocalOverlay, DeviceLocalOverlayPatch } from './sync/data-boundary'
 import type { SaveData, SavePatch, Sex } from './save'
+import type { StorageApi } from './storage'
 
 export const IPC = {
   load: 'pet:load',
@@ -9,6 +18,38 @@ export const IPC = {
   resetPet: 'pet:reset',
   exportSave: 'pet:export',
   importSave: 'pet:import',
+  runtimeInfo: 'pet:runtime-info',
+  command: 'pet:command',
+  setAdvanceWhileEmpty: 'pet:set-advance-while-empty',
+  localSettingsLoad: 'pet:local-settings-load',
+  localSettingsUpdate: 'pet:local-settings-update',
+  flush: 'pet:flush',
+  getProjection: 'pet:get-projection',
+  getStatus: 'pet:get-status',
+  projection: 'pet:projection',
+  commandResult: 'pet:command-result',
+  syncStatus: 'pet:sync-status',
+  resync: 'pet:resync',
+  requestResync: 'pet:request-resync',
+  remoteStatus: 'pet:remote-status',
+  remotePair: 'pet:remote-pair',
+  remoteRevoke: 'pet:remote-revoke',
+  storageStatus: 'storage:status',
+  storageSetMode: 'storage:set-mode',
+  storagePair: 'storage:pair',
+  storageUnpair: 'storage:unpair',
+  storageDeviceList: 'storage:device-list',
+  storageDeviceRevoke: 'storage:device-revoke',
+  storageSetTimeZone: 'storage:set-time-zone',
+  storageSetWeatherCity: 'storage:set-weather-city',
+  storageExportBundle: 'storage:export-bundle',
+  storageImportBundle: 'storage:import-bundle',
+  storageImportDialog: 'storage:import-dialog',
+  storageRetryHandoff: 'storage:retry-handoff',
+  storageRollbackHandoff: 'storage:rollback-handoff',
+  storageCreateBackup: 'storage:create-backup',
+  storageStatusEvent: 'storage:status-event',
+  storageDevicesEvent: 'storage:devices-event',
   openGame: 'game:open',
   calendar: 'app:calendar',
   gamePlayed: 'game:played',
@@ -195,6 +236,29 @@ export interface AiMessage {
   content: string
 }
 
+/** Desktop-only C10 server-mode pairing input; never persisted with the token. */
+export interface RemotePairingInput {
+  serverUrl: string
+  code: string
+  deviceLabel: string
+}
+
+/** Desktop-only server-mode status surface; mobile builds never expose it. */
+export interface DesktopRemoteStatus extends RendererRepositoryStatus {
+  enabled: boolean
+  reason?: string
+  serverUrl?: string
+  petId?: string
+  deviceId?: string
+}
+
+/** Desktop-only server mode control surface added by C10, expanded by C11. */
+export interface DesktopRemoteApi {
+  status(): Promise<DesktopRemoteStatus>
+  pair(input: RemotePairingInput): Promise<DesktopRemoteStatus>
+  revoke(): Promise<void>
+}
+
 /** Supplied by native device APIs, independently from viewport dimensions. */
 export type DeviceKind = 'phone' | 'tablet' | 'other'
 
@@ -209,12 +273,43 @@ export interface QQPetApi {
     autoStart?: boolean; autoStartReason?: string
     clipboardWatch?: boolean; clipboardWatchReason?: string
     frontWatch?: boolean; frontWatchReason?: string
+    /** Mobile hosts explicitly report false; no pairing/WSS/RemoteRepository bundle exists. */
+    serverMode?: boolean
+    /** True only when this renderer is using the explicit dev local-runtime-v2 authority. */
+    localRepositoryV2?: boolean
+    localRepositoryV2Reason?: string
   }
   load(): Promise<SaveData>
-  /** Merges object groups field by field, replaces other keys, then persists. */
+  /** Legacy local-only persistence. Fail-closed for canonical fields in runtime mode. */
   save(patch: SavePatch): void
-  /** Resolves after previously submitted saves reach persistent storage. */
-  flush?(): Promise<void>
+  /** Waits for local output durability or in-flight command/status reconciliation. */
+  flush(): Promise<void>
+  /** Whether this renderer is attached to an explicit local-runtime-v2 authority. */
+  runtimeInfo(): Promise<RendererRuntimeInfo>
+  /** Desktop-only C10 server mode; omitted on mobile builds. Kept for compatibility. */
+  remote?: DesktopRemoteApi
+  /** C11 storage/mode/admin surface; absent on mobile builds, which always stay local. */
+  storage?: StorageApi
+  /** Executes one semantic command through the local/remote repository. */
+  command<K extends CommandKey>(
+    command: Extract<PetCommand, { type: K }>,
+    options?: { opId?: string },
+  ): Promise<CommandResult<K>>
+  /** Same unified capability on every host; server mode requires owner authority. */
+  setAdvanceWhileEmpty(enabled: boolean): Promise<void>
+  /** Device-only settings, position and presentation. Never canonical gameplay. */
+  localSettings: {
+    load(): Promise<DeviceLocalOverlay>
+    update: (patch: DeviceLocalOverlayPatch) => Promise<DeviceLocalOverlay>
+  }
+  onProjection(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): void
+  onCommandResult(listener: (result: CommandResult) => void): void
+  onSyncStatus(listener: (status: RendererRepositoryStatus) => void): void
+  onResync(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): void
+  /** Requests a full authoritative snapshot after an ordered-event gap. */
+  requestResync(): Promise<void>
+  getProjection?(): RendererProjection | null | Promise<RendererProjection | null>
+  getStatus?(): RendererRepositoryStatus | Promise<RendererRepositoryStatus>
   /** Buries the pet and relaunches into egg selection, or straight into a newborn of `sex`. */
   resetPet(sex?: Sex): void
   /** Asks where to write the save; false when cancelled. */
@@ -222,7 +317,7 @@ export interface QQPetApi {
   /** Asks for a save file (ours or the original's config.json), then relaunches with it. Rejects when the file is not a save. */
   importSave(): Promise<void>
   /** Plays pet/game/<swf> in its own resizable window. */
-  openGame(swf: string): void
+  openGame(swf: string, windowId?: number): void
   /** Native game-page exit; ordinary browser/Electron pages can keep window.close(). */
   closeGame?(): void
   /** Today and the next 30 days from the calendar API; empty while offline. */
@@ -263,7 +358,7 @@ export interface QQPetApi {
   /** 托盘悬浮结束（鼠标离开托盘图标）；档案据此开始收起倒计时。 */
   onTrayHoverLeave?(listener: () => void): void
   /** A game window closed after `minutes` of play. */
-  onGamePlayed(listener: (minutes: number) => void): void
+  onGamePlayed(listener: (minutes: number, windowId: number) => void): void
   /** New clipboard text, while the clip setting is on. */
   onClipboard(listener: (text: string) => void): void
   /** The user left the machine (screen off / idle) or came back. */

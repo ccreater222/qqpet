@@ -298,11 +298,11 @@ export class PetHost {
     }
   }
 
-  async openGame(swf: string): Promise<void> {
+  async openGame(swf: string, windowId: number): Promise<void> {
     await this.start({
       bundleName: this.context.abilityInfo.bundleName,
       abilityName: 'GameAbility',
-      parameters: { swf: swf }
+      parameters: { swf: swf, windowId: windowId }
     })
   }
 

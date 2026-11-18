@@ -36,9 +36,12 @@ import android.widget.FrameLayout
 import org.json.JSONObject
 import java.io.File
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -385,6 +388,62 @@ class PetService : Service() {
             tmp.renameTo(File(filesDir, name))
         }
 
+        /** Exact v2 state writes only; save.json and arbitrary app-private paths are rejected. */
+        private fun allowedStateName(name: String): Boolean {
+            if (name == "save.v2.json" || name == "save.v2.json.bak" || name == "save.json.bak") return true
+            val prefix = "save.v2.json.corrupt-"
+            if (name.startsWith(prefix) == false) return false
+            val suffix = name.substring(prefix.length)
+            return suffix.isNotEmpty() && suffix.all { it in '0'..'9' }
+        }
+
+        private fun stateFile(name: String): File? =
+            if (allowedStateName(name)) File(filesDir, name) else null
+
+        private fun okRead(text: String?): String =
+            JSONObject().put("status", "ok").put("text", text ?: JSONObject.NULL).toString()
+
+        private fun errorRead(message: String): String =
+            JSONObject().put("status", "error").put("error", message).toString()
+
+        private fun readFileResult(file: File): String {
+            if (file.exists() == false) return okRead(null)
+            if (file.isFile == false) return errorRead("State path is not a regular file")
+            return try {
+                okRead(file.readText())
+            } catch (e: Exception) {
+                errorRead(e.message ?: e.toString())
+            }
+        }
+
+        /** Missing is ok+null; read failures are error results that the host must not migrate over. */
+        @JavascriptInterface
+        fun readStateFile(name: String): String {
+            val file = stateFile(name) ?: return errorRead("Invalid local state filename")
+            return readFileResult(file)
+        }
+
+        /** save.json is intentionally outside the state allowlist; only this read-only legacy bridge may read it. */
+        @JavascriptInterface
+        fun readLegacySave(): String = readFileResult(File(filesDir, "save.json"))
+
+        /** Replace a complete C5b state file with fsync+ATOMIC_MOVE; false means fail closed. */
+        @JavascriptInterface
+        fun writeAtomic(name: String, text: String): Boolean {
+            val target = stateFile(name) ?: return false
+            val tmp = File(filesDir, "." + target.name + "." + System.nanoTime() + ".tmp")
+            return try {
+                FileOutputStream(tmp).use { output ->
+                    output.write(text.toByteArray(Charsets.UTF_8))
+                    output.fd.sync()
+                }
+                Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                true
+            } catch (_e: Exception) {
+                tmp.delete()
+                false
+            }
+        }
         @JavascriptInterface
         fun http(id: Int, method: String, url: String, headers: String, body: String?) = this@PetService.http(id, method, url, headers, body)
 
@@ -414,7 +473,7 @@ class PetService : Service() {
         }
 
         @JavascriptInterface
-        fun openGame(swf: String) = startActivity(Intent(this@PetService, GameActivity::class.java).putExtra("swf", swf).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        fun openGame(swf: String, windowId: Int) = startActivity(Intent(this@PetService, GameActivity::class.java).putExtra("swf", swf).putExtra("windowId", windowId).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 
         @JavascriptInterface
         fun quit() = stopSelf()

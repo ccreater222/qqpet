@@ -1,9 +1,12 @@
-import { elapsed, stopTask } from '../pet/activity'
+import { elapsed, onStopTaskPending, stopTask, stopTaskPending } from '../pet/activity'
+import { createActivityClock } from '../pet/activity-clock'
 import CHINA from '../pet/data/china.json'
 import { pay } from '../pet/items'
 import { PROVINCES, travel } from '../pet/jobs'
 import { speak } from '../pet/pet'
-import { activity, save, update } from '../pet/store'
+import { activity, onProjectionApplied, onStoreEvent, runtimeProjectionMode, save, update } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { resetTour } from '../pet/tasks'
 import { albumView } from './album'
 import { openBox } from './box'
@@ -13,6 +16,14 @@ import { windowView } from './window-view'
 
 const SVG = 'http://www.w3.org/2000/svg'
 
+/** Authoritative runtime trip clock; legacy mode keeps using the renderer task. */
+const runtimeTripClock = createActivityClock({ onProjection: onProjectionApplied, onEvent: onStoreEvent })
+
+/** Shared with the status panel: either surface's pending stop disables both buttons. */
+export function travelStopDisabled(city: string | null, pending: boolean): boolean {
+  return city === null || pending
+}
+
 function svg<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number>): SVGElementTagNameMap[K] {
   const e = document.createElementNS(SVG, tag)
   for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v))
@@ -21,6 +32,7 @@ function svg<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string,
 
 function stopTravel(): void {
   if (!activity('trip')) return
+  if (runtimeProjectionMode && stopTaskPending()) return
   stopTask()
   speak({ c: 'state', s: 'overTripUp', now: true }, 'speak')
 }
@@ -30,11 +42,17 @@ function finishTour(): void {
     title: '旅游~~',
     msg: '该操作将清除旅游数据，并且可重新做相关旅游任务，确认花费8888元宝进行完成旅游成就么？',
     ok: (close) => {
+      close()
+      if (runtimeProjectionMode) {
+        void dispatchRuntimeCommand(uiCommands.completeTravelCollection()).then((result) => {
+          if (commandSucceeded(result)) speak({ s: '[host],旅游成就完成啦！~', now: true }, 'speak')
+        })
+        return
+      }
       if (pay(8888)) {
         update('gameSaveDatas', { travel_china: [], travel_china_num: save.gameSaveDatas.travel_china_num + 1 })
         resetTour()
       }
-      close()
     },
   })
 }
@@ -79,12 +97,28 @@ export function openTravel(): void {
     badge.title = `旅行成就*${times || '未点亮'}`
     tipText.data = ` 提示: 每次随机旅行，旅行时间为60分钟 --- 当前已点亮 ${visited.length} 个城市（共${PROVINCES.length}个） `
     const city = activity('trip')
+    // Runtime mode has no renderer task clock: use the game time from the
+    // ordered activity.started event plus the latest projection, and show no
+    // fake 0 when the start is unknown (e.g. the panel opened after a restart).
+    const runtimeMinutes = runtimeProjectionMode ? runtimeTripClock.elapsedMinutes('trip') : null
+    const minutes = runtimeProjectionMode ? runtimeMinutes : elapsed() | 0
+    const elapsedText = city === null || minutes === null ? '' : ` 已经旅行 ${minutes}分钟`
+    const pending = runtimeProjectionMode && stopTaskPending()
+    const disabled = travelStopDisabled(city, pending)
     go.classList.toggle('disable', Boolean(city))
-    stop.classList.toggle('disable', !city)
-    stop.textContent = (city ? `当前所在城市：${city} 已经旅行 ${elapsed() | 0}分钟` : '') + ' 停止旅行 '
+    stop.classList.toggle('disable', disabled)
+    if (disabled) {
+      stop.setAttribute('disabled', '')
+      stop.setAttribute('aria-disabled', 'true')
+    } else {
+      stop.removeAttribute('disabled')
+      stop.removeAttribute('aria-disabled')
+    }
+    stop.textContent = (city ? `当前所在城市：${city}${elapsedText}` : '') + ' 停止旅行 '
     finish.style.display = visited.length === PROVINCES.length ? '' : 'none'
   }
   refresh()
+  const stopPending = onStopTaskPending(() => refresh())
   const timer = window.setInterval(refresh, 1000)
 
   const mapPane = div('fC f1 h0', tip, div('travelMain f1 h0', map), div('toTarvelBut fcc w100', go, stop, finish))
@@ -100,6 +134,7 @@ export function openTravel(): void {
   const content = div('travel fC', div('travelTabs fc', ...tabs), mapPane, albumPane)
   openBox(div('ui-travel', content), {
     onClose: () => {
+      stopPending()
       clearInterval(timer)
       open = false
     },

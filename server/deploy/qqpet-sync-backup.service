@@ -1,0 +1,14 @@
+[Unit]
+Description=Online QQPet SQLite backup
+After=qqpet-sync.service
+Requires=qqpet-sync.service
+
+[Service]
+Type=oneshot
+User=qqpet-sync
+Group=qqpet-sync
+EnvironmentFile=/etc/qqpet-sync.env
+ExecStart=/usr/bin/node /opt/qqpet-sync/dist/server/src/index.js backup --db /var/lib/qqpet-sync/qqpet.sqlite --pet-id default
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

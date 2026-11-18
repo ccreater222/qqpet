@@ -1,6 +1,8 @@
 import { goodOf } from '../pet/data/goods'
 import { diploma } from '../pet/jobs'
-import { avatar, fatigue, growthPerMinute, info, luck, save, setInfo } from '../pet/store'
+import { avatar, fatigue, growthPerMinute, info, luck, runtimeProjectionMode, save, setInfo } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { openBox } from './box'
 import './css/petinfo.css'
 import { formatDate } from './date'
@@ -42,7 +44,14 @@ function nameRow(cls: string, label: string, key: 'name' | 'host', saved: () => 
   const input = typeable(Object.assign(document.createElement('input'), { className: 'input', type: 'text', maxLength: 20, value: info[key] }))
   const commit = (): void => {
     const v = input.value.trim()
-    if (!v) return void (input.value = info[key])
+    if (v.length === 0) return void (input.value = info[key])
+    if (runtimeProjectionMode) {
+      const payload = key === 'name' ? { name: v } : { host: v }
+      void dispatchRuntimeCommand(uiCommands.rename(payload)).then((result) => {
+        if (commandSucceeded(result)) saved()
+      })
+      return
+    }
     setInfo(key, v)
     saved()
   }

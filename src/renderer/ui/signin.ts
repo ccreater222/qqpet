@@ -2,7 +2,9 @@ import { allGoods, describe, type GoodType } from '../pet/data/goods'
 import POOLS from '../pet/data/pool.json'
 import { pay } from '../pet/items'
 import { birthdayGift, canDrawGrowth, drawGrowth, giftCost, monthSigns, signedToday, signin, signToday, takeOnlineGift } from '../pet/signin'
-import { info, save } from '../pet/store'
+import { info, onStoreEvent, runtimeProjectionMode, save } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandResultData, commandResultGoods, commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { dayStart } from '../pet/vip'
 import { openBox } from './box'
 import './css/signin.css'
@@ -114,6 +116,14 @@ export function openSignIn(): void {
     'jrqd but_normal fcc mt8',
     () => {
       if (signedToday()) return
+      if (runtimeProjectionMode) {
+        void dispatchRuntimeCommand(uiCommands.signIn()).then((result) => {
+          if (commandSucceeded(result) === false) return
+          refresh()
+          showResult(root, commandResultGoods(result))
+        })
+        return
+      }
       showResult(root, signToday())
       refresh()
     },
@@ -137,7 +147,26 @@ export function openSignIn(): void {
   const drawBtn = button(
     'but_normal fcc mt8',
     () => {
-      if (drawing || !canDrawGrowth()) return
+      if (drawing || canDrawGrowth() === false) return
+      if (runtimeProjectionMode) {
+        drawing = true
+        void dispatchRuntimeCommand(uiCommands.drawGrowth()).then((result) => {
+          const data = commandResultData<{ digits: number[]; value: number }>(result)
+          if (data === null) {
+            drawing = false
+            refresh()
+            return
+          }
+          lastDraw = data.digits
+          refresh()
+          setTimeout(() => {
+            drawing = false
+            refresh()
+            showResult(root, commandResultGoods(result), '你咋运气这么差呢！~再让你试一次吧~~')
+          }, 600)
+        })
+        return
+      }
       drawing = true
       const r = drawGrowth()
       lastDraw = r.digits
@@ -154,12 +183,33 @@ export function openSignIn(): void {
   const giftCount = div('')
   const giftBtn = button('mt8 but_normal fcc', () => {
     if (signin.isOnlineLastTime > 0) return
+    if (runtimeProjectionMode) {
+      const claim = (): void => {
+        void dispatchRuntimeCommand(uiCommands.claimOnlineGift()).then((result) => {
+          if (commandSucceeded(result) === false) return
+          showResult(root, commandResultGoods(result))
+          refresh()
+        })
+      }
+      const runtimeCost = giftCost()
+      if (runtimeCost === 0) return claim()
+      const runtimePd = info.pinkDiamond
+      windowView({
+        title: '在线礼包',
+        msg: `${runtimePd ? '尊贵的粉钻用户，' : '尊敬的宠主，'}确定花费${runtimeCost}${runtimePd ? '元宝领取双份在线礼物么？' : '元宝领取在线礼物么？'}`,
+        ok: (close) => {
+          close()
+          claim()
+        },
+      })
+      return
+    }
     const take = (): void => {
       showResult(root, takeOnlineGift())
       refresh()
     }
     const cost = giftCost()
-    if (!cost) return take()
+    if (cost === 0) return take()
     const pd = info.pinkDiamond
     windowView({
       title: '在线礼包',
@@ -210,13 +260,29 @@ export function openSignIn(): void {
   view(0)
   const timer = window.setInterval(refresh, 1000)
   setTimeout(() => {
+    if (runtimeProjectionMode) {
+      const today = new Date()
+      const born = new Date(info.birthDay * 1000)
+      // Only the daily birthday slot may ask the host; otherwise the command
+      // would reject with a confusing error every time the panel opens.
+      if (signin.getBirthDayGift || today.getDate() !== born.getDate()) return
+      void dispatchRuntimeCommand(uiCommands.claimBirthdayGift()).then((result) => {
+        const goods = commandResultGoods(result)
+        if (goods.length > 0) showResult(root, goods)
+      })
+      return
+    }
     const goods = birthdayGift()
     if (goods.length) showResult(root, goods)
   }, 500)
 
   root.append(div('SignIn fc', left, signView, giftView))
+  const stopProjection = onStoreEvent((event) => {
+    if (event.type === 'signin.changed') refresh()
+  })
   openBox(root, {
     onClose: () => {
+      stopProjection()
       clearInterval(timer)
       open = false
     },

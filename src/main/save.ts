@@ -4,6 +4,8 @@ import { atomicWrite } from './atomic-write'
 import { join } from 'node:path'
 import type { SaveData, SavePatch, Sex } from '../shared/save'
 import { applyPatch, buried, petOf, startSave } from '../shared/save-logic'
+import type { DeviceLocalOverlay } from '../shared/sync/data-boundary'
+import { provisionalSaveView } from './startup-view'
 
 // Resolved lazily: a test sidecar swaps userData before the first use, and a
 // module-level const would freeze the path from before that swap.
@@ -43,14 +45,14 @@ function writeLater(): void {
   clearTimeout(retry)
   retry = undefined
   try {
-    write(save)
+    if (save !== undefined) write(save)
   } catch (e) {
     console.error('save file is busy, retrying:', e)
     retry = setTimeout(writeLater, 1000)
   }
 }
 
-let save: SaveData
+let save: SaveData | undefined
 
 export function loadSave(): SaveData {
   save = startSave(read())
@@ -58,16 +60,37 @@ export function loadSave(): SaveData {
   return save
 }
 
-export function getSave(): SaveData {
+/** Installs a provisional empty view while the runtime loads; it never writes the legacy file. */
+export function loadEmptySaveView(overlay: DeviceLocalOverlay | null = null): SaveData {
+  save = provisionalSaveView(overlay)
   return save
 }
 
+export function getSave(): SaveData {
+  if (save === undefined) throw new Error('save is not loaded')
+  return save
+}
+
+/** Installs a repository-provided renderer view without writing the legacy file. */
+export function setSaveView(next: SaveData): void {
+  save = next
+}
+
+/** Legacy durability barrier; runtime mode uses LocalRepository.flush instead. */
+export function flushSave(): void {
+  clearTimeout(retry)
+  retry = undefined
+  if (save !== undefined) write(save)
+}
+
 export function patchSave(patch: SavePatch): void {
+  if (save === undefined) throw new Error('save is not loaded')
   applyPatch(save, patch)
   writeLater()
 }
 
 export function exportSave(file: string): void {
+  if (save === undefined) throw new Error('save is not loaded')
   writeFileSync(file, JSON.stringify(save, null, 2))
 }
 
@@ -78,12 +101,14 @@ export function exportSave(file: string): void {
 export function importSave(file: string): void {
   const pet = petOf(readJson(file))
   if (pet.havePet !== true) throw new Error('no pet in this file')
+  if (save === undefined) throw new Error('save is not loaded')
   copyFileSync(saveFile(), `${saveFile()}.bak`)
   write(pet)
 }
 
 /** Buries the pet: the next launch starts with egg selection, or with a newborn of `sex`. */
 export function resetSave(sex?: Sex): void {
+  if (save === undefined) throw new Error('save is not loaded')
   save = buried(save, sex)
   write(save)
 }

@@ -14,7 +14,9 @@ import { loot } from './loot'
 import { mailPhoto } from './mail'
 import { speak } from './pet'
 import { rand } from './rand'
-import { activity, earnYb, info, luck, save, setInfo, update } from './store'
+import { activity, earnYb, info, luck, runtimeProjectionMode, save, setInfo, update } from './store'
+import { uiCommands } from './command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from './runtime-command'
 import { addCount } from './tasks'
 import { care } from './custody'
 import { logCare } from './sweetcare'
@@ -94,6 +96,12 @@ export const qualifies = (g: Good): boolean =>
 
 /** Returns whether the pet went to work. */
 export function work(g: Good): boolean {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.startWork(g.id)).then((result) => {
+      if (commandSucceeded(result)) speak({ s: '[host]，我开始工作了哦~', now: true }, 'speak')
+    })
+    return true
+  }
   if (cannot('工作')) return false
   let no = ''
   if (g.needLevel! > save.petComputedlInfo.level) no = '[host]，我等级不够哦~'
@@ -133,8 +141,10 @@ export function describeStudy(g: Good): string[] {
 
 /** All lessons of a school done: the pet asks for its exam. */
 function examPrompt(g: Good): void {
-  // 贴心宝贝 sits the exam itself.
-  if (info.sweetHeart && care().exam && info.health === 5) {
+  // 贴心宝贝 sits the exam itself. Runtime mode has no auto-exam command and
+  // canonical studyInfo/careLog writes are host-owned there, so it falls back
+  // to the normal (server-driven) exam prompt instead of writing locally.
+  if (runtimeProjectionMode === false && info.sweetHeart && care().exam && info.health === 5) {
     learn(subjectOf(g))
     logCare(`${g.object}考试通过，升学啦`)
     return
@@ -144,13 +154,23 @@ function examPrompt(g: Good): void {
     ok: () =>
       openExam(g.id, () => {
         speak({ s: '[host],好开心啊，我终于升学了！~', now: true }, 'speak')
-        learn(subjectOf(g))
+        if (runtimeProjectionMode === false) learn(subjectOf(g))
       }),
   })
 }
 
 /** Returns whether the pet went to class. */
 export function study(g: Good): boolean {
+  if (runtimeProjectionMode) {
+    if (lessons(g) === g.classNum) {
+      examPrompt(g)
+      return false
+    }
+    void dispatchRuntimeCommand(uiCommands.startStudy(g.id)).then((result) => {
+      if (commandSucceeded(result)) speak({ s: `[host]，我去上${g.object}课啦~`, now: true }, 'speak')
+    })
+    return true
+  }
   if (cannot('学习')) return false
   if (lessons(g) === g.classNum) {
     examPrompt(g)
@@ -210,8 +230,14 @@ function back(p: Province, early: boolean): void {
   speak({ s, b: '这就去', ai: false }, 'speak', { ok: openEmail })
 }
 
-/** An hour in a random province; a lucky pet comes back early from an encounter. */
+/** An hour in a random province; a lucky pet comes back early from an encounter. Returns whether the trip was started. */
 export function travel(): boolean {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.startTravel()).then((result) => {
+      if (commandSucceeded(result)) speak({ s: '[host]，我开始去旅游了哦~', now: true }, 'speak')
+    })
+    return true
+  }
   if (cannot('旅行了', '去旅游哦')) return false
   const p = PROVINCES[rand(0, PROVINCES.length - 1)]
   speak({ s: `[host]，我开始去${p.name}了哦~`, now: true }, 'speak', { start: () => startTask(tripTask(p), p.name) })
@@ -263,6 +289,7 @@ const REBUILD: Record<Task['key'], (v: string) => Task | null> = {
 
 /** Picks up the task running when the app quit, the time it was closed counting too; one already due ends once growth starts. */
 export function resumeTask(): void {
+  if (runtimeProjectionMode) return
   const key = (['work', 'study', 'trip'] as const).find((k) => activity(k))
   const value = key ? activity(key)! : ''
   update('activeOption', { work: null, study: null, trip: null })

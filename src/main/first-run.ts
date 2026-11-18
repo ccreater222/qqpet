@@ -5,6 +5,7 @@ import { APP_VERSION } from '../shared/version'
 import { downloadPack, findFullPack, findPack, hasBundledContent, importPack, installedContent, resetPacks } from './content'
 import { APP_ORIGIN } from './protocol'
 import { relaunch } from './relaunch'
+import { e2eWindowsHidden } from './window'
 
 const PAGES = process.env.ELECTRON_RENDERER_URL ?? APP_ORIGIN
 
@@ -26,6 +27,7 @@ export function registerPackIpc(): void {
  * import one, then relaunches into the pet. Closing it quits.
  */
 export function openFirstRun(): BrowserWindow {
+  const hidden = e2eWindowsHidden()
   const win = new BrowserWindow({
     width: 520,
     height: 420,
@@ -36,10 +38,18 @@ export function openFirstRun(): BrowserWindow {
     title: 'QQ宠物 - 准备宠物内容',
     show: false,
     autoHideMenuBar: true,
-    webPreferences: { preload: join(import.meta.dirname, '../preload/index.cjs'), sandbox: true, contextIsolation: true },
+    webPreferences: {
+      preload: join(import.meta.dirname, '../preload/index.cjs'),
+      sandbox: true,
+      contextIsolation: true,
+      // Hidden E2E windows must not have their renderer throttled.
+      ...(hidden ? { backgroundThrottling: false } : {}),
+    },
   })
   win.setMenu(null)
-  win.once('ready-to-show', () => win.show())
+  win.once('ready-to-show', () => {
+    if (!hidden) win.show()
+  })
   win.webContents.on('will-navigate', (e) => e.preventDefault())
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   void win.loadURL(`${PAGES}/firstrun.html`)

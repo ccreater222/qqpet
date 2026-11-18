@@ -2,8 +2,11 @@ import { goodOf, parseGood, type Good } from './data/goods'
 import { give } from './items'
 import { loot } from './loot'
 import { rand } from './rand'
-import { addInfo, info, save, update } from './store'
+import { addInfo, info, runtimeProjectionMode, save, update } from './store'
+import { uiCommands } from './command-map'
+import { dispatchRuntimeCommand } from './runtime-command'
 import { dayStart } from './vip'
+import { registerProjectionCacheInvalidator } from './projection-cache'
 
 const GIFT_MINUTES = 20
 const BIRTHDAY_FOODS =
@@ -35,7 +38,8 @@ function load(): SignIn {
   }
 }
 
-export const signin = load()
+export let signin = load()
+registerProjectionCacheInvalidator('signin', () => { signin = load() })
 const store = (): void => update('saveJsonData', { signin: JSON.stringify(signin) })
 
 export const monthSigns = (y: number, m: number): number[] => signin.collectionList[y]?.[m] ?? []
@@ -47,6 +51,10 @@ export function signedToday(): boolean {
 }
 
 export function signToday(): Good[] {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.signIn())
+    return []
+  }
   const today = dayStart()
   const d = new Date(today * 1000)
   const year = (signin.collectionList[d.getFullYear()] ??= {})
@@ -62,6 +70,10 @@ export const canDrawGrowth = (): boolean => !signin.getGrowth || (info.pinkDiamo
 
 /** Draws today's growth digits; a draw of 0 is not counted and returns no goods. */
 export function drawGrowth(): { digits: number[]; goods: Good[] } {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.drawGrowth())
+    return { digits: signin.getGrowth?.[1] ?? signin.getGrowth?.[0] ?? [0, 0, 0], goods: [] }
+  }
   let e0 = rand(0, 5)
   e0 = rand(0, e0)
   e0 = rand(0, e0)
@@ -80,6 +92,10 @@ export const giftCost = (): number => signin.onlineGiftNum * 100
 
 /** Takes the online gift; the countdown must be over and any cost already paid. */
 export function takeOnlineGift(): Good[] {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.claimOnlineGift())
+    return []
+  }
   const tier = rand(0, info.pinkDiamond ? 1000 : 10000) < 2 ? 0 : signin.onlineGiftNum % 10 === 0 ? 1 : 2
   const goods = loot(info.pinkDiamond ? 2 : 1, tier)
   signin.onlineGiftNum++
@@ -90,6 +106,7 @@ export function takeOnlineGift(): Good[] {
 }
 
 export function tickGift(minutes: number): void {
+  if (runtimeProjectionMode) return
   if (!signin.isOnlineLastTime) return
   signin.isOnlineLastTime = Math.max(signin.isOnlineLastTime - minutes, 0)
   store()
@@ -97,6 +114,10 @@ export function tickGift(minutes: number): void {
 
 /** Once a day, on the birthday's day of the month: a random food. */
 export function birthdayGift(): Good[] {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.claimBirthdayGift())
+    return []
+  }
   if (signin.getBirthDayGift) return []
   signin.getBirthDayGift = true
   store()
@@ -107,6 +128,7 @@ export function birthdayGift(): Good[] {
 }
 
 export function resetSignIn(): void {
+  if (runtimeProjectionMode) return
   signin.getGrowth = null
   if (info.onLineTime > 10) signin.getBirthDayGift = false
   signin.isOnlineLastTime = GIFT_MINUTES

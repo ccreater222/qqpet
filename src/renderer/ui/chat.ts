@@ -6,7 +6,9 @@ import { study, studyGoods, work, workGoods } from '../pet/jobs'
 import { noteUserSpoke } from '../pet/calendar'
 import { onEvent, onReply, onSaid } from '../pet/said'
 import { speak } from '../pet/pet'
-import { addInfo, info, save, setInfo, update } from '../pet/store'
+import { addInfo, info, runtimeProjectionMode, save, setInfo, update } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { sendLetterTo, lanPeers } from './lan-visit'
 import { openBox } from './box'
 import './css/chat.css'
@@ -105,16 +107,29 @@ function doAct(act: string, say: string, arg: { name: string; text: string }): v
 const CHEAT = /^(元宝|成长值?|心情|饥饿|饱食|清洁)\s*[+＋]\s*(\d{1,9})$/
 const STATS = { 元宝: 'yb', 成长: 'growth', 成长值: 'growth', 心情: 'mood', 饥饿: 'hunger', 饱食: 'hunger', 清洁: 'clean' } as const
 
-function cheat(text: string): string | null {
+/**
+ * Returns undefined for ordinary chat, a reply line for an applied cheat, or
+ * null when a runtime cheat was recognized but rejected (the dispatch bridge
+ * already surfaced the command error).
+ */
+async function cheat(text: string): Promise<string | null | undefined> {
   if (text === '不要死') {
-    update('settings', { undying: true })
+    if (runtimeProjectionMode) {
+      const result = await dispatchRuntimeCommand(uiCommands.setShared('undying', true))
+      if (commandSucceeded(result) === false) return null
+    } else update('settings', { undying: true })
     return `好的${info.host}，${info.name}以后再也不会死啦！`
   }
   const m = text.match(CHEAT)
-  if (!m) return null
+  if (!m) return undefined
   const key = STATS[m[1] as keyof typeof STATS]
   const n = Number(m[2])
-  if (key === 'yb' || key === 'growth') addInfo(key, n)
+  // Runtime mode owns canonical stats: await the semantic cheat result and
+  // never report success before the host applied it.
+  if (runtimeProjectionMode) {
+    const result = await dispatchRuntimeCommand(uiCommands.grantCheat(key, n))
+    if (commandSucceeded(result) === false) return null
+  } else if (key === 'yb' || key === 'growth') addInfo(key, n)
   else setInfo(key, Math.min(info[key] + n, save.petComputedlInfo[`${key}Max`]))
   return `${info.host}，${m[1]}+${n}，${info.name}收到啦！`
 }
@@ -245,7 +260,19 @@ export function forgetMemory(): void {
 export async function talkToPet(content: string): Promise<string> {
   const said: AiMessage = { role: 'user', content }
   noteUserSpoke()
-  const canned = (save.settings.chatCheat ? cheat(content) : null) ?? (aiOn() ? null : SILLY[Math.floor(Math.random() * SILLY.length)](info.name, info.host))
+  if (save.settings.chatCheat) {
+    const cheatReply = await cheat(content)
+    if (cheatReply === null) {
+      // The dispatch bridge already showed the command error dialog; keep the
+      // success line out of the chat as well.
+      return '这个操作没有生效哦~'
+    }
+    if (cheatReply !== undefined) {
+      speak({ s: cheatReply, now: true, ai: false }, 'speak')
+      return cheatReply
+    }
+  }
+  const canned = aiOn() ? null : SILLY[Math.floor(Math.random() * SILLY.length)](info.name, info.host)
   if (canned) {
     speak({ s: canned, now: true, ai: false }, 'speak')
     return canned

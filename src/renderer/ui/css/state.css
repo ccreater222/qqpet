@@ -21,5 +21,6 @@
 .ui-state .butDo {height:19px;width:35px;background-image:url(/pet/stateInfo/13.svg);background-size:100% 100%;position:relative;background-repeat:no-repeat;border-radius:8px;border:1px solid rgba(31,114,182,.3);display:flex;align-items:center;justify-content:center}
 .ui-state .butDo:hover {background-image:url(/pet/stateInfo/18.svg);top:-2px}
 .ui-state .butDo:active {background-image:url(/pet/stateInfo/21.svg);position:relative;top:1px}
+.ui-state .butDo.disable,.ui-state .butDo[disabled] {background-image:url(/pet/stateInfo/13.svg);filter:grayscale(1);opacity:.55;cursor:default;pointer-events:none;top:0}
 .ui-state .groupIcons {width:20px;height:20px;margin-left:8px}
 .ui-state .boneImg {width:12px;height:12px}

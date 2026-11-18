@@ -3,6 +3,7 @@ import { webSearch } from '../shared/websearch'
 import { calendar } from '../shared/calendar'
 import { cloneJson } from '../shared/compat'
 import type { Fetch, Point, QQPetApi, TrayClick, TrayState } from '../shared/ipc'
+import { legacyRendererStatus } from '../shared/renderer-api'
 import type { SaveData } from '../shared/save'
 import type { SwfFailure } from '../renderer/swf/player'
 import { applyPatch, buried, petOf, startSave } from '../shared/save-logic'
@@ -10,18 +11,26 @@ import { TRAY_STATES, trayTip } from '../shared/tray'
 import { latestRelease } from '../shared/update'
 import { weather } from '../shared/weather'
 import { gameRewards } from './game-rewards'
+import { openGameRequest } from './game-open'
 import { isFatalRufflePanic, readRufflePanic, type RufflePanic } from './diagnostics'
 import { startGeometry, type PetPointer } from './geometry'
 import { IOSRPC } from './rpc'
 import { IOSSaveWriter } from './save-writer'
 import { installTextInput } from './text-input'
 import './panels.css'
+import { iosLocalRepositoryStorage } from './local-repository-storage'
+import {
+  createMobileLocalRepositoryBridge,
+  resolveMobileLegacyAuthority,
+  webCryptoAvailable,
+  type MobileLocalRepositoryBridge,
+} from '../mobile/local-repository-bridge'
 
 interface Bootstrap {
   save: string | null
   generation: string
   deviceKind?: QQPetApi['deviceKind']
-  capabilities?: NonNullable<QQPetApi['capabilities']>
+  capabilities?: NonNullable<QQPetApi['capabilities']> & { localRuntimeV2Storage?: boolean }
 }
 interface HTTPReply { status: number; body: string; headers?: Record<string, string> }
 interface Insets {
@@ -32,7 +41,7 @@ interface Insets {
 interface Events {
   cursor: Point
   trayClick: TrayClick
-  gamePlayed: number
+  gamePlayed: { minutes: number; windowId: number }
   clipboard: string
   presence: boolean
   front: string
@@ -51,8 +60,20 @@ declare global {
 
 const gamePage = location.pathname.endsWith('/game.html')
 const role = gamePage ? 'game' : 'pet'
+// Local v2 is the default authority. Packaged builds can set
+// VITE_QQPET_LOCAL_RUNTIME_V2_ROLLBACK=1; dev rollback is qqpet-local-runtime-v2=0.
+const LOCAL_RUNTIME_V2_ROLLBACK = import.meta.env.VITE_QQPET_LOCAL_RUNTIME_V2_ROLLBACK === '1'
+  || (import.meta.env.DEV && new URLSearchParams(location.search).get('qqpet-local-runtime-v2') === '0')
+const LOCAL_RUNTIME_V2_FLAG = LOCAL_RUNTIME_V2_ROLLBACK === false
+let localRuntimeFailure: string | undefined
+let localRuntime: MobileLocalRepositoryBridge | null = null
+let legacyV2DocumentPresent = false
+let legacyV2PresenceError: string | undefined
+const legacyAuthorityDisabled = (): boolean => LOCAL_RUNTIME_V2_FLAG || legacyV2DocumentPresent || legacyV2PresenceError !== undefined
 const capabilities: NonNullable<QQPetApi['capabilities']> = {
   rotatableScreen: true,
+  serverMode: false,
+  localRepositoryV2: false,
   autoStart: false,
   autoStartReason: '此 iOS 版本通过图标手动启动宠物，不安装开机自启服务。',
   clipboardWatch: false,
@@ -101,7 +122,7 @@ let geometry: ReturnType<typeof startGeometry> | null = null
 let tray: TrayState = 'leave'
 let postedTray = ''
 let safeAreaRequest = 0
-const gamePlayed = gameRewards(() => ready, () => writer?.generation, (minutes) => emit('gamePlayed', minutes))
+const gamePlayed = gameRewards(() => ready, () => writer?.generation, (minutes, windowId) => emit('gamePlayed', { minutes, windowId }))
 
 function reportError(operation: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error)
@@ -213,6 +234,7 @@ function requireOwner(): { save: SaveData; persistence: IOSSaveWriter } {
   return { save: model, persistence: writer }
 }
 function write(): void {
+  if (localRuntime !== null || legacyAuthorityDisabled()) return
   const { save, persistence } = requireOwner()
   void persistence.write(JSON.stringify(save)).then(savedStatus, (error) => reportError('save', error))
 }
@@ -230,6 +252,7 @@ function showTray(): void {
 /** Renderer flush settles Farm and its pending patch, then calls this API's native barrier. */
 async function flush(): Promise<void> {
   await ready
+  if (localRuntime !== null) { await localRuntime.flush(); return }
   if (writer) await writer.flush()
 }
 async function flushRenderer(): Promise<void> {
@@ -368,8 +391,36 @@ window.__qqpetIOS = {
 
 const api: QQPetApi = {
   capabilities,
-  async load() { await ready; if (!model) throw new Error('The pet save is unavailable.'); return cloneJson(model) },
+  runtimeInfo: async () => ({
+    localRepositoryV2: localRuntime !== null,
+    serverMode: false,
+    ...(localRuntimeFailure === undefined ? {} : { reason: localRuntimeFailure }),
+  }),
+  async command() {
+    throw new Error('local runtime v2 is not active')
+  },
+  async setAdvanceWhileEmpty() {
+    throw new Error('local runtime v2 is not active')
+  },
+  localSettings: {
+    async load() { throw new Error('local runtime v2 is not active') },
+    async update() { throw new Error('local runtime v2 is not active') },
+  },
+  onProjection() {},
+  onCommandResult() {},
+  onSyncStatus() {},
+  onResync() {},
+  async requestResync() {},
+  getProjection: () => null,
+  getStatus: () => legacyRendererStatus(),
+  async load() {
+    await ready
+    if (localRuntime !== null) return localRuntime.load()
+    if (model === null) throw new Error('The pet save is unavailable.')
+    return cloneJson(model)
+  },
   save(patch) {
+    if (legacyAuthorityDisabled()) throw new Error('legacy save(patch) is disabled while local runtime v2 is enabled')
     if (leaving) return
     const { save } = requireOwner()
     const copy = cloneJson(patch)
@@ -381,18 +432,36 @@ const api: QQPetApi = {
   flush,
   resetPet(sex) {
     void exclusive(async () => {
+      if (legacyAuthorityDisabled()) throw new Error('resetPet must use the command API while local runtime v2 is enabled')
       await flushRenderer()
       const { save } = requireOwner()
       await replaceSave(buried(cloneJson(save), sex), false)
     }).catch((error) => reportError('resetPet', error))
   },
   exportSave: () => exclusive(async () => {
+    const day = new Date().toISOString().slice(0, 10)
+    if (localRuntime !== null) {
+      await flushRenderer()
+      const text = await localRuntime.exportPortableBundleJson()
+      return await rpc.request<boolean>('exportSave', { name: `QQPet-portable-${day}.json`, text }, { timeout: 0 })
+    }
+    if (legacyAuthorityDisabled()) throw new Error('local runtime v2 unavailable: ' + (localRuntimeFailure ?? 'unknown'))
     await flushRenderer()
     const { save } = requireOwner()
-    const day = new Date().toISOString().slice(0, 10)
     return await rpc.request<boolean>('exportSave', { name: `QQPet-${day}.json`, text: JSON.stringify(save, null, 2) }, { timeout: 0 })
   }),
   importSave: () => exclusive(async () => {
+    if (localRuntime !== null) {
+      await flushRenderer()
+      const text = await rpc.request<string | null>('importSave', {}, { timeout: 0 })
+      if (text === null) return
+      if (typeof text !== 'string') throw new Error('The picker did not return a portable bundle.')
+      await localRuntime.importPortableBundleJson(text)
+      leaving = true
+      location.reload()
+      return
+    }
+    if (legacyAuthorityDisabled()) throw new Error('local runtime v2 unavailable: ' + (localRuntimeFailure ?? 'unknown'))
     await flushRenderer()
     requireOwner()
     const text = await rpc.request<string | null>('importSave', {}, { timeout: 0 })
@@ -405,7 +474,7 @@ const api: QQPetApi = {
     await flushRenderer()
     await replaceSave(startSave(pet), true)
   }),
-  openGame(swf) { void exclusive(async () => { await flushRenderer(); const { persistence } = requireOwner(); await rpc.request('openGame', { swf, generation: persistence.generation }) }).catch((error) => reportError('openGame', error)) },
+  openGame(swf, windowId) { void exclusive(async () => { await flushRenderer(); const { persistence } = requireOwner(); await rpc.request('openGame', openGameRequest(swf, windowId, persistence.generation)) }).catch((error) => reportError('openGame', error)) },
   closeGame: () => command('closeGame'),
   calendar: () => calendar(nativeFetch),
   aiModels: (config) => aiModels(nativeFetch, config),
@@ -415,6 +484,16 @@ const api: QQPetApi = {
   latestRelease: () => latestRelease(nativeFetch),
   quit() {
     if (gamePage) { command('closeGame'); return }
+    if (localRuntime !== null) {
+      const runtime = localRuntime
+      void exclusive(async () => {
+        await runtime.flush()
+        await runtime.stop()
+        leaving = true
+        await rpc.request('quit', {})
+      }).catch((error) => { leaving = false; reportError('quit', error) })
+      return
+    }
     void exclusive(async () => { await flushRenderer(); leaving = true; const { persistence } = requireOwner(); await rpc.request('quit', { generation: persistence.generation }) }).catch((error) => { leaving = false; reportError('quit', error) })
   },
   copyText: (text) => command('copyText', { text }),
@@ -433,9 +512,12 @@ const api: QQPetApi = {
   setTrayState(state) { tray = state; showTray() },
   onCursor: (listener) => listen('cursor', listener),
   onTrayClick: (listener) => listen('trayClick', listener),
-  onGamePlayed: (listener) => listen('gamePlayed', listener),
+  onGamePlayed: (listener) => listen('gamePlayed', (played) => listener(played.minutes, played.windowId)),
   onClipboard: (listener) => listen('clipboard', listener),
-  onPresence: (listener) => listen('presence', listener),
+  onPresence: (listener) => listen('presence', (away) => {
+    if (localRuntime !== null) void (away ? localRuntime.suspend() : localRuntime.resume())
+    listener(away)
+  }),
   onFront: (listener) => listen('front', listener),
 }
 window.qqpet = api
@@ -448,6 +530,75 @@ const ready: Promise<void> = rpc.request<Bootstrap>('bootstrap', { role }).then(
   Object.assign(capabilities, bootstrap.capabilities ?? {})
   // This build deliberately has no daemon; imported desktop preferences cannot enable one.
   capabilities.autoStart = false
+  if (LOCAL_RUNTIME_V2_FLAG === false && gamePage === false) {
+    const readCapability = bootstrap.capabilities?.localRuntimeV2Storage === true
+    const readResult = readCapability
+      ? await rpc.request<unknown>('readLocalStateFile', { name: 'save.v2.json' })
+      : undefined
+    const legacyAuthorityProbe = resolveMobileLegacyAuthority({
+      devRuntimeFlag: false,
+      readCapability,
+      readResult,
+      encoding: 'object',
+    })
+    legacyV2DocumentPresent = legacyAuthorityProbe.v2DocumentPresent
+    legacyV2PresenceError = legacyAuthorityProbe.error
+    if (legacyAuthorityProbe.failure !== undefined) localRuntimeFailure = legacyAuthorityProbe.failure
+    if (legacyAuthorityProbe.error !== undefined || legacyAuthorityProbe.v2DocumentPresent) {
+      capabilities.localRepositoryV2 = false
+      capabilities.localRepositoryV2Reason = localRuntimeFailure
+        ?? legacyAuthorityProbe.error
+        ?? 'local-v2 presence check failed'
+      throw new Error(capabilities.localRepositoryV2Reason)
+    }
+  }
+  if (LOCAL_RUNTIME_V2_FLAG && gamePage === false) {
+    try {
+      if (bootstrap.capabilities?.localRuntimeV2Storage !== true) {
+        throw new Error('native local-runtime-v2 storage capability is missing')
+      }
+      if (webCryptoAvailable() === false) throw new Error('Web Crypto getRandomValues is unavailable')
+      const runtime = createMobileLocalRepositoryBridge({
+        storage: iosLocalRepositoryStorage({ request: (op, args) => rpc.request(op, args) }),
+        devRuntimeFlag: true,
+        rendererCapability: true,
+        autoScheduler: true,
+      })
+      localRuntime = runtime
+      localRuntimeFailure = undefined
+      capabilities.localRepositoryV2 = true
+      delete capabilities.localRepositoryV2Reason
+      api.runtimeInfo = async () => runtime.runtimeInfo()
+      api.command = runtime.command.bind(runtime)
+      api.setAdvanceWhileEmpty = async (enabled) => { await runtime.setAdvanceWhileEmpty(enabled) }
+      api.localSettings = {
+        load: () => runtime.localSettings.load(),
+        update: patch => runtime.localSettings.update(patch),
+      }
+      api.onProjection = listener => runtime.onProjection(listener)
+      api.onResync = listener => runtime.onResync(listener)
+      api.requestResync = async () => runtime.requestResync()
+      api.onCommandResult = listener => runtime.onCommandResult(listener)
+      api.onSyncStatus = listener => runtime.onSyncStatus(listener)
+      api.getProjection = () => runtime.getProjection()
+      api.getStatus = () => runtime.getStatus()
+      runtime.onProjection((projection) => {
+        model = projection.save
+        showTray()
+      })
+      model = await runtime.load()
+      geometry = startGeometry(rpc)
+      showTray()
+      await safeArea()
+      rpc.notify('status', { role, state: 'ready', havePet: model.havePet, localRuntimeV2: true })
+      return
+    } catch (error) {
+      localRuntimeFailure = error instanceof Error ? error.message : String(error)
+      capabilities.localRepositoryV2 = false
+      capabilities.localRepositoryV2Reason = localRuntimeFailure
+      throw error
+    }
+  }
   let stored: Record<string, any> | null = null
   if (bootstrap.save !== null && bootstrap.save !== '') {
     if (typeof bootstrap.save !== 'string') throw new Error('Native bootstrap returned an invalid save.')
@@ -480,6 +631,18 @@ const ready: Promise<void> = rpc.request<Bootstrap>('bootstrap', { role }).then(
 window.__qqpetReady = ready
 const stopTextInput = gamePage ? () => {} : installTextInput(rpc, flushRenderer, (error) => reportError('editText', error))
 void ready.catch((error) => reportError('bootstrap', error))
+if (LOCAL_RUNTIME_V2_FLAG && gamePage === false) {
+  addEventListener('pagehide', () => {
+    if (leaving || localRuntime === null) return
+    const runtime = localRuntime
+    void runtime.flush().then(() => runtime.suspend()).catch((error) => reportError('pagehide-local-runtime', error))
+  })
+  document.addEventListener('visibilitychange', () => {
+    if (leaving || localRuntime === null) return
+    if (document.visibilityState === 'hidden') void localRuntime.suspend()
+    else void localRuntime.resume()
+  })
+}
 let safeAreaRootWidth = document.documentElement.clientWidth
 let safeAreaRootHeight = document.documentElement.clientHeight
 const safeAreaObserver = new ResizeObserver(() => {

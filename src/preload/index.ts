@@ -1,18 +1,64 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, type QQPetApi } from '../shared/ipc'
+import type { StorageApi } from '../shared/storage'
+import { createRendererRuntimePreload } from './renderer-api'
 
 const send =
   (channel: string) =>
   (arg?: unknown): void =>
     ipcRenderer.send(channel, arg)
 
+/** Some channels carry more than one argument; openGame needs its renderer window id. */
+const sendArgs =
+  (channel: string) =>
+  (...args: unknown[]): void => {
+    ipcRenderer.send(channel, ...args)
+  }
+
+const runtime = createRendererRuntimePreload(ipcRenderer)
+
+/** C11 storage/admin surface; desktop-only and routed through the storage controller. */
+const storage: StorageApi = {
+  status: () => ipcRenderer.invoke(IPC.storageStatus),
+  setMode: (input) => ipcRenderer.invoke(IPC.storageSetMode, input),
+  pair: (input) => ipcRenderer.invoke(IPC.storagePair, input),
+  unpair: () => ipcRenderer.invoke(IPC.storageUnpair),
+  listDevices: () => ipcRenderer.invoke(IPC.storageDeviceList),
+  revokeDevice: (deviceId) => ipcRenderer.invoke(IPC.storageDeviceRevoke, deviceId),
+  setAdvanceWhileEmpty: (enabled) => ipcRenderer.invoke(IPC.setAdvanceWhileEmpty, enabled),
+  setTimeZone: (timeZone) => ipcRenderer.invoke(IPC.storageSetTimeZone, timeZone),
+  setWeatherCity: (city) => ipcRenderer.invoke(IPC.storageSetWeatherCity, city),
+  exportBundle: () => ipcRenderer.invoke(IPC.storageExportBundle),
+  importBundle: (input) => ipcRenderer.invoke(IPC.storageImportBundle, input),
+  importBundleDialog: (options) => ipcRenderer.invoke(IPC.storageImportDialog, options),
+  retryHandoff: () => ipcRenderer.invoke(IPC.storageRetryHandoff),
+  rollbackHandoff: () => ipcRenderer.invoke(IPC.storageRollbackHandoff),
+  createBackup: () => ipcRenderer.invoke(IPC.storageCreateBackup),
+  onStatus: (listener) => {
+    ipcRenderer.removeAllListeners(IPC.storageStatusEvent)
+    ipcRenderer.on(IPC.storageStatusEvent, (_e, value) => listener(value))
+  },
+  onDevices: (listener) => {
+    ipcRenderer.removeAllListeners(IPC.storageDevicesEvent)
+    ipcRenderer.on(IPC.storageDevicesEvent, (_e, value) => listener(value))
+  },
+}
+
 const api: QQPetApi = {
+  capabilities: { serverMode: true },
   load: () => ipcRenderer.invoke(IPC.load),
   save: send(IPC.save),
+  ...runtime,
+  storage,
+  remote: {
+    status: () => ipcRenderer.invoke(IPC.remoteStatus),
+    pair: (input) => ipcRenderer.invoke(IPC.remotePair, input),
+    revoke: () => ipcRenderer.invoke(IPC.remoteRevoke),
+  },
   resetPet: send(IPC.resetPet),
   exportSave: () => ipcRenderer.invoke(IPC.exportSave),
   importSave: () => ipcRenderer.invoke(IPC.importSave),
-  openGame: send(IPC.openGame),
+  openGame: sendArgs(IPC.openGame),
   calendar: () => ipcRenderer.invoke(IPC.calendar),
   aiModels: (c) => ipcRenderer.invoke(IPC.aiModels, c),
   aiChat: (c, messages) => ipcRenderer.invoke(IPC.aiChat, c, messages),
@@ -52,7 +98,7 @@ const api: QQPetApi = {
     ipcRenderer.removeAllListeners(IPC.trayHoverLeave)
     ipcRenderer.on(IPC.trayHoverLeave, () => listener())
   },
-  onGamePlayed: (listener) => ipcRenderer.on(IPC.gamePlayed, (_e, m) => listener(m)),
+  onGamePlayed: (listener) => ipcRenderer.on(IPC.gamePlayed, (_e, m, windowId) => listener(m, windowId)),
   onClipboard: (listener) => ipcRenderer.on(IPC.clipboard, (_e, text) => listener(text)),
   onPresence: (listener) => ipcRenderer.on(IPC.presence, (_e, away) => listener(away)),
   onFront: (listener) => ipcRenderer.on(IPC.front, (_e, name) => listener(name)),

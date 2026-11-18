@@ -1,4 +1,5 @@
-import { claim, TABS, tasks, type Tab } from '../pet/tasks'
+import { claim, claimRuntime, TABS, tasks, type Tab } from '../pet/tasks'
+import { onStoreEvent, runtimeProjectionMode } from '../pet/store'
 import { openBox } from './box'
 import './css/task.css'
 import { button, div, img } from './dom'
@@ -23,6 +24,13 @@ export function openTask(): void {
       reward.textContent = t.take ? '✓ 已领取' : ready ? '领取奖励' : '未达成'
       reward.addEventListener('click', () => {
         if (!ready) return
+        if (runtimeProjectionMode) {
+          void claimRuntime(tab, i).then((goods) => {
+            render()
+            if (goods !== null) showResult(root, goods)
+          })
+          return
+        }
         const goods = claim(tab, i)
         render()
         showResult(root, goods || [], '还没完成任务哦！~~')
@@ -50,5 +58,13 @@ export function openTask(): void {
     root.replaceChildren(div('task fC', div('t_top f1 fC h0', div('t_title', '活动列表'), div('t_tabs', ...tabs), div('tasks f1 mt8 h0', ...items))))
   }
   render()
-  openBox(root, { onClose: () => (open = false) })
+  const stopProjection = onStoreEvent((event) => {
+    if ((event.type === 'task.progress' || event.type === 'task.claimed') && open) render()
+  })
+  openBox(root, {
+    onClose: () => {
+      stopProjection()
+      open = false
+    },
+  })
 }

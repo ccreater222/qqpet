@@ -11,7 +11,13 @@
     "predev": "install-electron",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.harmony.json",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.harmony.json && tsc --noEmit -p tsconfig.e2e.json",
+    "test:e2e": "node scripts/e2e/renderer-e2e.mjs",
+    "smoke:compose": "node scripts/compose-smoke.mjs",
+    "smoke:docker": "node scripts/docker-smoke.mjs",
+    "smoke:proxy": "node scripts/e2e/proxy-smoke.mjs",
+    "validate:evidence": "node scripts/validate-evidence.mjs",
+    "gate:acceptance": "node scripts/acceptance-gate.mjs",
     "import-assets": "node scripts/import-assets.mjs",
     "prepare:ios-assets": "node scripts/prepare-ios-assets.mjs",
     "check:ios-assets": "node scripts/prepare-ios-assets.mjs --check",
@@ -22,9 +28,12 @@
     "build:android-web": "vite build -c vite.android.config.ts",
     "android": "npm run typecheck && npm run build:android-web && cd android && ./gradlew assembleDebug",
     "build:harmony-web": "vite build -c vite.harmony.config.ts",
-    "harmony": "npm run typecheck && npm run build:harmony-web && node scripts/pack-harmony.mjs && cd harmony && ./hvigorw assembleHap -p product=default -p buildMode=debug"
+    "harmony": "npm run typecheck && npm run build:harmony-web && node scripts/pack-harmony.mjs && cd harmony && ./hvigorw assembleHap -p product=default -p buildMode=debug",
+    "test:e2e:main-process": "node scripts/e2e/run-e2e.mjs"
   },
   "devDependencies": {
+    "@babel/parser": "^7.29.9",
+    "@babel/traverse": "^7.29.8",
     "@electron/asar": "^4.3.1",
     "@ruffle-rs/ruffle": "0.6.0",
     "@types/node": "^24.9.0",
@@ -32,6 +41,7 @@
     "electron": "^44.6.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "playwright-core": "^1.64.1",
     "typescript": "^7.0.2",
     "vite": "^7.3.7",
     "vite-plugin-static-copy": "^4.1.1"

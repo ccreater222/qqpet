@@ -3,7 +3,7 @@ import { toolbarScaleFor } from '../../shared/layout'
 import { listGoods, onGoodsChange, pageOf, type Page } from '../pet/goods'
 import { doctor, useItem } from '../pet/items'
 import { describeStudy, describeWork, study, studyGoods, work, workGoods } from '../pet/jobs'
-import { info, onInfoChange, petSize, save } from '../pet/store'
+import { info, onInfoChange, petSize, runtimeProjectionMode, save } from '../pet/store'
 import { viewportSize } from './viewport'
 import './css/control.css'
 import { button, div, img, touch } from './dom'
@@ -12,12 +12,14 @@ import { openEmail } from './email'
 import { openFarm } from './farm'
 import { openFishing } from './fishing'
 import { openGames } from './games'
+import { openIslandRuntime } from './island-runtime'
 import { openMstx } from './mstx'
 import { openPetInfo } from './petinfo'
 import { progress } from './progress'
 import { openSetup } from './setup'
 import { openShop } from './shop'
 import { openSignIn } from './signin'
+import { visitFriend } from './visit'
 import { setBubbleLift } from './talk'
 import { openTask } from './task'
 import { openTravel } from './travel'
@@ -130,6 +132,22 @@ const MENU: { name: string; icon: string; children?: Entry[]; run?: () => void }
   { name: '档案', icon: 'dangan.png', run: openPetInfo },
 ]
 
+/** Runtime mode exposes converted panels only: fishing, farm, games, the command-driven island and LAN visits. */
+const runtimeMenu = MENU.map((group) =>
+  group.name === '活动'
+    ? {
+        ...group,
+        children: [
+          ...(group.children
+            ?.map((child) => (child.name === '社区' ? { ...child, name: '企鹅岛', run: openIslandRuntime } : child))
+            .filter((child) => child.name === '池塘' || child.name === '游戏' || child.name === '企鹅岛' || child.name === '农场') ?? []),
+          { name: '找朋友玩', icon: 'chongwu.png', run: visitFriend },
+        ],
+      }
+    : group,
+).filter((group) => group.children === undefined || group.children.length > 0)
+const visibleMenu = runtimeProjectionMode ? runtimeMenu : MENU
+
 const control = div('control')
 control.dataset.hit = ''
 document.body.appendChild(div('ui-control', control))
@@ -204,7 +222,7 @@ function pick(run: () => void): void {
 const icons: HTMLElement[] = []
 const menus = div(
   'menus fcc',
-  ...MENU.map((g) => {
+  ...visibleMenu.map((g) => {
     const icon = div('menuItemIconBox', img('menuItemIcon', ICONS + g.icon))
     icons.push(icon)
     const item = div(

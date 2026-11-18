@@ -1,0 +1,438 @@
+{
+  "crops": [
+    {
+      "seed": "StrawberrySeed",
+      "name": "草莓",
+      "crop": "Strawberry",
+      "time": 86400,
+      "experience": 26,
+      "yield": 24,
+      "price": 18
+    },
+    {
+      "seed": "RadishSeed",
+      "name": "白萝卜",
+      "crop": "Radish",
+      "time": 50400,
+      "experience": 10,
+      "yield": 24,
+      "price": 18
+    },
+    {
+      "seed": "CarrotSeed",
+      "name": "胡萝卜",
+      "crop": "Carrot",
+      "time": 57600,
+      "experience": 12,
+      "yield": 25,
+      "price": 20
+    },
+    {
+      "seed": "MaizeSeed",
+      "name": "玉米",
+      "crop": "Maize",
+      "time": 68400,
+      "experience": 22,
+      "yield": 20,
+      "price": 28
+    },
+    {
+      "seed": "PotatoSeed",
+      "name": "土豆",
+      "crop": "Potato",
+      "time": 61200,
+      "experience": 14,
+      "yield": 22,
+      "price": 22
+    },
+    {
+      "seed": "TomatoSeed",
+      "name": "西红柿",
+      "crop": "Tomato",
+      "time": 64800,
+      "experience": 18,
+      "yield": 26,
+      "price": 24
+    },
+    {
+      "seed": "MelongenaSeed",
+      "name": "茄子",
+      "crop": "Melongena",
+      "time": 72000,
+      "experience": 20,
+      "yield": 26,
+      "price": 24
+    },
+    {
+      "seed": "PeaSeed",
+      "name": "豌豆",
+      "crop": "Pea",
+      "time": 72000,
+      "experience": 20,
+      "yield": 26,
+      "price": 24
+    },
+    {
+      "seed": "ChiliSeed",
+      "name": "辣椒",
+      "crop": "Chili",
+      "time": 57600,
+      "experience": 16,
+      "yield": 22,
+      "price": 22
+    },
+    {
+      "seed": "PumpkinSeed",
+      "name": "南瓜",
+      "crop": "Pumpkin",
+      "time": 79200,
+      "experience": 28,
+      "yield": 28,
+      "price": 30
+    },
+    {
+      "seed": "AppleSeed",
+      "name": "苹果",
+      "crop": "Apple",
+      "time": 72000,
+      "experience": 12,
+      "yield": 24,
+      "price": 18
+    },
+    {
+      "seed": "GrapeSeed",
+      "name": "葡萄",
+      "crop": "Grape",
+      "time": 61200,
+      "experience": 11,
+      "yield": 24,
+      "price": 18
+    },
+    {
+      "seed": "PeachSeed",
+      "name": "桃子",
+      "crop": "Peach",
+      "time": 57600,
+      "experience": 14,
+      "yield": 25,
+      "price": 20
+    },
+    {
+      "seed": "WatermelonSeed",
+      "name": "西瓜",
+      "crop": "Watermelon",
+      "time": 68400,
+      "experience": 15,
+      "yield": 25,
+      "price": 20
+    },
+    {
+      "seed": "BananaSeed",
+      "name": "香蕉",
+      "crop": "Banana",
+      "time": 72000,
+      "experience": 18,
+      "yield": 22,
+      "price": 22
+    },
+    {
+      "seed": "OrangeSeed",
+      "name": "橘子",
+      "crop": "Orange",
+      "time": 86400,
+      "experience": 26,
+      "yield": 28,
+      "price": 30
+    },
+    {
+      "seed": "PomegranateSeed",
+      "name": "石榴",
+      "crop": "Pomegranate",
+      "time": 97200,
+      "experience": 20,
+      "yield": 30,
+      "price": 32
+    },
+    {
+      "seed": "PineappleSeed",
+      "name": "菠萝",
+      "crop": "Pineapple",
+      "time": 100800,
+      "experience": 18,
+      "yield": 26,
+      "price": 24
+    },
+    {
+      "seed": "PomeloSeed",
+      "name": "柚子",
+      "crop": "Pomelo",
+      "time": 79200,
+      "experience": 32,
+      "yield": 20,
+      "price": 28
+    },
+    {
+      "seed": "CoconutSeed",
+      "name": "椰子",
+      "crop": "Coconut",
+      "time": 108000,
+      "experience": 28,
+      "yield": 30,
+      "price": 35
+    }
+  ],
+  "seeds": [
+    {
+      "seed": "StrawberrySeed",
+      "name": "草莓",
+      "price": 130,
+      "rank": 6,
+      "maturation": 24,
+      "experience": 26,
+      "yield": 24,
+      "cropPrice": 18,
+      "type": "一季作物"
+    },
+    {
+      "seed": "RadishSeed",
+      "name": "白萝卜",
+      "price": 80,
+      "rank": 1,
+      "maturation": 14,
+      "experience": 10,
+      "yield": 24,
+      "cropPrice": 18,
+      "type": "一季作物"
+    },
+    {
+      "seed": "CarrotSeed",
+      "name": "胡萝卜",
+      "price": 90,
+      "rank": 2,
+      "maturation": 16,
+      "experience": 12,
+      "yield": 25,
+      "cropPrice": 20,
+      "type": "一季作物"
+    },
+    {
+      "seed": "MaizeSeed",
+      "name": "玉米",
+      "price": 105,
+      "rank": 5,
+      "maturation": 19,
+      "experience": 22,
+      "yield": 20,
+      "cropPrice": 28,
+      "type": "一季作物"
+    },
+    {
+      "seed": "PotatoSeed",
+      "name": "土豆",
+      "price": 120,
+      "rank": 3,
+      "maturation": 17,
+      "experience": 14,
+      "yield": 22,
+      "cropPrice": 22,
+      "type": "一季作物"
+    },
+    {
+      "seed": "TomatoSeed",
+      "name": "西红柿",
+      "price": 110,
+      "rank": 4,
+      "maturation": 18,
+      "experience": 18,
+      "yield": 26,
+      "cropPrice": 24,
+      "type": "一季作物"
+    },
+    {
+      "seed": "MelongenaSeed",
+      "name": "茄子",
+      "price": 120,
+      "rank": 4,
+      "maturation": 20,
+      "experience": 20,
+      "yield": 26,
+      "cropPrice": 24,
+      "type": "一季作物"
+    },
+    {
+      "seed": "PeaSeed",
+      "name": "豌豆",
+      "price": 120,
+      "rank": 4,
+      "maturation": 20,
+      "experience": 20,
+      "yield": 26,
+      "cropPrice": 24,
+      "type": "一季作物"
+    },
+    {
+      "seed": "ChiliSeed",
+      "name": "辣椒",
+      "price": 110,
+      "rank": 3,
+      "maturation": 16,
+      "experience": 16,
+      "yield": 22,
+      "cropPrice": 22,
+      "type": "一季作物"
+    },
+    {
+      "seed": "PumpkinSeed",
+      "name": "南瓜",
+      "price": 300,
+      "rank": 7,
+      "maturation": 22,
+      "experience": 28,
+      "yield": 28,
+      "cropPrice": 30,
+      "type": "二季作物"
+    },
+    {
+      "seed": "AppleSeed",
+      "name": "苹果",
+      "price": 75,
+      "rank": 1,
+      "maturation": 20,
+      "experience": 12,
+      "yield": 24,
+      "cropPrice": 18,
+      "type": "一季作物"
+    },
+    {
+      "seed": "GrapeSeed",
+      "name": "葡萄",
+      "price": 70,
+      "rank": 1,
+      "maturation": 17,
+      "experience": 11,
+      "yield": 24,
+      "cropPrice": 18,
+      "type": "一季作物"
+    },
+    {
+      "seed": "PeachSeed",
+      "name": "桃子",
+      "price": 85,
+      "rank": 2,
+      "maturation": 16,
+      "experience": 14,
+      "yield": 25,
+      "cropPrice": 20,
+      "type": "一季作物"
+    },
+    {
+      "seed": "WatermelonSeed",
+      "name": "西瓜",
+      "price": 90,
+      "rank": 2,
+      "maturation": 19,
+      "experience": 15,
+      "yield": 25,
+      "cropPrice": 20,
+      "type": "一季作物"
+    },
+    {
+      "seed": "BananaSeed",
+      "name": "香蕉",
+      "price": 95,
+      "rank": 3,
+      "maturation": 20,
+      "experience": 18,
+      "yield": 22,
+      "cropPrice": 22,
+      "type": "一季作物"
+    },
+    {
+      "seed": "OrangeSeed",
+      "name": "橘子",
+      "price": 160,
+      "rank": 7,
+      "maturation": 24,
+      "experience": 26,
+      "yield": 28,
+      "cropPrice": 30,
+      "type": "二季作物"
+    },
+    {
+      "seed": "PomegranateSeed",
+      "name": "石榴",
+      "price": 170,
+      "rank": 8,
+      "maturation": 27,
+      "experience": 20,
+      "yield": 30,
+      "cropPrice": 32,
+      "type": "三季作物"
+    },
+    {
+      "seed": "PineappleSeed",
+      "name": "菠萝",
+      "price": 110,
+      "rank": 4,
+      "maturation": 28,
+      "experience": 18,
+      "yield": 26,
+      "cropPrice": 24,
+      "type": "一季作物"
+    },
+    {
+      "seed": "PomeloSeed",
+      "name": "柚子",
+      "price": 120,
+      "rank": 5,
+      "maturation": 22,
+      "experience": 32,
+      "yield": 20,
+      "cropPrice": 28,
+      "type": "二季作物"
+    },
+    {
+      "seed": "CoconutSeed",
+      "name": "椰子",
+      "price": 190,
+      "rank": 9,
+      "maturation": 30,
+      "experience": 28,
+      "yield": 30,
+      "cropPrice": 35,
+      "type": "三季作物"
+    }
+  ],
+  "fertilizers": [
+    {
+      "item": "Fertilizer",
+      "name": "普通化肥",
+      "duration": 7200,
+      "price": 500
+    },
+    {
+      "item": "FertilizerFast",
+      "name": "快速化肥",
+      "duration": 12600,
+      "price": 800
+    },
+    {
+      "item": "FertilizerVeryFast",
+      "name": "急速化肥",
+      "duration": 18000,
+      "price": 1000
+    },
+    {
+      "item": "FertilizerFastP",
+      "name": "快速化肥5+2礼包",
+      "duration": 12600,
+      "price": 4000
+    },
+    {
+      "item": "FertilizerVeryFastP",
+      "name": "急速化肥5+2礼包",
+      "duration": 18000,
+      "price": 5000
+    }
+  ]
+}

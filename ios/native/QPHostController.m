@@ -63,6 +63,51 @@ static NSString *QPJSON(id value) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:value ?: NSNull.null options:NSJSONWritingFragmentsAllowed error:NULL];
     return data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"null";
 }
+static NSDictionary *QPLocalReadOK(NSString *text) {
+    return @{@"status":@"ok",@"text":text ?: (id)NSNull.null};
+}
+static NSDictionary *QPLocalReadError(NSString *message) {
+    return @{@"status":@"error",@"error":message ?: @"native state read failed"};
+}
+static NSDictionary *QPLocalReadFile(NSString *path) {
+    NSError *error=nil;
+    NSData *data=[NSData dataWithContentsOfFile:path options:0 error:&error];
+    if (data == nil) {
+        if ([error.domain isEqual:NSCocoaErrorDomain] && error.code == NSFileReadNoSuchFileError) return QPLocalReadOK(nil);
+        return QPLocalReadError(error.localizedDescription);
+    }
+    NSString *text=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (text == nil) return QPLocalReadError(@"Local state is not UTF-8 text");
+    return QPLocalReadOK(text);
+}
+static NSDictionary *QPLegacySaveReadResult(QPState *state) {
+    NSError *recordError=nil;
+    NSData *recordData=[NSData dataWithContentsOfFile:[state path:@"save-record.json"] options:0 error:&recordError];
+    if (recordData != nil) {
+        id record=[NSJSONSerialization JSONObjectWithData:recordData options:0 error:NULL];
+        if ([record isKindOfClass:NSDictionary.class] && [record[@"text"] isKindOfClass:NSString.class]) {
+            return QPLocalReadOK(record[@"text"]);
+        }
+        return QPLocalReadError(@"Legacy save record is corrupt");
+    }
+    if (recordError == nil || ([recordError.domain isEqual:NSCocoaErrorDomain] && recordError.code == NSFileReadNoSuchFileError)) {
+        return QPLocalReadFile([state path:@"save.json"]);
+    }
+    return QPLocalReadError(recordError.localizedDescription);
+}
+static BOOL QPLocalStateName(NSString *name) {
+    if (name == nil || name.length == 0 || name.length > 128) return NO;
+    if ([name isEqual:@"save.v2.json"] || [name isEqual:@"save.v2.json.bak"] || [name isEqual:@"save.json.bak"]) return YES;
+    NSString *prefix = @"save.v2.json.corrupt-";
+    if ([name hasPrefix:prefix] == NO) return NO;
+    NSString *suffix = [name substringFromIndex:prefix.length];
+    if (suffix.length == 0) return NO;
+    for (NSUInteger index = 0; index < suffix.length; index++) {
+        unichar value = [suffix characterAtIndex:index];
+        if (value < '0' || value > '9') return NO;
+    }
+    return YES;
+}
 static CGRect QPBox(NSDictionary *box) { return CGRectMake([box[@"x"] doubleValue],[box[@"y"] doubleValue],[box[@"width"] doubleValue],[box[@"height"] doubleValue]); }
 static NSDictionary *QPRectState(CGRect rect) { return @{@"x":@(rect.origin.x),@"y":@(rect.origin.y),@"width":@(rect.size.width),@"height":@(rect.size.height)}; }
 static NSDictionary *QPSizeState(CGSize size) { return @{@"width":@(size.width),@"height":@(size.height)}; }
@@ -514,12 +559,32 @@ static UIEdgeInsets QPRotateSafeArea(UIEdgeInsets inset, UIInterfaceOrientation 
     void (^reply)(id,NSString *)=^(id value,NSString *error){ dispatch_async(dispatch_get_main_queue(),^{ [weakSelf resolve:request value:value error:error page:page]; }); };
     // Only the existing persistence barrier may finish after a fatal runtime
     // error. Stale focus, editor or game requests cannot reopen the HUD.
-    if (self.rendererFailed&&![@[@"writeSave",@"flushReady",@"cancel",@"status",@"rufflePanic",@"swfTerminalFailure",@"quit"] containsObject:op]) { reply(nil,@"The Flash runtime has stopped. Restart it from the manager."); return; }
+    if (self.rendererFailed&&![@[@"writeSave",@"flushReady",@"cancel",@"status",@"rufflePanic",@"swfTerminalFailure",@"quit",@"readLocalStateFile",@"readLegacySave",@"writeLocalStateFileAtomic"] containsObject:op]) { reply(nil,@"The Flash runtime has stopped. Restart it from the manager."); return; }
     if ([op isEqual:@"bootstrap"]) {
-        NSDictionary *capabilities=@{@"autoStart":@NO,@"autoStartReason":@"iOS 版由管理 App 手动启动，不安装后台守护程序。",@"clipboardWatch":@NO,@"frontWatch":@NO};
+        NSDictionary *capabilities=@{@"autoStart":@NO,@"autoStartReason":@"iOS 版由管理 App 手动启动，不安装后台守护程序。",@"clipboardWatch":@NO,@"frontWatch":@NO,@"localRuntimeV2Storage":@YES};
         UIUserInterfaceIdiom idiom=UIDevice.currentDevice.userInterfaceIdiom;
         NSString *deviceKind=idiom==UIUserInterfaceIdiomPad?@"tablet":(idiom==UIUserInterfaceIdiomPhone?@"phone":@"other");
         dispatch_async(self.state.fileQueue,^{ reply(@{@"save":[self.state readText:@"save.json"] ?: (id)NSNull.null,@"generation":self.state.generation,@"capabilities":capabilities,@"deviceKind":deviceKind},nil); });
+    } else if ([op isEqual:@"readLocalStateFile"] || [op isEqual:@"readLegacySave"] || [op isEqual:@"writeLocalStateFileAtomic"]) {
+        if ([self.role isEqual:@"pet"] == NO) { reply(nil,@"Only the pet renderer can access local runtime state."); return; }
+        if ([op isEqual:@"readLegacySave"]) {
+            dispatch_async(self.state.fileQueue,^{ reply(QPLegacySaveReadResult(self.state),nil); });
+            return;
+        }
+        NSString *name=args[@"name"];
+        BOOL writable=[op isEqual:@"writeLocalStateFileAtomic"];
+        if (QPLocalStateName(name) == NO) { reply(nil,@"Invalid local state filename."); return; }
+        if (writable == NO) {
+            dispatch_async(self.state.fileQueue,^{ reply(QPLocalReadFile([self.state path:name]),nil); });
+            return;
+        }
+        NSString *text=args[@"text"];
+        if ([text isKindOfClass:NSString.class] == NO) { reply(nil,@"Invalid local state content."); return; }
+        dispatch_async(self.state.fileQueue,^{
+            NSError *error=nil;
+            BOOL ok=[self.state writeText:text name:name error:&error];
+            reply(@(ok),error.localizedDescription);
+        });
     } else if ([@[@"writeSave",@"replaceSave",@"preserveCorrupt"] containsObject:op]) {
         if (![self.role isEqual:@"pet"]) { reply(nil,@"Only the pet renderer can write canonical save data."); return; }
         NSString *generation=args[@"generation"], *text=args[@"text"];

@@ -1,6 +1,8 @@
 import FRIES from '../pet/data/fries.json'
 import { pondCommand, pondRoom, pondState } from '../pet/fishing'
-import { info, save } from '../pet/store'
+import { info, onProjectionApplied, runtimeProjectionMode, save } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandErrorText, commandResultData, commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { patchSwfFetch } from '../swf/patch'
 import { SwfPlayer } from '../swf/player'
 import { openFrame } from './box'
@@ -40,8 +42,97 @@ export function openFishing(): void {
   window.before_pay = () => true
   window.confirm = () => true
 
+  const replyError = (cmd: number, result: Parameters<typeof commandSucceeded>[0]): void => {
+    const error = result && result.status === 'rejected' ? result.error : null
+    // Keep the legacy protocol: a failed purchase is code 1, every other
+    // rejected pond mutation is code 5 (the SWF shows msg as-is).
+    const code = cmd === 4 && error !== null && error.code === 'insufficient_funds' ? 1 : 5
+    void send(cmd, { result: code, msg: error === null ? '操作失败' : commandErrorText(error) })
+  }
+  const refreshFromProjection = (): void => {
+    // Never answer a refresh from the pre-command cache: wait for the next
+    // authoritative projection (with a bounded fallback) before sending state.
+    let done = false
+    const off = onProjectionApplied(() => {
+      if (done) return
+      done = true
+      off()
+      void send(1, pondState())
+    })
+    setTimeout(() => {
+      if (done) return
+      done = true
+      off()
+      void send(1, pondState())
+    }, 500)
+  }
+  const applyRuntime = (cmd: number, result: Parameters<typeof commandSucceeded>[0], success: Record<string, unknown>, refresh = false): void => {
+    if (commandSucceeded(result) === false) {
+      replyError(cmd, result)
+      return
+    }
+    void send(cmd, success)
+    if (refresh) refreshFromProjection()
+  }
+  const handleRuntimeCommand = (cmd: number, data: Record<string, unknown>): void => {
+    if (cmd === 1) return void send(1, pondState())
+    if (cmd === 3) return void send(3, pondCommand(3, { id: 0, paytype: 0, fryid: 0 }))
+    if (cmd === 2) {
+      const id = Number(data.id)
+      void dispatchRuntimeCommand(uiCommands.fishingFeed(id)).then((result) => applyRuntime(2, result, { id, result: 0 }, true))
+      return
+    }
+    if (cmd === 4) {
+      if (data.paytype === 1) {
+        const room = pondRoom()
+        const fry = FRIES.find((f) => f.fryid === data.fryid)
+        if (fry === undefined || room <= 0) return void send(4, { result: 5, msg: '已经满了' })
+        windowView({
+          title: '投放鱼苗',
+          msg: `投放${fry.name}，空位 ${room}，每条 ${fry.price_yb} 元宝`,
+          max: room,
+          init: 1,
+          ok: (close, num) => {
+            close()
+            void dispatchRuntimeCommand(uiCommands.fishingBuy(fry.fryid, num)).then((result) => {
+              applyRuntime(4, result, { result: 0 })
+              if (commandSucceeded(result)) {
+                cooldown.classList.add('controlTFActive')
+                setTimeout(() => cooldown.classList.remove('controlTFActive'), 1000)
+                refreshFromProjection()
+              }
+            })
+          },
+          cancel: () => void send(4, { result: 5, msg: '取消了' }),
+        })
+      } else void send(4, { result: 1 })
+      return
+    }
+    if (cmd === 5) {
+      const id = Number(data.id)
+      void dispatchRuntimeCommand(uiCommands.fishingHarvest(id)).then((result) => {
+        const payload = commandResultData<{ yb: number }>(result)
+        applyRuntime(5, result, { id, result: 0, yb: payload?.yb ?? 0, msg: '收获成功', growth: 0, strong: 0, charm: 0, iq: 0 }, true)
+      })
+      return
+    }
+    if (cmd === 7) {
+      void dispatchRuntimeCommand(uiCommands.fishingSpeedUp()).then((result) => applyRuntime(7, result, { result: 0 }, true))
+      return
+    }
+    if (cmd === 8) {
+      void dispatchRuntimeCommand(uiCommands.fishingHarvestAll()).then((result) => applyRuntime(8, result, { result: 6, msg: '收获成功' }, true))
+      return
+    }
+    void send(cmd, { result: 5, msg: '未知指令' })
+  }
+
   window.PETSendData = (json) => {
     const { head, data } = JSON.parse(json)
+    if (runtimeProjectionMode) {
+      handleRuntimeCommand(head.cmd as number, data as Record<string, unknown>)
+      return
+    }
     if (head.cmd === 4) {
       const room = pondRoom()
       const fry = FRIES.find((f) => f.fryid === data.fryid)

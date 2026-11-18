@@ -1,6 +1,15 @@
 import { windowView } from '../ui/window-view'
 import FRIES from './data/fries.json'
-import { earnYb, info, save, setInfo, update } from './store'
+import { earnYb, info, runtimeProjectionMode, save, setInfo, update } from './store'
+import { registerProjectionCacheInvalidator } from './projection-cache'
+
+/**
+ * Runtime authority is a boot-time constant in store. The pond module is also
+ * loaded standalone by the #123 regression harness (scripts/tests/pond-vip-feed.test.mjs),
+ * which runs this source without the renderer module graph; the undeclared
+ * `typeof` probe keeps that harness loadable and is always the real flag in the app.
+ */
+const runtimeMode = (): boolean => typeof runtimeProjectionMode !== 'undefined' && runtimeProjectionMode
 
 const HOUR = 3600
 const FEED_PRICE = 10
@@ -54,7 +63,7 @@ function load(): Pond {
   return { PD: p.PD ?? { allvipcnt: 0, canusecnt: 0 }, fishs }
 }
 
-const pond = load()
+let pond = load()
 const store = (): void => update('saveJsonData', { fishs: JSON.stringify(pond) })
 const now = (): number => Math.floor(Date.now() / 1000)
 const ripe = (f: Fish): boolean => f.stage >= 3
@@ -70,6 +79,11 @@ function grow(f: Fish, t: number): void {
 }
 
 let last = 0
+// The #123 standalone harness strips imports; only register when the real
+// projection-cache module is present (always true inside the renderer).
+if (typeof registerProjectionCacheInvalidator === 'function') {
+  registerProjectionCacheInvalidator('fishing', () => { pond = load(); last = 0 })
+}
 
 /** Same 06:00 day boundary as vip.dayStart; local copy avoids an import cycle. */
 function pondDay(t = now()): number {
@@ -94,6 +108,8 @@ function ensureVipFeed(): void {
 
 /** Grows every fish up to now; a clock set back empties the pond, as in the original. */
 function settle(): void {
+  // Runtime mode owns growth and the pond clock; the cache is projection-fed.
+  if (runtimeMode()) return
   const t = now()
   if (last > t) {
     // Empty once, then catch last up — leaving last in the future re-wiped canusecnt on every open (#123).
@@ -121,6 +137,7 @@ function harvested(n: number): void {
 }
 
 export function pondState(): Reply {
+  if (runtimeMode()) return { ...pond.PD, fishes: pond.fishs, harvestfish: save.gameSaveDatas.fishing_harvestfish, yb: info.yb }
   settle()
   return { ...pond.PD, fishes: pond.fishs, harvestfish: save.gameSaveDatas.fishing_harvestfish, yb: info.yb }
 }
@@ -143,6 +160,7 @@ const shop = (): Reply => ({ fries: FRIES.map((f) => ({ ...f, price_yb: info.pin
 export const pondCap = (): number => (info.pinkDiamond ? 5 : 3)
 
 export function pondRoom(): number {
+  if (runtimeMode()) return pondCap() - pond.fishs.length
   settle()
   return pondCap() - pond.fishs.length
 }
@@ -239,11 +257,15 @@ const COMMANDS: Record<number, (d: Data) => Reply> = {
 }
 
 export function pondCommand(cmd: number, data: Data): Reply {
+  // 1 (state) and 3 (shop) are pure reads. Every mutation must go through the
+  // runtime command bridge in runtime mode instead of this local engine.
+  if (runtimeMode() && cmd !== 1 && cmd !== 3) return { result: 5, msg: '该操作需要走运行时命令' }
   return COMMANDS[cmd]?.(data) ?? { result: 5, msg: `未知指令~ cmd:${cmd}  data:${JSON.stringify(data)}` }
 }
 
 /** 06:00, and pink diamond opened: the day's speed-ups, two per pink diamond level. */
 export function resetFish(): void {
+  if (runtimeMode()) return
   refillVipFeed()
   store()
 }

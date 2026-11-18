@@ -46,6 +46,9 @@ function fixture(platform) {
   }
   const api = platform === 'mobile' ? {} : load('../../src/preload/index.ts', {
     process: { platform }, IPC, ipcRenderer, contextBridge: { exposeInMainWorld() {} },
+    // C6 runtime methods have their own focused IPC test; this fixture only
+    // needs the tray/menu members of the preload API.
+    createRendererRuntimePreload: () => ({}),
   })
   const open = load('../../src/renderer/ui/menu.ts', {
     window: { qqpet: { ...api, quit: () => actions.push('quit') } },
@@ -58,6 +61,7 @@ function fixture(platform) {
     openState: () => actions.push('state'), openSetup: () => actions.push('setup'),
     update: (key, patch) => Object.assign(save[key], patch),
     setPaused: on => { save.settings.paused = on },
+    runtimeProjectionMode: false,
     speak: () => {},
   })
   return { open, save, tray, popups, clicks, actions, appended }
@@ -144,7 +148,7 @@ test('a pending outside-touch dismissal cannot close a newly requested tray menu
     setTimeout: fn => { const id = ++nextTimer; timers.set(id, fn); return id },
     clearTimeout: id => timers.delete(id),
     closeMenu: () => { f.appended.at(-1)?.remove() }, closeState() {},
-    openMenu: f.open, openState() {}, adoptPet() {},
+    openMenu: f.open, openState() {}, adoptPet() {}, startAdoption() {},
   }
   // Keep the fixture's actual menu creation/removal visible to the delayed callback.
   const append = f.appended.push.bind(f.appended)

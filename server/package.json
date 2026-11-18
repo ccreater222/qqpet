@@ -1,0 +1,32 @@
+{
+  "name": "qqpet-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone authority server for QQPet shared pet data",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "qqpet-server": "dist/server/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/fix-esm-imports.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "npm run build --silent && node --disable-warning=ExperimentalWarning --test dist/server/test/*.test.js",
+    "start": "npm run build --silent && node --disable-warning=ExperimentalWarning dist/server/src/index.js start",
+    "init": "npm run build --silent && node --disable-warning=ExperimentalWarning dist/server/src/index.js init",
+    "pair": "npm run build --silent && node --disable-warning=ExperimentalWarning dist/server/src/index.js pair",
+    "backup": "npm run build --silent && node --disable-warning=ExperimentalWarning dist/server/src/index.js backup",
+    "revoke-device": "npm run build --silent && node --disable-warning=ExperimentalWarning dist/server/src/index.js revoke-device",
+    "ctl": "npm run build --silent && node --disable-warning=ExperimentalWarning dist/server/src/index.js ctl"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^7.0.2"
+  }
+}

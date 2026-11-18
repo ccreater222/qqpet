@@ -18,6 +18,8 @@ const str =
 const nullable: Rule = (v) => (v === undefined ? null : v)
 const ANY = Infinity
 const AI_URL = 'http://127.0.0.1:8000/v1'
+/** Diamonds a new pet starts with; repairs also use it for saves that predate the field (#75). */
+export const INITIAL_DIAMOND_COUNT = 3
 const windowDirection = (v: unknown): 'auto' | 'screen' => (v === 'auto' || v === 'screen' ? v : 'auto')
 
 // Field repairs ported from the original main process: an invalid value is
@@ -41,7 +43,7 @@ const RULES: Record<string, Record<string, Rule>> = {
     lastX: num(0, ANY, -1),
     lastY: num(0, ANY, -1),
     yb: (v) => (isNum(v) ? v | 0 : 5000),
-    diamond: num(0, ANY, 3),
+    diamond: num(0, ANY, INITIAL_DIAMOND_COUNT),
     lastLoginTime: num(0, ANY, 0),
     onlineDataTime: num(0, ANY, 0),
     pinkDiamond: bool,
@@ -149,7 +151,7 @@ function fresh(): SaveData {
       lastX: -1,
       lastY: -1,
       yb: 5000,
-      diamond: 3,
+      diamond: INITIAL_DIAMOND_COUNT,
       lastLoginTime: 0,
       onlineDataTime: 0,
       pinkDiamond: false,

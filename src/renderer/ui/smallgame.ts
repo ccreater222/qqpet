@@ -1,9 +1,12 @@
 import { speak } from '../pet/pet'
-import { busy, earnYb, info, playingDesk, refreshTray, save, setDeskGame, setInfo, setTray, stage } from '../pet/store'
+import { busy, earnYb, info, playingDesk, refreshTray, runtimeProjectionMode, save, setDeskGame, setInfo, setTray, stage } from '../pet/store'
 import { addCount } from '../pet/tasks'
 import { SwfPlayer } from '../swf/player'
+import { uiCommands } from '../pet/command-map'
+import { commandResultData, dispatchRuntimeCommand } from '../pet/runtime-command'
 import './css/smallgame.css'
 import { button, div } from './dom'
+import { floatMood } from './float'
 
 /**
  * The original client's desktop games (pet/smallGame). Each SWF is its own
@@ -51,6 +54,9 @@ const wins = new Map<string, Win>()
 const inCall = new Set<Win>()
 let root: Win | null = null
 let dir = ''
+/** Active runtime game session; settled when the game window closes. */
+let runtimeSessionToken: string | null = null
+let runtimeStarting = false
 /** Above .smallGameWin's own z-index, or "topmost" would sink below every other window. */
 let top = 50
 
@@ -90,12 +96,31 @@ function finish(): void {
   setDeskGame('')
   document.getElementById('pet')!.hidden = false
   window.qqpet.setFocusable(false)
+  if (runtimeProjectionMode) {
+    const token = runtimeSessionToken
+    runtimeSessionToken = null
+    if (token !== null) {
+      void dispatchRuntimeCommand(uiCommands.gameReward(token)).then((result) => {
+        const data = commandResultData<{ minutes: number; yb: number; mood: number }>(result)
+        if (data === null || data.minutes <= 0) return
+        void floatMood(data.mood)
+        speak({ s: `[host]，陪我玩了${data.minutes}分钟小游戏，好开心！获得${data.yb}元宝~`, now: true }, 'speak')
+      })
+    }
+    refreshTray()
+    return
+  }
   addCount('GameRound')
   refreshTray()
 }
 
 function reward(w: Win): void {
   const mood = Math.min(REWARD.mood, save.petComputedlInfo.moodMax - info.mood)
+  if (runtimeProjectionMode) {
+    // Presentation only: the host settles the session once when the window closes.
+    call(w, 'TICKLE_OnResult', [mood, REWARD.yb])
+    return
+  }
   setInfo('mood', info.mood + mood)
   const yb = earnYb(REWARD.yb)
   call(w, 'TICKLE_OnResult', [mood, yb])
@@ -216,6 +241,26 @@ export function playSmallGame(g: (typeof SMALL_GAMES)[number]): void {
   const st = stage()
   if (st === 'Egg') return speak({ s: '[host]，我还是个蛋呢，等破壳了再陪你玩~', now: true }, 'speak')
   if (busy()) return speak({ s: '[host]，我正忙着呢，忙完再陪你玩~', now: true }, 'speak')
+  if (runtimeProjectionMode) {
+    void startRuntimeSmallGame(g)
+    return
+  }
+  openSmallGame(g)
+}
+
+async function startRuntimeSmallGame(g: (typeof SMALL_GAMES)[number]): Promise<void> {
+  if (runtimeStarting || root || playingDesk()) return
+  runtimeStarting = true
+  const result = await dispatchRuntimeCommand(uiCommands.gameStart(g.dir, 'small'))
+  const data = commandResultData<{ sessionToken: string }>(result)
+  runtimeStarting = false
+  if (data === null || root) return
+  runtimeSessionToken = data.sessionToken
+  openSmallGame(g)
+}
+
+function openSmallGame(g: (typeof SMALL_GAMES)[number]): void {
+  const st = stage()
   dir = g.dir
   setDeskGame(g.dir)
   const pet = document.getElementById('pet')!

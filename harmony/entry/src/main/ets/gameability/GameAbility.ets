@@ -4,10 +4,13 @@ import { PetHost } from '../pet/PetHost'
 
 export default class GameAbility extends UIAbility {
   private start: number = 0
+  private windowId: number = -1
 
   onCreate(want: Want, _launch: AbilityConstant.LaunchParam): void {
     this.start = Date.now()
     const swf = want.parameters?.['swf']
+    const windowId = want.parameters?.['windowId']
+    this.windowId = typeof windowId === 'number' ? windowId : -1
     AppStorage.setOrCreate('gameSwf', typeof swf === 'string' ? swf : '')
   }
 
@@ -18,7 +21,7 @@ export default class GameAbility extends UIAbility {
 
   onDestroy(): void {
     const minutes = (Date.now() - this.start) / 60000
-    PetHost.inst?.emit('gamePlayed', `${minutes}`)
+    PetHost.inst?.emit('gamePlayed', JSON.stringify({ minutes: minutes, windowId: this.windowId }))
     PetHost.inst?.setShown(true)
   }
 }

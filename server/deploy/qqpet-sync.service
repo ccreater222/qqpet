@@ -1,0 +1,32 @@
+[Unit]
+Description=QQPet sync authority server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qqpet-sync
+Group=qqpet-sync
+WorkingDirectory=/opt/qqpet-sync
+EnvironmentFile=/etc/qqpet-sync.env
+ExecStart=/usr/bin/node /opt/qqpet-sync/dist/server/src/index.js start
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+StateDirectory=qqpet-sync
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/qqpet-sync
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

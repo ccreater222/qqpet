@@ -1,6 +1,8 @@
 import GAMES from '../pet/data/games.json'
 import { speak } from '../pet/pet'
-import { addInfo, earnYb, growthPerMinute, info, save, setInfo } from '../pet/store'
+import { addInfo, earnYb, growthPerMinute, info, runtimeProjectionMode, save, setInfo } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandResultData, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { addCount, count } from '../pet/tasks'
 import { openBox } from './box'
 import './css/games.css'
@@ -14,7 +16,27 @@ let open = false
 /** Played minutes a day that earn rewards: 5 元宝, 2 mood and a minute's growth each. */
 const DAY_MINUTES = 60
 
-window.qqpet.onGamePlayed((minutes) => {
+/** Each flash-game window owns one active session; closes settle exactly that mapping. */
+const runtimeGameSessions = new Map<number, string>()
+let nextRuntimeGameWindow = 1
+
+window.qqpet.onGamePlayed((minutes, windowId) => {
+  if (runtimeProjectionMode) {
+    // Only a session started by this renderer may be settled; a gamePlayed from
+    // an unrelated window (or before the start resolved) is ignored.
+    const token = runtimeGameSessions.get(windowId)
+    runtimeGameSessions.delete(windowId)
+    if (token === undefined) return
+    // The host computes the capped minutes from its own game clock; the local
+    // report only tells us the window closed.
+    void dispatchRuntimeCommand(uiCommands.gameReward(token)).then((result) => {
+      const data = commandResultData<{ minutes: number; yb: number; mood: number }>(result)
+      if (data === null || data.minutes <= 0) return
+      void floatMood(data.mood)
+      speak({ s: `[host]，陪我玩了${data.minutes}分钟小游戏，好开心！获得${data.yb}元宝~`, now: true }, 'speak')
+    })
+    return
+  }
   if (minutes < 1) return
   addCount('GameRound')
   const m = Math.min(Math.floor(minutes), DAY_MINUTES - count('Game'))
@@ -26,6 +48,18 @@ window.qqpet.onGamePlayed((minutes) => {
   void floatMood(2 * m)
   speak({ s: `[host]，陪我玩了${m}分钟小游戏，好开心！获得${got}元宝~`, now: true }, 'speak')
 })
+
+/** Starts a server-owned flash-game session, then opens the legacy SWF window. */
+async function startFlashGame(gameId: string): Promise<void> {
+  const windowId = nextRuntimeGameWindow++
+  if (runtimeProjectionMode) {
+    const result = await dispatchRuntimeCommand(uiCommands.gameStart(gameId, 'flash'))
+    const data = commandResultData<{ sessionToken: string }>(result)
+    if (data === null) return
+    runtimeGameSessions.set(windowId, data.sessionToken)
+  }
+  window.qqpet.openGame(gameId, windowId)
+}
 
 /** Game picker: the desktop games play with the pet, the rest open in their own window. */
 export function openGames(): void {
@@ -55,7 +89,18 @@ export function openGames(): void {
         },
       ],
     },
-    ...GAMES.map((c) => ({ name: c.name, games: c.games.map((g) => ({ name: g, icon: undefined as string | undefined, run: () => window.qqpet.openGame(`${c.dir}/${g}.swf`) })) })),
+    ...GAMES.map((c) => ({
+      name: c.name,
+      games: c.games.map((g) => ({
+        name: g,
+        icon: undefined as string | undefined,
+        run: () => {
+          close()
+          open = false
+          void startFlashGame(`${c.dir}/${g}.swf`)
+        },
+      })),
+    })),
   ]
   const tabs = div('gameTabs', ...cats.map((c, i) => button('gameTab', () => show(i), c.name)))
   const list = div('gameList')

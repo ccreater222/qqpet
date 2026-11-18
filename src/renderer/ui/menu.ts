@@ -1,8 +1,12 @@
 import { bury, machine, rest, speak } from '../pet/pet'
 import type { TrayMenuItem } from '../../shared/ipc'
-import { info, save, setPaused, setTray, update } from '../pet/store'
+import { info, runtimeProjectionMode, save, setPaused, setTray, update } from '../pet/store'
 import { openChat } from './chat'
 import { openGoods } from './control'
+import { openFarm } from './farm'
+import { openFishing } from './fishing'
+import { openGames } from './games'
+import { openIslandRuntime } from './island-runtime'
 import './css/menu.css'
 import { button, div } from './dom'
 import { frame } from './frame'
@@ -13,6 +17,9 @@ import { openState } from './state'
 import { sendLetter } from './lan-visit'
 import { visitFriend } from './visit'
 import { windowView } from './window-view'
+import { runtimeMenuItems } from './runtime-menu'
+import { uiCommands } from '../pet/command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { wakeFromHidden } from '../host-pause'
 
 const ditu = (n: number): string => `pet/Menu/ditu0${n}.png`
@@ -43,13 +50,26 @@ export function closeMenu(): void {
 
 function quit(): void {
   closeMenu()
+  if (runtimeProjectionMode) return window.qqpet.quit()
   if (!save.havePet || info.health === 0) return window.qqpet.quit()
   machine.play({ a: 'exit', s: () => setTray('leave'), e: () => window.qqpet.quit() })
 }
 
 export function readopt(): void {
   closeMenu()
-  windowView({ title: '重新领养宠物~', msg: '点击将会清空当前宠物数据，并且重置为未领养状态，请慎重选择', ok: () => window.qqpet.resetPet() })
+  windowView({
+    title: '重新领养宠物~',
+    msg: '点击将会清空当前宠物数据，并且重置为未领养状态，请慎重选择',
+    ok: () => {
+      if (runtimeProjectionMode) {
+        void dispatchRuntimeCommand(uiCommands.reset()).then((result) => {
+          if (commandSucceeded(result)) window.location.reload()
+        })
+        return
+      }
+      window.qqpet.resetPet()
+    },
+  })
 }
 
 export function setHidden(on: boolean): void {
@@ -73,12 +93,37 @@ function toggleHidden(): void {
 }
 
 function togglePaused(): void {
-  setPaused(!save.settings.paused)
-  speak({ c: 'state', s: save.settings.paused ? 'stopGrowth' : 'startGrowth', now: true }, 'speak')
+  const next = save.settings.paused === false
+  setPaused(next)
+  // Projection mode applies the command asynchronously; announce the requested
+  // state instead of the stale pre-command save value.
+  speak({ c: 'state', s: next ? 'stopGrowth' : 'startGrowth', now: true }, 'speak')
 }
 
 function items(adopt: () => void): Item[] {
   const leave = { label: '退出宠物', run: quit }
+  if (runtimeProjectionMode) {
+    return runtimeMenuItems(save.havePet, {
+      adopt,
+      leave: quit,
+      openState: () => openState(innerWidth / 2, innerHeight / 2),
+      openShop,
+      openGoods,
+      openPetInfo,
+      openSetup,
+      openFarm,
+      openFishing,
+      openGames,
+      openIsland: openIslandRuntime,
+      visitFriend,
+      readopt,
+      bury: () => bury(),
+      togglePaused,
+      paused: save.settings.paused,
+      dead: info.health === 0,
+      buried: save.isBury,
+    })
+  }
   if (!save.havePet) return [{ label: '选择宠物', run: adopt }, leave]
   if (save.isBury) {
     const title = '点击将会清空当前宠物数据，并且重置为未领养状态，请慎重选择'

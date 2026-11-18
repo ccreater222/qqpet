@@ -3,7 +3,38 @@ import type { SaveData } from '../shared/save'
 /** All eager UI modules receive an initialized store, without top-level await in the module graph. */
 export async function bootstrap(): Promise<void> {
   await window.__qqpetReady
-  const initial: SaveData = await window.qqpet.load()
+  try {
+    const runtime = await window.qqpet.runtimeInfo()
+    window.__qqpetRuntimeV2 = runtime.localRepositoryV2
+  } catch (error) {
+    // A bridge that cannot describe its authority is never treated as runtime mode.
+    console.error('QQPet runtime capability query failed:', error)
+    window.__qqpetRuntimeV2 = window.qqpet.capabilities?.localRepositoryV2 === true
+  }
+  if (window.__qqpetRuntimeV2) {
+    // Subscribe before load/import so a tick or command committed while the
+    // eager module graph is initializing cannot fall between the initial
+    // snapshot and store listener registration.
+    const buffered: NonNullable<Window['__qqpetBufferedProjections']> = []
+    window.__qqpetBufferedProjections = buffered
+    window.qqpet.onProjection((projection, events) => buffered.push({ kind: 'projection', projection, events }))
+    window.qqpet.onResync((projection, events) => buffered.push({ kind: 'resync', projection, events }))
+  }
+  const loaded: SaveData = await window.qqpet.load()
+  const initialProjection = await window.qqpet.getProjection?.() ?? null
+  // If the scheduler advanced between load() and getProjection(), the head
+  // snapshot and cursor must describe the same state.
+  const initial: SaveData = initialProjection?.save ?? loaded
+  window.__qqpetInitialProjectionCursor = initialProjection === null
+    ? null
+    : {
+        revision: initialProjection.revision,
+        eventSeq: initialProjection.eventSeq,
+        owner: initialProjection.authority.owner,
+        authorityId: initialProjection.authority.authorityId,
+        authorityEpoch: initialProjection.authority.epoch,
+        restoreGeneration: initialProjection.authority.restoreGeneration,
+      }
   window.__qqpetInitialSave = initial
   await import('./main')
 }

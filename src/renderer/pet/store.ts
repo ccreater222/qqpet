@@ -1,5 +1,13 @@
 import type { TrayState } from '../../shared/ipc'
 import type { PetInfo, SaveData, SavePatch, Settings } from '../../shared/save'
+import type { OrderedEvent } from '../../shared/pet-runtime/events'
+import type { CommandResult } from '../../shared/sync/protocol'
+import type { DeviceLocalOverlayPatch } from '../../shared/sync/data-boundary'
+import { classifyProjectionDelivery, type ProjectionCursor, type RendererProjection, type RendererRepositoryStatus } from '../../shared/renderer-api'
+import { applyLocalOverlayInPlace, applyPresentationInPlace, assertDeviceLocalSavePatch, hydrateSaveProjection, type InfoChange, type SaveHydrationResult } from '../../shared/renderer-projection'
+import { invalidateProjectionCaches } from './projection-cache'
+import { uiCommands } from './command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from './runtime-command'
 import { petSizeFor } from '../../shared/layout'
 import { goodOf, type TimedType } from './data/goods'
 import { levelOf, stageOf, type Stage } from './level'
@@ -11,10 +19,34 @@ if (!window.__qqpetInitialSave) throw new Error('QQPet store must be loaded thro
 export const save: SaveData = window.__qqpetInitialSave
 export const info: PetInfo = save.petInfo
 
+/** True only for the explicit C6 local-runtime-v2 authority; legacy is untouched when false. */
+export const runtimeProjectionMode = window.__qqpetRuntimeV2 === true
+
 let patch: Record<string, unknown> = {}
 let flushTimer = 0
 const settlers = new Set<() => void>()
 const settingsListeners = new Set<(change: Partial<Settings>) => void>()
+const projectionListeners = new Set<(projection: RendererProjection, events: OrderedEvent[]) => void>()
+const eventListeners = new Set<(event: OrderedEvent) => void>()
+const commandResultListeners = new Set<(result: CommandResult) => void>()
+const syncStatusListeners = new Set<(status: RendererRepositoryStatus) => void>()
+let projectionCursor: ProjectionCursor | null = window.__qqpetInitialProjectionCursor ?? null
+
+/** Latest accepted projection clock, for panels that need the host's game day. */
+export interface ProjectionViewState {
+  gameTimeMs: number
+  timeZone: string
+}
+
+let currentViewState: ProjectionViewState | null = null
+
+export function currentProjectionView(): ProjectionViewState | null {
+  return currentViewState
+}
+let localSettingsQueue: Promise<void> = Promise.resolve()
+let pendingLocalSettings: DeviceLocalOverlayPatch | null = null
+let localSettingsTimer = 0
+let resyncRequested = false
 
 /** Settings-dependent views can refit without waiting for a viewport resize. */
 export function onSettingsChange(listener: (change: Partial<Settings>) => void): () => void {
@@ -28,10 +60,135 @@ export function onSaveFlush(settle: () => void): () => void {
   return () => settlers.delete(settle)
 }
 
+/** Fires after an authoritative projection has been hydrated in place. */
+export function onProjectionApplied(listener: (projection: RendererProjection, events: OrderedEvent[]) => void): () => void {
+  projectionListeners.add(listener)
+  return () => { projectionListeners.delete(listener) }
+}
+
+/** Fires for each ordered event after its projection; never mutates canonical state itself. */
+export function onStoreEvent(listener: (event: OrderedEvent) => void): () => void {
+  eventListeners.add(listener)
+  return () => { eventListeners.delete(listener) }
+}
+
+/** Command results are notifications only; canonical changes arrive via projections. */
+export function onStoreCommandResult(listener: (result: CommandResult) => void): () => void {
+  commandResultListeners.add(listener)
+  return () => { commandResultListeners.delete(listener) }
+}
+
+export function onStoreSyncStatus(listener: (status: RendererRepositoryStatus) => void): () => void {
+  syncStatusListeners.add(listener)
+  return () => { syncStatusListeners.delete(listener) }
+}
+
+function notifyInfoChanges(changes: readonly InfoChange[]): void {
+  for (const change of changes) {
+    for (const listener of listeners) listener(change.key, change.previous)
+  }
+}
+
+function notifySettingsChanges(changes: Partial<Settings>): void {
+  if (Object.keys(changes).length === 0) return
+  for (const listener of settingsListeners) listener(changes)
+}
+
+function dispatchOrderedEvents(events: readonly OrderedEvent[]): void {
+  for (const event of events) {
+    for (const listener of eventListeners) listener(event)
+  }
+}
+
+function applyDevicePatch(patch: DeviceLocalOverlayPatch): void {
+  const result = applyLocalOverlayInPlace(save, {
+    ...(patch.petInfo === undefined ? {} : { petInfo: patch.petInfo }),
+    ...(patch.settings === undefined ? {} : { settings: patch.settings }),
+  })
+  if (patch.presentation !== undefined) applyPresentationInPlace(save, patch.presentation)
+  notifyInfoChanges(result.infoChanges)
+  notifySettingsChanges(result.settingsChanges)
+}
+
+function mergeLocalSettingsPatch(patch: DeviceLocalOverlayPatch): void {
+  const pending = pendingLocalSettings ?? {}
+  if (patch.petInfo !== undefined) pending.petInfo = { ...(pending.petInfo ?? {}), ...patch.petInfo }
+  if (patch.settings !== undefined) pending.settings = { ...(pending.settings ?? {}), ...patch.settings }
+  if (patch.presentation !== undefined) pending.presentation = { ...(pending.presentation ?? {}), ...patch.presentation }
+  pendingLocalSettings = pending
+}
+
+function flushLocalSettings(): Promise<void> {
+  if (localSettingsTimer) window.clearTimeout(localSettingsTimer)
+  localSettingsTimer = 0
+  const patch = pendingLocalSettings
+  pendingLocalSettings = null
+  if (patch === null) return localSettingsQueue
+  const run = localSettingsQueue.catch(() => undefined).then(async () => {
+    const writeSettings = window.qqpet.localSettings.update
+    const overlay = await writeSettings(patch)
+    const result = applyLocalOverlayInPlace(save, overlay)
+    if (overlay.presentation !== undefined) applyPresentationInPlace(save, overlay.presentation)
+    notifyInfoChanges(result.infoChanges)
+    notifySettingsChanges(result.settingsChanges)
+  })
+  localSettingsQueue = run
+  run.catch((error: unknown) => console.error('Local settings persistence failed:', error))
+  return run
+}
+
+function queueLocalSettings(patch: DeviceLocalOverlayPatch): void {
+  mergeLocalSettingsPatch(patch)
+  if (localSettingsTimer) return
+  localSettingsTimer = window.setTimeout(() => { void flushLocalSettings() }, 200)
+}
+
+function receiveProjection(projection: RendererProjection, events: OrderedEvent[], requestedResync: boolean): void {
+  if (runtimeProjectionMode === false) return
+  const classification = classifyProjectionDelivery(projectionCursor, projection, events)
+  if (classification.kind === 'stale') return
+  // A gap on the ordered channel is not applied speculatively; request a full
+  // resync and wait for the authoritative snapshot on onResync.
+  if (requestedResync === false && classification.kind === 'resync') {
+    if (resyncRequested === false) {
+      resyncRequested = true
+      void window.qqpet.requestResync().catch((error: unknown) => {
+        resyncRequested = false
+        console.error('Projection resync request failed:', error)
+      })
+    }
+    return
+  }
+  const full = requestedResync || classification.kind === 'resync'
+  if (requestedResync) resyncRequested = false
+  currentViewState = { gameTimeMs: projection.gameTimeMs, timeZone: projection.timeZone }
+  const result: SaveHydrationResult = hydrateSaveProjection(save, projection)
+  projectionCursor = {
+    revision: projection.revision,
+    eventSeq: projection.eventSeq,
+    owner: projection.authority.owner,
+    authorityId: projection.authority.authorityId,
+    authorityEpoch: projection.authority.epoch,
+    restoreGeneration: projection.authority.restoreGeneration,
+  }
+  notifyInfoChanges(result.infoChanges)
+  notifySettingsChanges(result.settingsChanges)
+  // The tray mirrors authoritative state; a projection can change health,
+  // activity, pause or inventory without any local info-change callback.
+  refreshTray()
+  invalidateProjectionCaches({
+    full,
+    changedJsonKeys: result.changedJsonKeys,
+    eventTypes: events.map(event => event.type),
+  })
+  dispatchOrderedEvents(events)
+  for (const listener of projectionListeners) listener(projection, events)
+}
+
 function flushPatch(): void {
   if (flushTimer) window.clearTimeout(flushTimer)
   flushTimer = 0
-  if (!Object.keys(patch).length) return
+  if (runtimeProjectionMode || Object.keys(patch).length === 0) return
   window.qqpet.save(patch as SavePatch)
   patch = {}
 }
@@ -39,13 +196,26 @@ function flushPatch(): void {
 export async function flushSave(): Promise<void> {
   for (const settle of settlers) settle()
   flushPatch()
-  await window.qqpet.flush?.()
+  await flushLocalSettings()
+  await localSettingsQueue
+  await window.qqpet.flush()
 }
 window.__qqpetFlush = flushSave
 addEventListener('pagehide', () => { void flushSave().catch((error: unknown) => console.error('Save flush failed:', error)) })
 
 /** Applies a change to `save` and writes it to disk, batched like the original (200 ms). */
 export function update<K extends keyof SaveData>(key: K, value: SavePatch[K]): void {
+  if (runtimeProjectionMode) {
+    const classification = assertDeviceLocalSavePatch({ [key]: value } as SavePatch)
+    const localPatch: DeviceLocalOverlayPatch = {
+      ...(Object.keys(classification.localPetInfo).length === 0 ? {} : { petInfo: classification.localPetInfo }),
+      ...(Object.keys(classification.localSettings).length === 0 ? {} : { settings: classification.localSettings }),
+      ...(Object.keys(classification.presentation).length === 0 ? {} : { presentation: classification.presentation }),
+    }
+    applyDevicePatch(localPatch)
+    queueLocalSettings(localPatch)
+    return
+  }
   const target = save as unknown as Record<string, unknown>
   const isGroup = typeof value === 'object' && value !== null && !Array.isArray(value)
   if (isGroup) {
@@ -71,6 +241,7 @@ export function setInfo<K extends keyof PetInfo>(key: K, value: PetInfo[K]): voi
   const prev = info[key]
   if (prev === value) return
   update('petInfo', { [key]: value })
+  if (runtimeProjectionMode) return
   for (const l of listeners) l(key, prev)
 }
 
@@ -183,6 +354,12 @@ export function setTray(s: TrayState): void {
 }
 
 export function setPaused(on: boolean): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.setPaused(on)).then((result) => {
+      if (commandSucceeded(result)) refreshTray()
+    })
+    return
+  }
   update('settings', { paused: on })
   refreshTray()
 }
@@ -202,5 +379,26 @@ export function refreshTray(): void {
 // Load-time fixups from the original setDefaultPetInfoData: a sick pet always
 // has an illness line. Unlike the original, activities survive a restart (resumeTask).
 update('petInfo', { lastX: info.lastX | 0, lastY: info.lastY | 0 })
-if (info.health < 5 && !activity('ill')) setActivity('ill', '1-')
-syncLevel()
+if (runtimeProjectionMode === false) {
+  if (info.health < 5 && !activity('ill')) setActivity('ill', '1-')
+  syncLevel()
+}
+
+if (runtimeProjectionMode) {
+  const buffered = window.__qqpetBufferedProjections ?? []
+  const replayFromUnknownHead = projectionCursor === null
+  window.__qqpetBufferedProjections = []
+  // Replace the bootstrap listeners first, then drain the captured queue. The
+  // handoff stays synchronous, so a delivery cannot fall between the steps.
+  window.qqpet.onProjection((projection, events) => receiveProjection(projection, events, false))
+  window.qqpet.onResync((projection, events) => receiveProjection(projection, events, true))
+  window.qqpet.onCommandResult((result) => {
+    for (const listener of commandResultListeners) listener(result)
+  })
+  window.qqpet.onSyncStatus((status) => {
+    for (const listener of syncStatusListeners) listener(status)
+  })
+  for (const delivery of buffered) {
+    receiveProjection(delivery.projection, delivery.events, replayFromUnknownHead || delivery.kind === 'resync')
+  }
+}

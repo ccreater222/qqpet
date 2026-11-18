@@ -3,8 +3,11 @@ import { parseGood, type Good } from './data/goods'
 import { give } from './items'
 import { loot } from './loot'
 import { rand } from './rand'
-import { info, save, update } from './store'
+import { info, runtimeProjectionMode, save, update } from './store'
+import { uiCommands } from './command-map'
+import { commandResultGoods, commandSucceeded, dispatchRuntimeCommand } from './runtime-command'
 import { dayStart } from './vip'
+import { registerProjectionCacheInvalidator } from './projection-cache'
 
 /**
  * Today's face pokes, trips, goods eaten, cleaned with and played with, shifts, lessons, games and minutes of games;
@@ -130,7 +133,8 @@ function load(): Progress {
   }
 }
 
-const progress = load()
+let progress = load()
+registerProjectionCacheInvalidator('tasks', () => { progress = load() })
 const store = (): void => update('saveJsonData', { task: JSON.stringify(progress) })
 const defs = (tab: Tab): Task[] => (tab === 'daily' ? progress.daily : TASKS[tab])
 
@@ -139,6 +143,7 @@ export function count(obj: Counter): number {
 }
 
 export function addCount(obj: Exclude<Counter, 'Travel2'>, n = 1): void {
+  if (runtimeProjectionMode) return
   progress.doNums[obj] = count(obj) + n
   store()
 }
@@ -150,14 +155,31 @@ export function claim(tab: Tab, i: number): Good[] | false {
   const t = defs(tab)[i]
   const p = progress.taskList[tab][i]
   if (p.take || count(t.obj) < t.num) return false
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.claimTask(tab, i)).then((result) => {
+      if (commandSucceeded(result) === false) return
+    })
+    return p.good
+  }
   p.take = true
   store()
   give(p.good, `[host],我们完成${t.label}任务啦！~~`)
   return p.good
 }
 
+/**
+ * Runtime-mode claim: the host validates completion and grants the reward.
+ * Returns the reward goods for local presentation, or null on rejection.
+ */
+export async function claimRuntime(tab: Tab, i: number): Promise<Good[] | null> {
+  const result = await dispatchRuntimeCommand(uiCommands.claimTask(tab, i))
+  if (commandSucceeded(result) === false) return null
+  return commandResultGoods(result)
+}
+
 /** 06:00: daily tasks open again, with fresh random rewards, and the day's counters restart. */
 export function resetTasks(): void {
+  if (runtimeProjectionMode) return
   for (const tab of Object.keys(TASKS) as (keyof typeof TASKS)[])
     TASKS[tab].forEach((t, i) => {
       const p = progress.taskList[tab][i]
@@ -221,6 +243,7 @@ const KINDS: {
 
 /** Today's four tasks drawn by the pet's needs, plus one on statutory holidays; made once per day. */
 export function rollDaily(today?: CalendarDay): void {
+  if (runtimeProjectionMode) return
   if (progress.dailyDay === dayStart()) return
   // Offline, weekends are the days off; the calendar knows holidays and make-up working days.
   const off = today?.holiday ? today.holiday.off : [0, 6].includes(new Date().getDay())
@@ -242,6 +265,7 @@ export function rollDaily(today?: CalendarDay): void {
 
 /** Finishing the tour clears the visited provinces, so the city tasks can be done again. */
 export function resetTour(): void {
+  if (runtimeProjectionMode) return
   for (const p of progress.taskList.travel.slice(2)) p.take = false
   store()
 }

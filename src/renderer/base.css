@@ -1012,6 +1012,7 @@ span::-webkit-scrollbar-track {
 .but_normal:active {
   background-color: #c59d3f;
 }
+#runtimeReadiness {position:fixed;left:50%;top:8px;transform:translateX(-50%);z-index:9999;padding:5px 14px;border-radius:12px;background:#fffdf0e6;color:#7a4b12;font-size:12px;box-shadow:0 1px 5px #0003;pointer-events:none}
 .but_normal.disable {
   background-color: #dedede !important;
 }

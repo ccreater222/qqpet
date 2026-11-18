@@ -2,8 +2,14 @@ import { description } from '../../../package.json'
 import { APP_VERSION } from '../../shared/version'
 import { DEFAULT_HOTKEY, hotkeyLabel } from '../../shared/hotkey'
 import { forgetMemory } from './chat'
+import { allGoods, type GoodType } from '../pet/data/goods'
+import { give } from '../pet/items'
 import { applyPetSound, speak } from '../pet/pet'
-import { info, save, setInfo, update } from '../pet/store'
+import { rand } from '../pet/rand'
+import { addInfo, info, runtimeProjectionMode, save, setInfo, update } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
+import { clearPinkDiamond, openPinkDiamond } from '../pet/vip'
 import { weatherNow } from '../pet/weather'
 import { openFrame } from './box'
 import './css/setup2.css'
@@ -16,8 +22,11 @@ import { checkUpdate, ipcError, packReady } from './update'
 import { windowView } from './window-view'
 import { onCustodyChange } from '../pet/custody'
 import { btn, check, cheatSection, refreshLive, sweetSection } from './setup-sections'
+import { storageTab } from './storage'
+import { sweetHeart } from './state'
+import { formatDate } from './date'
 
-type Option = { label: string; title?: string } & (
+export type Option = { label: string; title?: string } & (
   | { type: 'radio'; on: () => boolean; run: () => void }
   | { type: 'slider'; value: () => number; step: (d: number) => void }
   | { type: 'button'; run: () => void }
@@ -171,8 +180,65 @@ function rebornAsOther(): void {
   windowView({
     title: '重生为另一个性别~',
     msg: '点击将会清空当前宠物数据，并重生为另一个性别的宠物，请慎重选择',
-    ok: () => window.qqpet.resetPet(info.sex === 'GG' ? 'MM' : 'GG'),
+    ok: () => {
+      if (runtimeProjectionMode) {
+        void dispatchRuntimeCommand(uiCommands.reset()).then((result) => {
+          if (commandSucceeded(result)) window.location.reload()
+        })
+        return
+      }
+      window.qqpet.resetPet(info.sex === 'GG' ? 'MM' : 'GG')
+    },
   })
+}
+
+/** Ten of a random good of `type`. */
+function grant(type: GoodType): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.grantRandomGoods(type, 10)).then((result) => {
+      if (commandSucceeded(result)) speak({ s: '[host]，我获得了10个物品！', now: true }, 'speak')
+    })
+    return
+  }
+  const all = allGoods(type)
+  const g = { ...all[rand(0, all.length - 1)], num: 10 }
+  give([g], `[host]，我获得了${g.num}个${g.name}！`)
+}
+
+function cheat(stat: 'yb' | 'growth' | 'health', amount: number, line: string): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.grantCheat(stat, amount)).then((result) => {
+      if (commandSucceeded(result)) speak({ s: line, now: true }, 'appear')
+    })
+    return
+  }
+  if (stat === 'health') setInfo('health', Math.max(info.health, 5))
+  else addInfo(stat, amount)
+  speak({ s: line, now: true }, 'appear')
+}
+
+/** VIP cheat buttons: semantic commands under the runtime flag, direct legacy writes otherwise. */
+function vipCheat(kind: 'pink30' | 'pink365' | 'clear'): void {
+  const line = kind === 'clear' ? '[host]，粉钻已清除~' : `[host]，粉钻开了${kind === 'pink30' ? 30 : 365}天！`
+  if (runtimeProjectionMode) {
+    const done = (result: Parameters<typeof commandSucceeded>[0]): void => {
+      if (commandSucceeded(result)) speak({ s: line, now: true }, 'appear')
+    }
+    if (kind === 'clear') void dispatchRuntimeCommand(uiCommands.clearPinkDiamond()).then(done)
+    else void dispatchRuntimeCommand(uiCommands.buyPinkDiamond(kind === 'pink30' ? 30 : 365)).then(done)
+    return
+  }
+  if (kind === 'clear') clearPinkDiamond()
+  else openPinkDiamond(kind === 'pink30' ? 30 : 365)
+  speak({ s: line, now: true }, 'appear')
+}
+
+function setSharedSetting(key: 'difficulty' | 'undying', value: boolean | 'easy' | 'standard'): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.setShared(key, value))
+    return
+  }
+  update('settings', { [key]: value } as Record<string, unknown>)
 }
 
 /** The pet reports the new city's weather right away, so a wrong name shows at once. */
@@ -266,6 +332,53 @@ const s = save.settings
 type Tab = { label: string; options: Option[]; render?: (redraw: () => void) => HTMLElement[] }
 const head = (label: string): Option => ({ type: 'head', label })
 
+/**
+ * Server mode has no custody/care commands: setup-sections' 贴心宝贝 form writes the local save directly, which the
+ * projection blocks. Offer the command-backed membership controls and say where the rest lives instead.
+ */
+function runtimeSweetSection(): HTMLElement[] {
+  const when = info.sweetHeartOverTime ? `${formatDate(info.sweetHeartOverTime, 'YYYY-MM-DD HH:mm')} 到期` : '未开通'
+  return [
+    div('sstatus', `贴心宝贝：${info.sweetHeart ? '已开启' : '已关闭'} · ${when}`),
+    div('snote', '服务器模式下贴心宝贝的开通与开关走服务器命令；自动照顾与循环托管还没有对应的服务器命令，请在本地模式设置。'),
+    div('sbuttonrow', btn('贴心宝贝设置…', sweetHeart)),
+  ]
+}
+
+/** feature 的作弊命令列表：server 模式用它代替直接写存档的 setup2 表单。 */
+const CHEAT_OPTIONS: Option[] = [
+  { type: 'button', label: '元宝 +1000', run: () => cheat('yb', 1000, '[host]，我获得了1000元宝！') },
+  { type: 'button', label: '成长值 +5000', run: () => cheat('growth', 5000, '[host]，我获得了5000成长值！') },
+  { type: 'button', label: '随机获得 10 个食物', run: () => grant('food') },
+  { type: 'button', label: '随机获得 10 个清洁用品', run: () => grant('clean') },
+  { type: 'button', label: '随机获得 10 个药品', run: () => grant('medicine') },
+  {
+    type: 'button',
+    label: '复活吧，我的宠物！',
+    run: () => (info.health === 0 ? cheat('health', 5, '[host]，我复活啦！') : speak({ s: '[host]，我还活得好好的呢~', now: true }, 'speak')),
+  },
+  {
+    type: 'radio',
+    label: '不会死亡',
+    title: '关闭后宠物会按健康值正常死亡',
+    on: () => s.undying,
+    run: () => setSharedSetting('undying', !s.undying),
+  },
+  {
+    type: 'radio',
+    label: '聊天框金手指',
+    title: '在聊天里输入「元宝+100000」「不要死」等口令生效；关闭时「不要死」一并失效',
+    on: () => s.chatCheat,
+    run: () => {
+      update('settings', { chatCheat: s.chatCheat === false })
+      setSharedSetting('undying', false)
+    },
+  },
+  { type: 'button', label: '粉钻 30天', run: () => vipCheat('pink30') },
+  { type: 'button', label: '粉钻 年费', run: () => vipCheat('pink365') },
+  { type: 'button', label: '粉钻 清除', run: () => vipCheat('clear') },
+]
+
 const TABS: Tab[] = [
   {
     label: '全局设置',
@@ -303,7 +416,7 @@ const TABS: Tab[] = [
           label: '标准难度（元宝收入降为 40%，默认关=轻松）',
           title: '轻松：保持现有的元宝收入；标准：打工、小游戏、钓鱼、农场、邮件礼物等收入只有 40%（至少 1），物价不变。作弊获得的不受影响。',
           on: () => s.difficulty === 'standard',
-          run: () => update('settings', { difficulty: s.difficulty === 'standard' ? 'easy' : 'standard' }),
+          run: () => setSharedSetting('difficulty', s.difficulty === 'standard' ? 'easy' : 'standard'),
         },
         {
           type: 'radio',
@@ -365,7 +478,12 @@ const TABS: Tab[] = [
       ]
     },
   },
-  { label: '贴心宝贝', options: [], render: sweetSection },
+  {
+    label: '贴心宝贝',
+    options: [],
+    // setup-sections 的托管/自动照顾直接写本地存档；server 模式改用命令驱动的简要页。
+    render: (redraw) => (runtimeProjectionMode ? runtimeSweetSection() : sweetSection(redraw)),
+  },
   {
     label: '存档',
     options: [
@@ -398,7 +516,12 @@ const TABS: Tab[] = [
       { type: 'radio', label: '留意前台在用的软件（仅电脑，默认关）', title: '同一软件开太久，闲聊时可能会提起。不读窗口内容。', on: () => s.watchApp, run: () => toggleWatch('frontWatch', 'watchApp') },
     ],
   },
-  { label: '作弊', options: [], render: cheatSection },
+  {
+    label: '作弊',
+    options: CHEAT_OPTIONS,
+    // setup2 的 cheatSection 直接改档案里的数值；server 模式必须走命令，因此渲染 feature 的命令列表。
+    render: (redraw) => (runtimeProjectionMode ? CHEAT_OPTIONS.map((o) => option(o, redraw)) : cheatSection(redraw)),
+  },
   {
     label: 'AI',
     get options() {
@@ -468,6 +591,8 @@ export function openSetup(): void {
   const draw = (): void => {
     skin()
     const tabs = TABS.filter((t) => t.label !== '作弊' || s.cheatTab)
+    // C11 storage pane; kept dynamic so its async status can repaint the open panel.
+    tabs.splice(Math.min(2, tabs.length), 0, storageTab(draw))
     const current = tabs.find((t) => t.label === tab) ?? tabs[0]
     tab = current.label
     const pick = (label: string) => (): void => {

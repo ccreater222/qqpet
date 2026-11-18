@@ -30,9 +30,11 @@ import {
   info,
   mood,
   onInfoChange,
+  onStoreEvent,
   petSize,
   playingDesk,
   refreshTray,
+  runtimeProjectionMode,
   save,
   setActivity,
   setInfo,
@@ -45,6 +47,8 @@ import { harvestNews } from './harvest'
 import { resetSignIn, tickGift } from './signin'
 import { resetTasks, rollDaily } from './tasks'
 import { dayStart, newDay } from './vip'
+import { uiCommands } from './command-map'
+import { dispatchRuntimeCommand } from './runtime-command'
 import { weatherNews, weatherStrain } from './weather'
 
 let idleTimer = 0
@@ -55,6 +59,13 @@ const petSwf = new PetSwf(document.getElementById('pet')!)
 export const applyPetSound = (): void => petSwf.applySound()
 
 export const machine = new Machine(petSwf, (over, next) => {
+  // Projection mode owns all gameplay timers and transitions, but speech and
+  // animation callbacks are presentation-only and must still run locally.
+  if (runtimeProjectionMode) {
+    over.e?.()
+    next.s?.()
+    return
+  }
   clearTimeout(idleTimer)
   // Anything else (drag, click, a queued action) ends the rest.
   if (next.a !== 'liedown' && next.a !== 'lying') endRest()
@@ -296,6 +307,10 @@ export function revive(done?: () => void): void {
 
 let burying = false
 export function bury(done?: () => void): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.bury())
+    return
+  }
   if (burying) return
   burying = true
   update('isBury', true)
@@ -303,23 +318,35 @@ export function bury(done?: () => void): void {
   speak({ c: 'state', s: 'bury' }, 'bury', { start: done })
 }
 
-let lastMood = mood()
-onInfoChange((key, prev) => {
-  if (key === 'growth') {
-    const before = syncLevel()
-    const now = save.petComputedlInfo.level
-    if (now === before) return
-    const first = (now === 5 && before === 4) || (now === 10 && before === 9)
-    speak({ c: first ? `first${now === 5 ? 1 : 2}` : 'levUp', now: true }, first ? 'first' : 'levUp')
-  } else if (key === 'health') {
-    healthChanged(prev as number)
-  } else if (key === 'mood' && mood() !== lastMood) {
-    lastMood = mood()
-    if (stage() === 'Adult') speak({ c: 'mood', s: lastMood, now: true }, 'speak')
-  } else if (key === 'hunger' || key === 'clean' || key === 'yb') {
-    maybeLead()
-  }
-})
+if (runtimeProjectionMode === false) {
+  let lastMood = mood()
+  onInfoChange((key, prev) => {
+    if (key === 'growth') {
+      const before = syncLevel()
+      const now = save.petComputedlInfo.level
+      if (now === before) return
+      const first = (now === 5 && before === 4) || (now === 10 && before === 9)
+      speak({ c: first ? `first${now === 5 ? 1 : 2}` : 'levUp', now: true }, first ? 'first' : 'levUp')
+    } else if (key === 'health') {
+      healthChanged(prev as number)
+    } else if (key === 'mood' && mood() !== lastMood) {
+      lastMood = mood()
+      if (stage() === 'Adult') speak({ c: 'mood', s: lastMood, now: true }, 'speak')
+    } else if (key === 'hunger' || key === 'clean' || key === 'yb') {
+      maybeLead()
+    }
+  })
+} else {
+  // Projection mode owns death/revival state; only the pose is local.
+  onStoreEvent((event) => {
+    if (event.type !== 'pet.died') return
+    setTray('dead')
+    machine.play(save.isBury ? { a: 'bury' } : { a: 'dying', s: () => machine.add({ a: 'die' }) })
+  })
+  onInfoChange((key, previous) => {
+    if (key === 'health' && previous === 0 && info.health > 0) machine.play({ a: 'revival' })
+  })
+}
 
 function healthChanged(prev: number): void {
   const h = info.health

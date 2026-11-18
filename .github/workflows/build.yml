@@ -5,6 +5,11 @@ on:
     tags: ['v*']
 
 jobs:
+  acceptance:
+    # This called workflow includes root, server, real E2E, Docker
+    # backup/restore/Compose and TLS/WSS Nginx proxy smoke jobs.
+    uses: ./.github/workflows/ci.yml
+
   build:
     strategy:
       fail-fast: false
@@ -130,7 +135,7 @@ jobs:
       version: ${{ github.ref_name }}
 
   release:
-    needs: [build, android, harmony, ios]
+    needs: [acceptance, build, android, harmony, ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write

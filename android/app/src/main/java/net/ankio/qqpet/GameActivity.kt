@@ -8,15 +8,18 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import org.json.JSONObject
 
 /** Plays pet/game/<swf> full screen, like the desktop's game window; reports the minutes played when closed. */
 class GameActivity : Activity() {
     private lateinit var web: WebView
     private val start = SystemClock.elapsedRealtime()
+    private var windowId = -1
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        windowId = intent.getIntExtra("windowId", -1)
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -51,7 +54,13 @@ class GameActivity : Activity() {
 
     override fun onDestroy() {
         web.destroy()
-        if (isFinishing) PetService.instance?.emit("gamePlayed", "${(SystemClock.elapsedRealtime() - start) / 60000.0}")
+        if (isFinishing) {
+            val played = JSONObject()
+                .put("minutes", (SystemClock.elapsedRealtime() - start) / 60000.0)
+                .put("windowId", windowId)
+                .toString()
+            PetService.instance?.emit("gamePlayed", played)
+        }
         super.onDestroy()
     }
 }

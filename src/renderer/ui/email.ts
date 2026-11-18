@@ -1,5 +1,9 @@
 import { give } from '../pet/items'
+import { speak } from '../pet/pet'
 import { readMails, writeMails, type Live } from '../pet/mail'
+import { onStoreEvent, runtimeProjectionMode } from '../pet/store'
+import { uiCommands } from '../pet/command-map'
+import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { photoUrl } from '../pet/album'
 import { openPhoto } from './album'
 import { openFrame } from './box'
@@ -20,8 +24,27 @@ export function openEmail(): void {
   open = true
   const mails = readMails()
   // Newest first: keys are send times, and new mail must not land on the last page.
-  const live = (): Live[] => Object.values(mails).filter((m): m is Live => !m.e).reverse()
+  const live = (): Live[] => Object.values(runtimeProjectionMode ? readMails() : mails)
+    .filter((m): m is Live => m.e === undefined)
+    .reverse()
   const act = (list: Live[]): void => {
+    if (runtimeProjectionMode) {
+      if (list.length === 0) return
+      const claiming = list.some(m => m.r !== true)
+      const allClaimed = list.every(m => m.r === true)
+      const allUnclaimed = list.every(m => m.r === undefined || m.r === false)
+      const commands = list.length > 1 && allClaimed
+        ? [uiCommands.mailDeleteAll()]
+        : list.length > 1 && allUnclaimed
+          ? [uiCommands.mailClaimAll()]
+          : list.map(m => m.r === true ? uiCommands.mailDelete(String(m.d)) : uiCommands.mailClaim(String(m.d)))
+      void Promise.all(commands.map(command => dispatchRuntimeCommand(command))).then((results) => {
+        if (results.every(commandSucceeded) === false) return
+        if (claiming) speak({ s: '[host]，邮箱奖励领取成功！~', now: true }, 'speak')
+        window.setTimeout(render, 0)
+      })
+      return
+    }
     for (const m of list) {
       if (m.r) mails[m.d] = { d: m.d, e: true, k: m.k }
       else {
@@ -68,7 +91,9 @@ export function openEmail(): void {
   }
   render()
 
+  let stopProjection = (): void => {}
   const close = (): void => {
+    stopProjection()
     closeFrame()
     open = false
   }
@@ -89,4 +114,7 @@ export function openEmail(): void {
       frame(content, (n) => `pet/email/${BG[n - 1]}`, [12, 12]),
     ),
   )
+  stopProjection = onStoreEvent((event) => {
+    if (event.type === 'mail.claimed' && open) window.setTimeout(() => render(), 0)
+  })
 }

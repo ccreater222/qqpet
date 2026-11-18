@@ -1,8 +1,11 @@
 import { machine, speak } from '../pet/pet'
-import { busy, earnYb, info, petSize, playingDesk, refreshTray, save, setDeskGame, setInfo, setTray, stage } from '../pet/store'
+import { busy, earnYb, info, petSize, playingDesk, refreshTray, runtimeProjectionMode, save, setDeskGame, setInfo, setTray, stage } from '../pet/store'
 import { addCount } from '../pet/tasks'
+import { uiCommands } from '../pet/command-map'
+import { commandResultData, dispatchRuntimeCommand } from '../pet/runtime-command'
 import './css/smallgame.css'
 import { button } from './dom'
+import { floatMood } from './float'
 
 /** Official `DiudiuleConfig.xml`. */
 const G = 500
@@ -17,6 +20,10 @@ let vy = 0
 let t0 = 0
 let quit: HTMLDivElement | null = null
 let born = 0
+/** Active runtime diudiule session; settled on land or abandoned on quit. */
+let runtimeSessionToken: string | null = null
+let runtimeStarting = false
+let runtimeAbandonRequested = false
 
 const clip = (v: number, max: number): number => Math.min(Math.max(v, 0), max)
 
@@ -33,6 +40,18 @@ function land(tossed: boolean): void {
   if (playingDesk() !== 'diudiule') return
   machine.play({ a: 'normal' })
   if (!tossed) return
+  if (runtimeProjectionMode) {
+    const token = runtimeSessionToken
+    runtimeSessionToken = null
+    if (token !== null) {
+      void dispatchRuntimeCommand(uiCommands.diudiuleReward(token)).then((result) => {
+        const data = commandResultData<{ mood: number; yb: number }>(result)
+        if (data === null) return
+        void floatMood(data.mood)
+      })
+    }
+    return
+  }
   const mood = Math.min(55, save.petComputedlInfo.moodMax - info.mood)
   setInfo('mood', info.mood + mood)
   earnYb(1)
@@ -95,12 +114,26 @@ export function releaseDiudiule(lifted: boolean, sx: number, sy: number): boolea
 }
 
 export function stopDiudiule(): void {
+  // Quit pressed while the session command is still in flight: remember it and
+  // abandon the token as soon as the host returns it, never opening the game.
+  if (runtimeProjectionMode && runtimeStarting) {
+    runtimeAbandonRequested = true
+    stopFly()
+    return
+  }
   if (playingDesk() !== 'diudiule') return
   stopFly()
   quit?.remove()
   quit = null
   setDeskGame('')
   machine.play({ a: 'normal' })
+  if (runtimeProjectionMode) {
+    const token = runtimeSessionToken
+    runtimeSessionToken = null
+    if (token !== null) void dispatchRuntimeCommand(uiCommands.gameAbandon(token))
+    refreshTray()
+    return
+  }
   addCount('GameRound')
   refreshTray()
 }
@@ -109,6 +142,31 @@ export function playDiudiule(): void {
   if (playingDesk()) return
   if (stage() === 'Egg') return speak({ s: '[host]，我还是个蛋呢，等破壳了再陪你玩~', now: true }, 'speak')
   if (busy() || info.health < 5) return speak({ s: '[host]，我正忙着呢，忙完再陪你玩~', now: true }, 'speak')
+  if (runtimeProjectionMode) {
+    void startRuntimeDiudiule()
+    return
+  }
+  openDiudiule()
+}
+
+async function startRuntimeDiudiule(): Promise<void> {
+  if (runtimeStarting || playingDesk()) return
+  runtimeStarting = true
+  runtimeAbandonRequested = false
+  const result = await dispatchRuntimeCommand(uiCommands.diudiuleStart())
+  const data = commandResultData<{ sessionToken: string }>(result)
+  runtimeStarting = false
+  if (data === null) return
+  if (runtimeAbandonRequested) {
+    runtimeAbandonRequested = false
+    void dispatchRuntimeCommand(uiCommands.gameAbandon(data.sessionToken))
+    return
+  }
+  runtimeSessionToken = data.sessionToken
+  openDiudiule()
+}
+
+function openDiudiule(): void {
   setDeskGame('diudiule')
   setTray('game')
   const pet = document.getElementById('pet')!

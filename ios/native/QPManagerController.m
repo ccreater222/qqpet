@@ -229,9 +229,9 @@
         components.percentEncodedQuery=[components.percentEncodedQuery stringByReplacingOccurrencesOfString:@"+" withString:@"%2B"];
         NSURL *url=components.URL;
         [game.host loadURL:url];
-        NSString *instance=status[@"instance"], *sessionID=NSUUID.UUID.UUIDString, *generation=args[@"generation"] ?: self.state.generation; NSTimeInterval started=NSDate.date.timeIntervalSince1970;
+        NSString *instance=status[@"instance"], *sessionID=NSUUID.UUID.UUIDString, *generation=args[@"generation"] ?: self.state.generation; NSNumber *windowId=[args[@"windowId"] isKindOfClass:NSNumber.class] ? args[@"windowId"] : @-1; NSTimeInterval started=NSDate.date.timeIntervalSince1970;
         __weak QPManagerController *weakSelf=self;
-        game.closed=^{ QPManagerController *manager=weakSelf; manager.game=nil; [manager.state enqueueCommand:@{@"op":@"gamePlayed",@"args":@{@"sessionId":sessionID,@"generation":generation,@"minutes":@((NSDate.date.timeIntervalSince1970-started)/60)}} instance:instance error:NULL]; };
+        game.closed=^{ QPManagerController *manager=weakSelf; manager.game=nil; [manager.state enqueueCommand:@{@"op":@"gamePlayed",@"args":@{@"sessionId":sessionID,@"generation":generation,@"windowId":windowId,@"minutes":@((NSDate.date.timeIntervalSince1970-started)/60)}} instance:instance error:NULL]; };
         UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:game]; navigation.modalPresentationStyle=UIModalPresentationFullScreen;
         [self presentViewController:navigation animated:YES completion:^{ if ([self.pendingUI[@"requestId"] isEqual:request[@"requestId"]]) [self finishUI:@{@"sessionId":sessionID} error:nil]; }];
     } else if ([op isEqual:@"closeGame"]) { [self.game closeGame]; [self finishUI:nil error:nil]; }

@@ -1,0 +1,172 @@
+name: C12 acceptance
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c12-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  root:
+    name: Root typecheck, compat tests and web builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      NODE_OPTIONS: --max-old-space-size=2048
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch upstream release tags for fork versions
+        if: github.repository != 'AnkioTomas/qqpet'
+        run: |
+          git -c 'http.https://github.com/.extraheader=' fetch --no-tags --no-recurse-submodules \
+            https://github.com/AnkioTomas/qqpet.git 'refs/tags/v*:refs/tags/v*'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run test:compat
+      - run: npm run build
+      - run: npm run build:android-web
+      - run: npm run build:harmony-web
+      - run: npm run build:ios-web
+
+  server:
+    name: Server typecheck and integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_OPTIONS: --max-old-space-size=2048
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
+      - run: npm --prefix server run typecheck
+      - run: npm --prefix server test
+
+  e2e:
+    name: Real server + two Electron renderer E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_OPTIONS: --max-old-space-size=2048
+      QQPET_E2E_ARTIFACTS: ${{ runner.temp }}/c12-e2e
+      LIBGL_ALWAYS_SOFTWARE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+      - name: Install Electron renderer runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            xvfb libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libxss1 \
+            libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libatspi2.0-0 libcups2 \
+            libsecret-1-0 libayatana-appindicator3-1
+          sudo apt-get install --yes --no-install-recommends libasound2t64 \
+            || sudo apt-get install --yes --no-install-recommends libasound2
+      - run: npm ci --no-audit --no-fund
+      - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
+      - name: Run real two-renderer Electron E2E headlessly under xvfb
+        run: xvfb-run -a npm run test:e2e
+      - name: Validate fresh renderer-coverage E2E evidence
+        run: node scripts/validate-evidence.mjs e2e "$QQPET_E2E_ARTIFACTS/c12-e2e-report.json"
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c12-e2e-evidence
+          path: ${{ runner.temp }}/c12-e2e
+          if-no-files-found: warn
+
+  docker-smoke:
+    name: Docker build, readiness, backup/restore and Compose fail-closed
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      QQPET_DOCKER_SMOKE_REPORT: ${{ runner.temp }}/c12-docker/docker-smoke-report.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compose config succeeds only with an explicit credential file
+        run: |
+          umask 077
+          mkdir -p server/deploy
+          printf '%s\n' 'ci-compose-config-placeholder-not-a-runtime-credential' > server/deploy/owner-admin-credential
+          chmod 0600 server/deploy/owner-admin-credential
+          credential="$PWD/server/deploy/owner-admin-credential"
+          QQPET_OWNER_ADMIN_CREDENTIAL_FILE="$credential" docker compose -f server/docker-compose.yml config >/dev/null
+          if env -u QQPET_OWNER_ADMIN_CREDENTIAL_FILE docker compose -f server/docker-compose.yml config >/dev/null 2>&1; then
+            echo 'Compose config unexpectedly succeeded without QQPET_OWNER_ADMIN_CREDENTIAL_FILE' >&2
+            exit 1
+          fi
+          if QQPET_OWNER_ADMIN_CREDENTIAL_FILE="$PWD/server/deploy/missing-credential" docker compose -f server/docker-compose.yml config >/dev/null 2>&1; then
+            echo 'Compose config unexpectedly succeeded with a missing credential file' >&2
+            exit 1
+          fi
+      - name: Repeatable Compose preflight smoke
+        run: npm run smoke:compose
+      - name: Docker image, boot, readiness, non-root and backup/restore smoke
+        run: npm run smoke:docker
+      - name: Validate Docker smoke evidence
+        run: npm run validate:evidence -- docker "$QQPET_DOCKER_SMOKE_REPORT"
+      - name: Remove generated credential
+        if: always()
+        run: rm -f server/deploy/owner-admin-credential
+      - name: Upload Docker smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c12-docker-smoke-evidence
+          path: ${{ runner.temp }}/c12-docker
+          if-no-files-found: warn
+
+  proxy-wss:
+    name: TLS/WSS Nginx reverse-proxy smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      QQPET_PROXY_REPORT: ${{ runner.temp }}/c12-proxy/proxy-smoke-report.json
+      QQPET_PROXY_NGINX_IMAGE: nginx:1.27-alpine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
+      - name: Prove HTTPS routes and authenticated WSS upgrades through Nginx
+        run: npm run smoke:proxy
+      - name: Validate TLS/WSS proxy evidence
+        run: npm run validate:evidence -- proxy "$QQPET_PROXY_REPORT"
+      - name: Upload TLS/WSS proxy evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c12-tls-wss-proxy-evidence
+          path: ${{ runner.temp }}/c12-proxy
+          if-no-files-found: warn
