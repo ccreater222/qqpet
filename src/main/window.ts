@@ -11,10 +11,19 @@ import { getSave } from './save'
 const CURSOR_INTERVAL_MS = 33
 const PAGES = process.env.ELECTRON_RENDERER_URL ?? APP_ORIGIN
 
+/**
+ * True while an E2E acceptance run keeps every real window invisible. Only the
+ * E2E launchers set the variable; a normal app start never sees it.
+ */
+export function e2eWindowsHidden(): boolean {
+  return process.env.QQPET_E2E_HIDE_WINDOWS === '1'
+}
+
 /** Transparent, click-through overlay following the pet's active display. */
 export function createPetWindow(): BrowserWindow {
   const initialDisplay = petDisplay(screen, getSave().settings.petDisplayId)
   const placement = (display: Parameters<typeof overlayArea>[0]) => overlayArea(display, process.platform === 'win32')
+  const hidden = e2eWindowsHidden()
   const win = new BrowserWindow({
     ...placement(initialDisplay),
     show: false,
@@ -34,6 +43,9 @@ export function createPetWindow(): BrowserWindow {
       sandbox: true,
       contextIsolation: true,
       zoomFactor: getSave().settings.zoom,
+      // Hidden E2E windows must keep rendering at full speed: Chromium otherwise
+      // throttles timers and animation in a window that is never shown.
+      ...(hidden ? { backgroundThrottling: false } : {}),
     },
   })
   win.setAlwaysOnTop(true, 'screen-saver')
@@ -46,6 +58,8 @@ export function createPetWindow(): BrowserWindow {
   // On macOS, dock.hide() turns the process into a UI element, which hides
   // windows that are already visible.
   win.once('ready-to-show', () => {
+    // E2E runs keep the pet window truly invisible for their whole lifetime.
+    if (hidden) return
     win.showInactive()
     if (process.platform === 'win32') hideOnFullscreen(win)
   })
@@ -134,7 +148,10 @@ function hideOnFullscreen(win: BrowserWindow): void {
     stdio: ['ignore', 'pipe', 'ignore'],
     windowsHide: true,
   })
-  createInterface({ input: ps.stdout }).on('line', fullscreenGate((full) => (full ? win.hide() : win.showInactive())))
+  createInterface({ input: ps.stdout }).on('line', fullscreenGate((full) => (
+    // A hidden E2E window must never be raised by the full-screen gate.
+    full || e2eWindowsHidden() ? win.hide() : win.showInactive()
+  )))
   win.on('closed', () => ps.kill())
 }
 
@@ -142,6 +159,7 @@ function hideOnFullscreen(win: BrowserWindow): void {
 export function openGameWindow(swf: string, parent?: BrowserWindow): BrowserWindow {
   const area = screen.getPrimaryDisplay().workAreaSize
   const scale = Math.min(1, (area.width * 0.9) / 1024, (area.height * 0.9) / 768)
+  const hidden = e2eWindowsHidden()
   const win = new BrowserWindow({
     parent,
     width: Math.round(1024 * scale),
@@ -149,7 +167,12 @@ export function openGameWindow(swf: string, parent?: BrowserWindow): BrowserWind
     useContentSize: true,
     backgroundColor: '#000',
     autoHideMenuBar: true,
-    webPreferences: { sandbox: true },
+    // Game windows are normally shown on creation; hidden E2E runs never show them.
+    ...(hidden ? { show: false } : {}),
+    webPreferences: {
+      sandbox: true,
+      ...(hidden ? { backgroundThrottling: false } : {}),
+    },
   })
   win.webContents.on('will-navigate', (e) => e.preventDefault())
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))

@@ -29,6 +29,15 @@ const TIME_FIXTURE_CLOCK_MS = Date.UTC(2030, 0, 1, 4, 0, 0)
 const CODE_REVISION = process.env.QQPET_CODE_REVISION?.trim()
   || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim()
 
+/**
+ * Real Electron windows stay invisible for the whole acceptance run. A human
+ * debugging the run may set QQPET_E2E_SHOW_WINDOWS=1 to watch it; that also
+ * makes the hidden-window evidence false, so such a run cannot pass the gate.
+ */
+const WINDOWS_ENV = {
+  QQPET_E2E_HIDE_WINDOWS: process.env.QQPET_E2E_SHOW_WINDOWS === '1' ? '0' : '1',
+}
+
 const [
   SCENARIO_COMPETING,
   SCENARIO_SESSION_ABUSE,
@@ -1032,6 +1041,7 @@ class RendererApp {
       cwd: ROOT,
       env: {
         ...process.env,
+        ...WINDOWS_ENV,
         QQPET_USER_DATA: this.userData,
         ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
       },
@@ -1298,6 +1308,7 @@ class RendererApp {
         appVersion: app.getVersion(),
         electronVersion: process.versions.electron,
         mainPid: process.pid,
+        hiddenMode: process.env.QQPET_E2E_HIDE_WINDOWS === '1',
         windows,
         rendererProcessCount: app.getAppMetrics().filter(metric => metric.type === 'Tab').length,
       }
@@ -5785,6 +5796,16 @@ async function main() {
       assert.ok(allWindows.every(window => window.nodeIntegration === false), 'nodeIntegration must stay disabled')
       assert.ok(ownerMain.rendererProcessCount >= 1 && playerMain.rendererProcessCount >= 1, 'real renderer processes')
       assert.notEqual(ownerMain.mainPid, playerMain.mainPid, 'distinct Electron main processes')
+      // The launchers default to hidden windows; the main process reports what
+      // it actually read, and no real BrowserWindow may be visible.
+      const hiddenMode = ownerMain.hiddenMode === true && playerMain.hiddenMode === true
+      assert.equal(ownerMain.hiddenMode, playerMain.hiddenMode,
+        'both Electron apps must read the same hidden-window mode')
+      if (hiddenMode) {
+        assert.ok(allWindows.every(window => window.visible === false),
+          'hidden-window mode must keep every real BrowserWindow invisible')
+      }
+      const windowsHidden = hiddenMode && allWindows.every(window => window.visible === false)
       for (const renderer of [ownerRenderer, playerRenderer]) {
         assert.equal(renderer.readyState, 'complete')
         assert.equal(renderer.title, 'QQ宠物')
@@ -5820,6 +5841,7 @@ async function main() {
         nodeIntegrationDisabled: allWindows.every(window => window.nodeIntegration === false),
         rendererDocumentLoaded: ownerRenderer.readyState === 'complete' && playerRenderer.readyState === 'complete',
         guiElementPresent: ownerRenderer.petElementPresent && playerRenderer.petElementPresent,
+        windowsHidden,
         urls: [...new Set(allWindows.map(window => window.url))],
         titles: [...new Set([ownerRenderer.title, playerRenderer.title])],
         electronVersion: ownerMain.electronVersion,

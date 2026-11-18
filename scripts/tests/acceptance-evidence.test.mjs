@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { access, copyFile, mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises'
+import { access, copyFile, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -88,6 +88,7 @@ function e2eReport() {
         nodeIntegrationDisabled: true,
         rendererDocumentLoaded: true,
         guiElementPresent: true,
+        windowsHidden: true,
       },
       websocket: {
         serverUrl: 'ws://127.0.0.1:1234/v1/sync',
@@ -340,6 +341,16 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
       report.evidence.rendererProof.preloadApiExposed = false
       return report
     }, /preloadApiExposed/],
+    ['hidden-window proof absent', () => {
+      const report = e2eReport()
+      delete report.evidence.rendererProof.windowsHidden
+      return report
+    }, /windowsHidden/],
+    ['visible windows cannot be accepted', () => {
+      const report = e2eReport()
+      report.evidence.rendererProof.windowsHidden = false
+      return report
+    }, /windowsHidden/],
     ['stepCount mismatch', () => {
       const report = e2eReport()
       report.evidence.stepCount = 35
@@ -356,6 +367,25 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
     assert.equal(result.ok, false, name)
     assert.match(result.errors.join('\n'), pattern, name)
   }
+})
+
+test('E2E launchers hide windows by default and the main process reads the flag', async () => {
+  const repoFile = relative => readFile(fileURLToPath(new URL('../../' + relative, import.meta.url)), 'utf8')
+  for (const launcher of ['scripts/e2e/renderer-e2e.mjs', 'scripts/e2e/run-e2e.mjs']) {
+    const source = await repoFile(launcher)
+    assert.ok(source.includes('QQPET_E2E_HIDE_WINDOWS'), launcher + ' must pass the hidden-window flag')
+    assert.ok(source.includes("QQPET_E2E_SHOW_WINDOWS === '1' ? '0' : '1'"),
+      launcher + ' must hide windows unless QQPET_E2E_SHOW_WINDOWS=1')
+    assert.ok(source.includes('...WINDOWS_ENV'),
+      launcher + ' must merge the hidden-window environment into every Electron launch')
+  }
+  const windowSource = await repoFile('src/main/window.ts')
+  assert.ok(windowSource.includes("QQPET_E2E_HIDE_WINDOWS === '1'"), 'main must read the hidden-window flag')
+  assert.ok(windowSource.includes('backgroundThrottling: false'), 'hidden windows must not be background-throttled')
+  const firstRunSource = await repoFile('src/main/first-run.ts')
+  assert.ok(firstRunSource.includes('e2eWindowsHidden()'), 'first-run must honor the hidden-window mode')
+  assert.ok(firstRunSource.includes('backgroundThrottling: false'),
+    'hidden first-run windows must not be background-throttled')
 })
 
 test('Docker smoke evidence requires boot, WAL/FULL, non-root and backup/restore content assertions', () => {

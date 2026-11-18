@@ -350,6 +350,7 @@ export function validateE2EReport(report, options = {}) {
         'nodeIntegrationDisabled',
         'rendererDocumentLoaded',
         'guiElementPresent',
+        'windowsHidden',
       ]) {
         if (rendererProof[flag] !== true) {
           errors.push('E2E rendererProof requires ' + flag + ' === true')
