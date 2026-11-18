@@ -13,7 +13,7 @@
 | `npm run typecheck` | 四套 `tsc --noEmit`：node、web、harmony、e2e（`package.json:14`） | 任何 TypeScript 改动 | 0/非 0 |
 | `npm run test:compat` | `node --experimental-strip-types --test scripts/tests/*.test.mjs`（`package.json:26`） | `src/shared/**`、`src/main/**`、移动桥、脚本改动 | 0/1 |
 | `npm run test:docs` | docs 检查器自身的单元/契约测试（`scripts/docs/tests/*.test.mjs`） | 任何 `scripts/docs/**` 改动 | 0/1 |
-| `npm run check:docs` | 全量文档结构、索引、链接、行数、命名、代码注释引用、doc-map 死规则 | 任何 `docs/**`、`AGENTS.md`、`CLAUDE.md`、doc-map 改动 | 0/1/2 |
+| `npm run check:docs` | 全量文档结构、H1/结论/行数、索引、链接、命名、代码注释引用、doc-map 死规则；I/O 错误显式失败 | 任何 `docs/**`、`AGENTS.md`、`CLAUDE.md`、doc-map 改动 | 0/1/2 |
 | `npm run check:docs:staged` | staged 代码是否同步了 `require` 文档、`warn` 提醒、index/worktree 一致性 | 提交前（`pre-commit` 自动执行） | 0/1/2 |
 | `npm run build` | `electron-vite build`（主进程/preload/渲染层） | 影响打包、入口、资源、构建配置 | 0/非 0 |
 | `npm run build:android-web` / `build:harmony-web` / `build:ios-web` | 三个平台 Web 产物到 `out/{android,harmony,ios}` | 影响对应平台 | 0/非 0 |
@@ -45,7 +45,7 @@ node --experimental-strip-types --test scripts/tests/sync-protocol.test.mjs
 | --- | --- | --- |
 | `0` | 全部检查通过 | 可继续 |
 | `1` | 校验失败：结构、索引、链接、命名、行数、doc-map 规则、staged 缺文档 | 修文档/代码，不得跳过 |
-| `2` | 工具或配置错误：非 git 仓库、缺 `docs/`、缺或损坏 `doc-map.json`、未知参数、Node 版本不足 | 修环境或工具；**这不代表检查通过** |
+| `2` | 工具或配置错误：非 git 仓库、缺 `docs/`、缺或损坏 `doc-map.json`、未知参数、Node 版本不足，或无法读取 tracked 源码 / docs 子树（EACCES、EPERM 等） | 修环境或工具；**这不代表检查通过** |
 
 `2` 的存在意义是把「检查没完成」和「检查发现有错」分开。把 `2` 当成 `0` 或直接跳过，等于让文档门禁失效。
 
@@ -119,6 +119,7 @@ node --experimental-strip-types --test scripts/tests/sync-protocol.test.mjs
 ## 6. Hook 与 staged 一致性
 
 - `npm run hooks:install` 把 `core.hooksPath` 指向仓库内的 `.githooks`；安装器在已有自定义 hook、非仓库目录、Node 版本不足时显式失败，不覆盖用户配置。
+- LFS 旧 hook 通过 `.githooks/post-checkout`、`post-commit`、`post-merge`、`pre-push` 转发到 `$(git rev-parse --git-common-dir)/hooks/<hook>`；旧 hook 不存在或不可执行时 no-op，不能因为切换 hooksPath 而禁用 LFS。
 - `pre-commit` 的顺序是：先拒绝任何 `docs/reviews/**` 的 staged 变更（冻结区不可改），再跑全量 `check:docs`，最后跑 `check:docs:staged` 校验本次 staged 代码是否同步了文档。
 - `commit-msg` 只在提交信息含跳过声明时校验 `Docs-Check: off — <理由>`。
 - `check:docs:staged` 的判定基于 index 与工作区的对比：`require` 规则命中的代码有 staged 变更而目标文档没有同批更新 → 1；`warn` 规则只提示 → 0；删除文档不算更新；index 与 worktree 对同一路径的分歧 → 1。完整规则见 `docs/standards/documentation.md` 与 `docs/doc-map.json`。
@@ -127,7 +128,7 @@ node --experimental-strip-types --test scripts/tests/sync-protocol.test.mjs
 
 | CI 作业（`.github/workflows/ci.yml`） | 覆盖 |
 | --- | --- |
-| `root`（`:18-44`） | `typecheck`、`test:compat`、`build`、三个平台 Web 构建 |
+| `root`（`:18-47`） | `typecheck`、`test:docs`、`check:docs`、`test:compat`、`build`、三个平台 Web 构建 |
 | `server`（`:46-61`） | `npm --prefix server run typecheck`、`npm --prefix server test` |
 | `e2e`（`:64-101`） | `xvfb-run -a npm run test:e2e`，随后 `validate-evidence.mjs e2e …` |
 | `docker-smoke`（`:104-145`） | `smoke:compose`、`smoke:docker`、`validate:evidence -- docker …` |

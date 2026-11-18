@@ -49,7 +49,7 @@
 | `npm run typecheck` | 根仓库 node/web/harmony/e2e 四套 `tsc --noEmit` | 任何 TypeScript 改动 |
 | `npm run test:compat` | `scripts/tests/*.test.mjs`（含共享运行时、协议、存储、桥接测试） | 任何 `src/shared/**`、`src/main/**`、移动桥或脚本改动 |
 | `npm run test:docs` | docs 检查器自身的单元/契约测试 | 任何 `scripts/docs/**` 改动 |
-| `npm run check:docs` | 全量文档结构、索引、链接、行数、命名、代码注释引用、doc-map 死规则 | 任何 `docs/**`、`AGENTS.md`、`CLAUDE.md`、doc-map 改动 |
+| `npm run check:docs` | 全量文档结构、H1/结论/行数、索引、链接、命名、代码注释引用、doc-map 死规则；I/O 错误显式失败 | 任何 `docs/**`、`AGENTS.md`、`CLAUDE.md`、doc-map 改动 |
 | `npm run check:docs:staged` | staged 代码是否同步了 `require` 文档、`warn` 提醒、index/worktree 一致性 | 提交前（hook 自动执行） |
 | `npm run build` | Electron 主进程/preload/渲染层构建 | 影响打包、入口、资源或构建配置 |
 | `npm run build:android-web` / `npm run build:harmony-web` / `npm run build:ios-web` | 对应平台 Web 产物 | 影响对应平台 |
@@ -62,11 +62,11 @@
 | `npm run smoke:compose` / `npm run smoke:docker` / `npm run smoke:proxy` | Compose 失败关闭、镜像/备份恢复、TLS/WSS 代理 | 部署、镜像、代理、健康检查改动 |
 | `npm run gate:acceptance` | 发布阻断级完整验收，证据写 `.agent-reports/acceptance/` | 发布前或任务明确要求时 |
 
-CI 事实：`.github/workflows/ci.yml` 含 `root`（typecheck、compat、四个 Web 构建）、`server`（typecheck + test）、`e2e`、`docker-smoke`、`proxy-wss` 五个作业；`.github/workflows/build.yml` 负责 tag 发布产物。CI 绿灯不能替代本地针对性验证，CI 未覆盖的改动必须在交付说明中写明验证方式。
+CI 事实：`.github/workflows/ci.yml` 含 `root`（typecheck、test:docs、check:docs、compat、四个 Web 构建）、`server`（typecheck + test）、`e2e`、`docker-smoke`、`proxy-wss` 五个作业；`.github/workflows/build.yml` 负责 tag 发布产物。CI 绿灯不能替代本地针对性验证，CI 未覆盖的改动必须在交付说明中写明验证方式。
 
 ### 5.1 文档门禁的退出码与跳过
 
-- `check:docs`、`check:docs:staged` 退出码：`0` 通过；`1` 校验失败（结构/索引/链接/命名/行数/doc-map/staged 缺文档）；`2` 工具或配置错误（非 git 仓库、缺 `docs/`、缺/损坏 `doc-map.json`、未知参数、Node 版本不足）。
+- `check:docs`、`check:docs:staged` 退出码：`0` 通过；`1` 校验失败（结构/索引/链接/命名/行数/doc-map/staged 缺文档）；`2` 工具或配置错误（非 git 仓库、缺 `docs/`、缺/损坏 `doc-map.json`、未知参数、Node 版本不足，或无法读取 tracked 源码 / docs 子树）。
 - `2` 表示检查器没有完成检查，不得当作通过，也不得用跳过开关掩盖；先修工具链或环境。
 - 仅当确认本次改动无需更新文档时，才允许 `DOCS_CHECK=off` 跳过**文档检查**；提交信息必须包含一行 `Docs-Check: off — <至少 8 个字符的理由>`，由 `commit-msg` 钩子强制校验。该开关不影响 `typecheck`、测试、构建、服务端门禁。
 - 不得用 `--no-verify` 绕过 hook；确需绕过时必须先获得人类批准，并在交付说明中记录跳过的检查、原因和补偿验证。

@@ -17,6 +17,16 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const MANAGED_MARKER = 'qqpet-docs-hook: managed';
 const MANAGED_HOOKS = ['pre-commit', 'commit-msg'];
 
+function isEntryPoint() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return fs.realpathSync(entry) === fs.realpathSync(SCRIPT_PATH);
+  } catch {
+    return path.resolve(entry) === path.resolve(SCRIPT_PATH);
+  }
+}
+
 function git(root, args) {
   return execFileSync('git', args, {
     cwd: root,
@@ -145,6 +155,6 @@ function main() {
   fs.chmodSync(runtimePath, 0o755);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_PATH) {
+if (isEntryPoint()) {
   main();
 }

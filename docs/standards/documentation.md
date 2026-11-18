@@ -120,9 +120,9 @@
 | 命令 | 作用 |
 |---|---|
 | `npm run test:docs` | 检查器自身测试；`node --test scripts/docs/tests/*.test.mjs` |
-| `npm run check:docs` | 全量检查：目录、命名、结构、索引、链接、代码注释中的文档引用、doc-map |
+| `npm run check:docs` | 全量检查：目录、命名、结构、H1/结论/行数、索引、链接、代码注释中的文档引用、doc-map；I/O 错误显式失败 |
 | `npm run check:docs:staged` | 只针对 staged 变更：`require` 缺文档失败、`warn` 提醒、index/worktree 分歧失败 |
-| `npm run hooks:install` | 安装 `.githooks` 下的 `pre-commit` / `commit-msg` |
+| `npm run hooks:install` | 安装 `.githooks` 下的 `pre-commit` / `commit-msg`；LFS 旧 hook 通过 `.githooks/post-*` 与 `pre-push` 转发 |
 
 全量检查读取工作区；doc-map 死规则以 `git ls-files` 的 tracked 文件为准，未跟踪文件不参与；staged 检查读取 `git diff --cached`（`ACMRD`，不做 rename 折叠）。
 
@@ -132,7 +132,7 @@
 |---|---|---|
 | `0` | 通过，或按 §10.3 显式跳过 | 可继续 |
 | `1` | 校验失败：结构/索引/链接/命名/行数/doc-map/staged 缺文档 | 修文档或修代码映射，不得忽略 |
-| `2` | 工具或配置错误：非 git 仓库、缺 `docs/`、缺/损坏 `doc-map.json`、未知参数、Node 版本不足 | 先修环境，不得当作通过 |
+| `2` | 工具或配置错误：非 git 仓库、缺 `docs/`、缺/损坏 `doc-map.json`、未知参数、Node 版本不足，或无法读取 tracked 源码 / docs 子树（EACCES、EPERM 等） | 先修环境，不得当作通过 |
 
 `--json` 输出用于自动化：全量/失败包含 `mode`、`ok`、`issues`；staged 包含 `failures`、`warnings`、`impacts`；工具错误包含 `error`；跳过包含 `skipped` 与 `reason`。
 

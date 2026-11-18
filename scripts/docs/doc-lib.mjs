@@ -57,12 +57,14 @@ const SKIP_SOURCE_DIRS = new Set([
   '__pycache__',
 ]);
 
-const NON_DEVELOPMENT_DOC_DIRS = new Set(['docs/reports', 'docs/slides']);
-
 /** 统一为仓库相对的 POSIX 路径。 */
 export function normalizeRepoPath(input) {
   const normalized = String(input).replace(/\\/g, '/').replace(/^\.\//, '');
   return path.posix.normalize(normalized);
+}
+
+function isMissingError(error) {
+  return error && (error.code === 'ENOENT' || error.code === 'ENOTDIR');
 }
 
 /**
@@ -78,8 +80,9 @@ export function existsWithExactCase(root, repoRelativePath) {
     let entries;
     try {
       entries = fs.readdirSync(current);
-    } catch {
-      return false;
+    } catch (error) {
+      if (isMissingError(error)) return false;
+      throw error;
     }
     if (!entries.includes(part)) return false;
     current = path.join(current, part);
@@ -404,7 +407,14 @@ export function checkDocContent(docPath, content) {
   }
 
   const h1Count = countH1Lines(lines);
-  if (h1Count > 1) {
+  if (h1Count === 0) {
+    issues.push({
+      code: 'missing-h1',
+      severity: 'error',
+      path: normalized,
+      message: '文档缺少 H1 标题；每份 living 文档必须恰好有一个 H1',
+    });
+  } else if (h1Count > 1) {
     issues.push({
       code: 'duplicate-h1',
       severity: 'error',
@@ -439,15 +449,15 @@ export function collectMarkdownFiles(root) {
     let entries;
     try {
       entries = fs.readdirSync(absoluteDir, { withFileTypes: true });
-    } catch {
-      return;
+    } catch (error) {
+      if (isMissingError(error)) return;
+      throw error;
     }
     for (const entry of entries) {
       if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
       const absolutePath = path.join(absoluteDir, entry.name);
       const relativePath = `${relativeDir}/${entry.name}`;
       if (entry.isDirectory()) {
-        if (NON_DEVELOPMENT_DOC_DIRS.has(relativePath)) continue;
         walk(absolutePath, relativePath);
         continue;
       }
@@ -747,15 +757,17 @@ export function collectSourceTextFiles(root, trackedFiles) {
     let stat;
     try {
       stat = fs.statSync(absolutePath);
-    } catch {
-      continue;
+    } catch (error) {
+      if (isMissingError(error)) continue;
+      throw error;
     }
     if (!stat.isFile() || stat.size > 2 * 1024 * 1024) continue;
     let content;
     try {
       content = fs.readFileSync(absolutePath, 'utf8');
-    } catch {
-      continue;
+    } catch (error) {
+      if (isMissingError(error)) continue;
+      throw error;
     }
     if (content.includes('\0')) continue;
     results.push({ path: relativePath, content });
@@ -932,7 +944,12 @@ export function validateDocs(root, options = {}) {
 
   const readDocContent = (docPath) => {
     if (!existsWithExactCase(root, docPath)) return null;
-    return fs.readFileSync(path.join(root, ...docPath.split('/')), 'utf8');
+    try {
+      return fs.readFileSync(path.join(root, ...docPath.split('/')), 'utf8');
+    } catch (error) {
+      if (isMissingError(error)) return null;
+      throw error;
+    }
   };
 
   for (const docPath of markdownFiles) {

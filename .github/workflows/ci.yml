@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   root:
-    name: Root typecheck, compat tests and web builds
+    name: Root typecheck, docs checks, compat tests and web builds
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
