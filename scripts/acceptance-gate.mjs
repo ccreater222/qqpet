@@ -13,9 +13,9 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  GATE_SUMMARY_SCHEMA_VERSION,
   REQUIRED_E2E_SCENARIO_NAMES,
   REQUIRED_GATE_COMMAND_IDS,
+  buildGateSummary,
   cleanEvidenceDirectory,
   evaluateAcceptanceGate,
   parseGitStatusPorcelain,
@@ -136,78 +136,27 @@ function markdownRow(values) {
   return '| ' + values.join(' | ') + ' |'
 }
 
-async function readJsonReport(path) {
+/**
+ * Read a report exactly once. The same bytes are parsed for validation and
+ * hashed into the gate summary, so the recorded sha256 cannot drift from the
+ * values that were checked.
+ */
+async function readEvidenceReport(path) {
+  let bytes = null
   try {
-    return JSON.parse(await readFile(path, 'utf8'))
+    bytes = await readFile(path)
   } catch {
-    return null
+    return { path, bytes: null, report: null }
+  }
+  try {
+    return { path, bytes, report: JSON.parse(bytes.toString('utf8')) }
+  } catch {
+    return { path, bytes, report: null }
   }
 }
 
 function validationLine(label, validation) {
   return '- ' + label + ': **' + (validation.ok ? 'PASS' : 'FAIL') + '**'
-}
-
-/**
- * Build the authoritative machine summary from the exact objects that the
- * human-readable markdown is rendered from. The summary intentionally carries
- * all mandatory scenario details so a rename cannot silently drop one.
- */
-function buildGateSummary(options) {
-  const resultsById = new Map((options.results ?? []).map(result => [result.id, result]))
-  const steps = options.steps ?? []
-  const commands = steps.map(step => {
-    const result = resultsById.get(step.id)
-    if (result === undefined) {
-      return {
-        id: step.id,
-        label: step.label,
-        command: [step.command, ...step.args].join(' '),
-        exitCode: null,
-        durationMs: 0,
-        startedAt: null,
-        finishedAt: null,
-        status: 'NOT_RUN',
-      }
-    }
-    return {
-      id: step.id,
-      label: step.label,
-      command: result.command,
-      exitCode: result.code,
-      durationMs: result.durationMs,
-      startedAt: result.startedAt,
-      finishedAt: result.finishedAt,
-      status: result.code === 0 ? 'PASS' : 'FAIL',
-    }
-  })
-  const stepByName = new Map((options.e2eReport?.steps ?? []).map(step => [step.name, step]))
-  const scenarios = REQUIRED_E2E_SCENARIO_NAMES.map(name => {
-    const step = stepByName.get(name)
-    return {
-      name,
-      status: typeof step?.status === 'string' ? step.status.toLowerCase() : 'missing',
-      durationMs: Number.isFinite(step?.durationMs) ? step.durationMs : null,
-      detail: step?.detail ?? null,
-    }
-  })
-  return {
-    schemaVersion: GATE_SUMMARY_SCHEMA_VERSION,
-    result: options.gateEvaluation.ok ? 'PASS' : 'FAIL',
-    codeRevision: options.revision,
-    startedAt: new Date(options.startedAtMs).toISOString(),
-    finishedAt: new Date(options.finishedAtMs).toISOString(),
-    cleanTree: {
-      before: options.gateEvaluation.workingTreeBefore.clean === true,
-      after: options.gateEvaluation.workingTreeAfter.clean === true,
-    },
-    head: {
-      before: options.revision,
-      after: options.revisionAfter,
-    },
-    commands,
-    scenarios,
-  }
 }
 
 async function main() {
@@ -284,11 +233,14 @@ async function main() {
 
   const revisionAfter = await runGit(['rev-parse', 'HEAD'])
   const revisionStable = revisionAfter.code === 0 && revisionAfter.stdout === revision.stdout
-  const [e2eReport, dockerReport, proxyReport] = await Promise.all([
-    readJsonReport(E2E_REPORT_PATH),
-    readJsonReport(DOCKER_REPORT_PATH),
-    readJsonReport(PROXY_REPORT_PATH),
+  const [e2eEvidenceFile, dockerEvidenceFile, proxyEvidenceFile] = await Promise.all([
+    readEvidenceReport(E2E_REPORT_PATH),
+    readEvidenceReport(DOCKER_REPORT_PATH),
+    readEvidenceReport(PROXY_REPORT_PATH),
   ])
+  const e2eReport = e2eEvidenceFile.report
+  const dockerReport = dockerEvidenceFile.report
+  const proxyReport = proxyEvidenceFile.report
   // Keep the concise machine-readable evidence, not multi-process debug logs.
   await rm(join(E2E_ARTIFACT_DIR, 'c12-server.log'), { force: true })
   await rm(join(E2E_ARTIFACT_DIR, 'c12-owner-harness.log'), { force: true })
@@ -325,6 +277,11 @@ async function main() {
     finishedAtMs: gateFinishedAtMs,
     gateEvaluation,
     e2eReport,
+    reports: {
+      e2e: e2eEvidenceFile,
+      docker: dockerEvidenceFile,
+      proxy: proxyEvidenceFile,
+    },
   })
   const gateSummaryValidation = validateGateSummary(gateSummary, {
     currentRevision: revision.stdout,
@@ -410,6 +367,14 @@ async function main() {
   lines.push(validationLine('TLS/WSS proxy smoke report', proxyValidation))
   lines.push('- Machine-readable gate summary: **' + (allPassed ? 'PASS' : 'FAIL')
     + '** (authoritative; `gate-summary.json`)')
+  for (const [digestLabel, digestKey] of [
+    ['E2E', 'e2e'],
+    ['Docker smoke', 'docker'],
+    ['TLS/WSS proxy smoke', 'proxy'],
+  ]) {
+    lines.push('- ' + digestLabel + ' report sha256: `'
+      + String(gateSummary.evidence?.[digestKey]?.reportSha256 ?? 'missing') + '`')
+  }
   lines.push('- Markdown gate report: explanatory only; validation reads the JSON summary')
   lines.push('- HEAD unchanged during gate: **' + (revisionStable ? 'PASS' : 'FAIL') + '**')
   lines.push('- Non-generated working tree before/after commands: **'

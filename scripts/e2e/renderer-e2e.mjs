@@ -1301,6 +1301,7 @@ class RendererApp {
           contextIsolation: preferences.contextIsolation === true,
           sandbox: preferences.sandbox === true,
           nodeIntegration: preferences.nodeIntegration === true,
+          backgroundThrottling: preferences.backgroundThrottling,
         }
       })
       return {
@@ -1770,6 +1771,7 @@ async function main() {
       'Local and server timestamps in the handoff scenario share a near-wall clock fixture, but the test clock is not advanced during the final local scheduler run; local archive/freeze assertions compare persisted document hashes rather than wall-clock tick counts.',
       'The renderer-kill, canonical-mutation and secret-boundary scenarios use dedicated real standalone servers with a test-only injected wall clock so revision/event deltas stay exact; they still launch real Electron renderers, drive the production preload API, and exercise real WebSockets, SQLite and captured server logs.',
       'The secret/device-field audit inspects the temporary server SQLite/WAL/schema, device and pairing hash storage, captured server logs, canonical save/engine JSON and renderer projections. It does not scan OS keychains, encrypted Electron safeStorage blobs or process memory.',
+      'The hidden-window run never shows a BrowserWindow, so the production ready-to-show/showInactive (and game-window show) path is not covered by this hidden-window run; it needs a human check or a separate show-mode smoke that is intentionally not part of the headless acceptance evidence.',
     ],
   }
   const step = async (name, fn) => {
@@ -5804,6 +5806,13 @@ async function main() {
       if (hiddenMode) {
         assert.ok(allWindows.every(window => window.visible === false),
           'hidden-window mode must keep every real BrowserWindow invisible')
+        // Chromium throttles timers and requestAnimationFrame in a window that is
+        // never shown. Hidden E2E windows only keep rendering at full speed because
+        // the production BrowserWindow passes backgroundThrottling: false; without
+        // that preference every scenario above would silently measure a throttled app.
+        assert.ok(allWindows.every(window => window.backgroundThrottling === false),
+          'hidden-window mode requires backgroundThrottling === false on every real BrowserWindow'
+          + ' (otherwise the never-shown windows are throttled and the run cannot prove real rendering)')
       }
       const windowsHidden = hiddenMode && allWindows.every(window => window.visible === false)
       for (const renderer of [ownerRenderer, playerRenderer]) {
@@ -5842,6 +5851,7 @@ async function main() {
         rendererDocumentLoaded: ownerRenderer.readyState === 'complete' && playerRenderer.readyState === 'complete',
         guiElementPresent: ownerRenderer.petElementPresent && playerRenderer.petElementPresent,
         windowsHidden,
+        backgroundThrottlingDisabled: allWindows.every(window => window.backgroundThrottling === false),
         urls: [...new Set(allWindows.map(window => window.url))],
         titles: [...new Set([ownerRenderer.title, playerRenderer.title])],
         electronVersion: ownerMain.electronVersion,

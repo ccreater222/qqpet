@@ -1,17 +1,22 @@
 import assert from 'node:assert/strict'
 import { access, copyFile, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
+  buildGateEvidenceSnapshot,
+  buildGateSummary,
   cleanEvidenceDirectory,
   evaluateAcceptanceGate,
   evaluateWorkingTree,
   parseGitStatusPorcelain,
+  REQUIRED_DOCKER_EVIDENCE_FLAGS,
   REQUIRED_E2E_SCENARIO_NAMES,
   REQUIRED_GATE_COMMANDS,
+  REQUIRED_PROXY_EVIDENCE_FLAGS,
   validateDockerSmokeReport,
   validateE2EReport,
   validateGateSummary,
@@ -22,6 +27,19 @@ const NOW = Date.parse('2026-10-22T21:00:00.000Z')
 const REV = 'a'.repeat(40)
 const startedAt = new Date(NOW - 120_000).toISOString()
 const finishedAt = new Date(NOW - 1_000).toISOString()
+const GATE_E2E_FLAGS = [
+  'twoProcesses',
+  'realStandaloneServer',
+  'realWebSocket',
+  'realElectron',
+  'realRenderer',
+  'rendererCoverage',
+  'guiCoverage',
+]
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex')
+}
 
 function e2eSteps(count = 36) {
   const required = REQUIRED_E2E_SCENARIO_NAMES.map((name, index) => ({
@@ -89,6 +107,7 @@ function e2eReport() {
         rendererDocumentLoaded: true,
         guiElementPresent: true,
         windowsHidden: true,
+        backgroundThrottlingDisabled: true,
       },
       websocket: {
         serverUrl: 'ws://127.0.0.1:1234/v1/sync',
@@ -148,6 +167,40 @@ function proxyReport() {
   }
 }
 
+function summaryEvidence() {
+  return {
+    e2e: {
+      reportSha256: 'e'.repeat(64),
+      result: 'PASS',
+      codeRevision: REV,
+      stepCount: 36,
+      flags: Object.fromEntries(GATE_E2E_FLAGS.map(flag => [flag, true])),
+      rendererProof: {
+        browserWindowCount: 2,
+        rendererProcessCount: 2,
+        windowsHidden: true,
+        backgroundThrottlingDisabled: true,
+        preloadApiExposed: true,
+        contextIsolation: true,
+        sandboxedPreload: true,
+        nodeIntegrationDisabled: true,
+      },
+    },
+    docker: {
+      reportSha256: 'd'.repeat(64),
+      result: 'PASS',
+      codeRevision: REV,
+      flags: Object.fromEntries(REQUIRED_DOCKER_EVIDENCE_FLAGS.map(flag => [flag, true])),
+    },
+    proxy: {
+      reportSha256: 'f'.repeat(64),
+      result: 'PASS',
+      codeRevision: REV,
+      flags: Object.fromEntries(REQUIRED_PROXY_EVIDENCE_FLAGS.map(flag => [flag, true])),
+    },
+  }
+}
+
 function gateSummary() {
   const commandStartMs = NOW - 100_000
   return {
@@ -174,6 +227,7 @@ function gateSummary() {
       durationMs: index + 1,
       detail: { requiredIndex: index },
     })),
+    evidence: summaryEvidence(),
   }
 }
 
@@ -236,6 +290,21 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
       delete report.steps[0].detail
       return report
     }, /missing its gate detail/],
+    ['mandatory scenario empty detail object', () => {
+      const report = e2eReport()
+      report.steps[0].detail = {}
+      return report
+    }, /non-empty plain-object gate detail/],
+    ['mandatory scenario array detail', () => {
+      const report = e2eReport()
+      report.steps[1].detail = ['requiredIndex']
+      return report
+    }, /non-empty plain-object gate detail/],
+    ['mandatory scenario string detail', () => {
+      const report = e2eReport()
+      report.steps[2].detail = 'looks like evidence'
+      return report
+    }, /non-empty plain-object gate detail/],
     ['failed step', () => {
       const report = e2eReport()
       report.steps[4].status = 'fail'
@@ -351,6 +420,16 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
       report.evidence.rendererProof.windowsHidden = false
       return report
     }, /windowsHidden/],
+    ['hidden windows must prove throttling stays disabled', () => {
+      const report = e2eReport()
+      report.evidence.rendererProof.backgroundThrottlingDisabled = false
+      return report
+    }, /backgroundThrottlingDisabled/],
+    ['unthrottled proof absent', () => {
+      const report = e2eReport()
+      delete report.evidence.rendererProof.backgroundThrottlingDisabled
+      return report
+    }, /backgroundThrottlingDisabled/],
     ['stepCount mismatch', () => {
       const report = e2eReport()
       report.evidence.stepCount = 35
@@ -369,23 +448,70 @@ test('E2E evidence rejects missing, failed, stale, wrong-revision and incomplete
   }
 })
 
-test('E2E launchers hide windows by default and the main process reads the flag', async () => {
+function countOccurrences(source, needle) {
+  return source.split(needle).length - 1
+}
+
+const HIDDEN_THROTTLING_PREFERENCE = '...(hidden ? { backgroundThrottling: false } : {})'
+
+test('E2E launchers hide windows by default and hidden-mode rendering preconditions are asserted', async () => {
   const repoFile = relative => readFile(fileURLToPath(new URL('../../' + relative, import.meta.url)), 'utf8')
-  for (const launcher of ['scripts/e2e/renderer-e2e.mjs', 'scripts/e2e/run-e2e.mjs']) {
-    const source = await repoFile(launcher)
-    assert.ok(source.includes('QQPET_E2E_HIDE_WINDOWS'), launcher + ' must pass the hidden-window flag')
-    assert.ok(source.includes("QQPET_E2E_SHOW_WINDOWS === '1' ? '0' : '1'"),
-      launcher + ' must hide windows unless QQPET_E2E_SHOW_WINDOWS=1')
-    assert.ok(source.includes('...WINDOWS_ENV'),
-      launcher + ' must merge the hidden-window environment into every Electron launch')
-  }
+  const rendererSource = await repoFile('scripts/e2e/renderer-e2e.mjs')
+  assert.ok(rendererSource.includes('QQPET_E2E_HIDE_WINDOWS'),
+    'renderer launcher must pass the hidden-window flag')
+  assert.ok(rendererSource.includes("QQPET_E2E_SHOW_WINDOWS === '1' ? '0' : '1'"),
+    'renderer launcher must hide windows unless QQPET_E2E_SHOW_WINDOWS=1')
+  assert.ok(rendererSource.includes('...WINDOWS_ENV'),
+    'renderer launcher must merge the hidden-window environment into every Electron launch')
+  // The main-process harness opens no BrowserWindow/renderer; injecting window
+  // flags there was dead code that made the launcher list look like GUI cover.
+  const harnessSource = await repoFile('scripts/e2e/run-e2e.mjs')
+  assert.equal(harnessSource.includes('WINDOWS_ENV'), false,
+    'run-e2e must not inject window flags into a BrowserWindow-less harness')
+  assert.equal(harnessSource.includes('QQPET_E2E_HIDE_WINDOWS'), false,
+    'run-e2e must not claim hidden-window rendering coverage')
+
   const windowSource = await repoFile('src/main/window.ts')
-  assert.ok(windowSource.includes("QQPET_E2E_HIDE_WINDOWS === '1'"), 'main must read the hidden-window flag')
-  assert.ok(windowSource.includes('backgroundThrottling: false'), 'hidden windows must not be background-throttled')
+  assert.ok(windowSource.includes('export function e2eWindowsHidden()'),
+    'main must export the hidden-window predicate')
+  assert.equal(countOccurrences(windowSource, HIDDEN_THROTTLING_PREFERENCE), 2,
+    'pet and game windows must disable background throttling only while hidden')
+  assert.equal(countOccurrences(windowSource, 'backgroundThrottling: false'), 2,
+    'backgroundThrottling: false must never be unconditional')
+
   const firstRunSource = await repoFile('src/main/first-run.ts')
-  assert.ok(firstRunSource.includes('e2eWindowsHidden()'), 'first-run must honor the hidden-window mode')
-  assert.ok(firstRunSource.includes('backgroundThrottling: false'),
-    'hidden first-run windows must not be background-throttled')
+  assert.ok(firstRunSource.includes('const hidden = e2eWindowsHidden()'),
+    'first-run must honor the hidden-window mode once')
+  assert.equal(countOccurrences(firstRunSource, HIDDEN_THROTTLING_PREFERENCE), 1,
+    'first-run must disable background throttling only while hidden')
+  assert.equal(countOccurrences(firstRunSource, 'backgroundThrottling: false'), 1,
+    'first-run backgroundThrottling: false must never be unconditional')
+  assert.ok(firstRunSource.includes('if (!hidden) win.show()'),
+    'first-run must not show windows while hidden')
+})
+
+test('hidden-window mode guards every programmatic focus and records the uncovered show path', async () => {
+  const repoFile = relative => readFile(fileURLToPath(new URL('../../' + relative, import.meta.url)), 'utf8')
+  const indexSource = await repoFile('src/main/index.ts')
+  assert.match(indexSource, /import \{[^}]*\be2eWindowsHidden\b[^}]*\} from '\.\/window'/,
+    'index must import the hidden-window predicate from ./window')
+  assert.equal(countOccurrences(indexSource, 'win.focus()'), 2,
+    'the tray click and IPC.setFocusable are the only programmatic focus sites')
+  assert.equal(countOccurrences(indexSource, 'if (!e2eWindowsHidden()) win.focus()'), 2,
+    'neither focus site may present a hidden E2E window')
+
+  const rendererSource = await repoFile('scripts/e2e/renderer-e2e.mjs')
+  assert.ok(rendererSource.includes('backgroundThrottling: preferences.backgroundThrottling'),
+    'mainProof must record the effective backgroundThrottling preference per window')
+  assert.ok(rendererSource.includes(
+    'backgroundThrottlingDisabled: allWindows.every(window => window.backgroundThrottling === false)'),
+    'renderer proof must record the unthrottled hidden-window precondition')
+  assert.match(rendererSource, /residualGap: \[/,
+    'the honest residual gaps must enter the E2E evidence JSON')
+  assert.ok(rendererSource.includes('ready-to-show/showInactive'),
+    'residual gaps must disclose that hidden runs never exercise the production show path')
+  assert.ok(rendererSource.includes('not covered by this hidden-window run'),
+    'the show-path gap must be stated as uncovered')
 })
 
 test('Docker smoke evidence requires boot, WAL/FULL, non-root and backup/restore content assertions', () => {
@@ -442,6 +568,20 @@ test('machine-readable gate summary is authoritative for commands, revisions and
   assert.equal(valid.commandCount, REQUIRED_GATE_COMMANDS.length)
   assert.equal(valid.scenarioCount, REQUIRED_E2E_SCENARIO_NAMES.length)
 
+  // Canonical command lines stay accepted across platforms and whitespace styles.
+  const normalized = gateSummary()
+  const serverTypecheck = normalized.commands.find(command => command.id === 'server-typecheck')
+  serverTypecheck.command = '  npm.cmd   --prefix   server run typecheck '
+  const normalizedResult = validateGateSummary(normalized, summaryOptions)
+  assert.equal(normalizedResult.ok, true, normalizedResult.errors.join('\n'))
+
+  // An instant command is allowed only while its timestamp span agrees with it.
+  const instant = gateSummary()
+  instant.commands[0].finishedAt = instant.commands[0].startedAt
+  instant.commands[0].durationMs = 0
+  const instantResult = validateGateSummary(instant, summaryOptions)
+  assert.equal(instantResult.ok, true, instantResult.errors.join('\n'))
+
   const cases = [
     ['failed gate result', summary => { summary.result = 'FAIL' }, /result must be exactly "PASS"/],
     ['wrong tested revision', summary => { summary.codeRevision = 'b'.repeat(40) }, /does not match current HEAD/],
@@ -457,6 +597,54 @@ test('machine-readable gate summary is authoritative for commands, revisions and
     ['failed internal command', summary => { summary.commands[3].exitCode = 1 }, /must exit 0/],
     ['missing command duration', summary => { delete summary.commands[4].durationMs }, /durationMs/],
     ['missing command timestamp', summary => { delete summary.commands[5].startedAt }, /startedAt/],
+    ['spoofed command line', summary => { summary.commands[0].command = 'echo spoofed' },
+      /does not match the required command/],
+    ['status contradicts a successful exit code', summary => {
+      summary.commands[0].status = 'FAIL'
+    }, /status .* contradicts exitCode/],
+    ['status contradicts a failing exit code', summary => { summary.commands[6].exitCode = 1 },
+      /status .* contradicts exitCode/],
+    ['duration disagrees with its timestamps', summary => {
+      summary.commands[1].durationMs = 60_000
+    }, /durationMs .* does not match its .*span/],
+    ['missing evidence binding', summary => { delete summary.evidence }, /evidence object/],
+    ['e2e evidence result not passing', summary => { summary.evidence.e2e.result = 'FAIL' },
+      /evidence\.e2e\.result/],
+    ['e2e evidence revision mismatch', summary => {
+      summary.evidence.e2e.codeRevision = 'b'.repeat(40)
+    }, /evidence\.e2e\.codeRevision/],
+    ['e2e evidence flag not proven', summary => {
+      summary.evidence.e2e.flags.twoProcesses = false
+    }, /evidence\.e2e\.flags\.twoProcesses/],
+    ['e2e evidence step count below the floor', summary => {
+      summary.evidence.e2e.stepCount = 17
+    }, /evidence\.e2e\.stepCount/],
+    ['e2e evidence digest malformed', summary => {
+      summary.evidence.e2e.reportSha256 = 'not-a-sha256'
+    }, /evidence\.e2e\.reportSha256/],
+    ['e2e evidence windows not proven hidden', summary => {
+      summary.evidence.e2e.rendererProof.windowsHidden = false
+    }, /rendererProof\.windowsHidden/],
+    ['e2e evidence background throttling not disabled', summary => {
+      summary.evidence.e2e.rendererProof.backgroundThrottlingDisabled = false
+    }, /rendererProof\.backgroundThrottlingDisabled/],
+    ['e2e evidence renderer process proof too weak', summary => {
+      summary.evidence.e2e.rendererProof.rendererProcessCount = 1
+    }, /rendererProof\.rendererProcessCount/],
+    ['docker evidence result not passing', summary => { summary.evidence.docker.result = 'FAIL' },
+      /evidence\.docker\.result/],
+    ['docker evidence revision mismatch', summary => {
+      summary.evidence.docker.codeRevision = 'b'.repeat(40)
+    }, /evidence\.docker\.codeRevision/],
+    ['docker evidence flag not proven', summary => {
+      summary.evidence.docker.flags.backupContentAsserted = false
+    }, /evidence\.docker\.flags\.backupContentAsserted/],
+    ['docker evidence digest malformed', summary => {
+      summary.evidence.docker.reportSha256 = 'f'.repeat(63)
+    }, /evidence\.docker\.reportSha256/],
+    ['proxy evidence flag not proven', summary => {
+      summary.evidence.proxy.flags.syncAliasAuthenticated = false
+    }, /evidence\.proxy\.flags\.syncAliasAuthenticated/],
     ['required scenario renamed', summary => {
       summary.scenarios[0].name = 'renamed mandatory scenario'
     }, /missing mandatory scenario/],
@@ -464,6 +652,11 @@ test('machine-readable gate summary is authoritative for commands, revisions and
     ['required scenario detail disappeared', summary => {
       delete summary.scenarios[2].detail
     }, /missing its detail/],
+    ['required scenario detail is empty', summary => { summary.scenarios[3].detail = {} }, /detail/],
+    ['required scenario detail is an array', summary => { summary.scenarios[4].detail = ['x'] }, /detail/],
+    ['required scenario detail is a string', summary => {
+      summary.scenarios[5].detail = 'covered'
+    }, /detail/],
   ]
   for (const [name, mutate, pattern] of cases) {
     const summary = gateSummary()
@@ -472,6 +665,92 @@ test('machine-readable gate summary is authoritative for commands, revisions and
     assert.equal(result.ok, false, name)
     assert.match(result.errors.join('\n'), pattern, name)
   }
+})
+
+test('the gate summary records the real report evidence and report digests', () => {
+  const e2e = e2eReport()
+  const docker = dockerReport()
+  const proxy = proxyReport()
+  const reports = {
+    e2e: { bytes: Buffer.from(JSON.stringify(e2e)), report: e2e },
+    docker: { bytes: Buffer.from(JSON.stringify(docker)), report: docker },
+    proxy: { bytes: Buffer.from(JSON.stringify(proxy)), report: proxy },
+  }
+  const snapshot = buildGateEvidenceSnapshot(reports)
+  assert.equal(snapshot.e2e.reportSha256, sha256(reports.e2e.bytes))
+  assert.equal(snapshot.docker.reportSha256, sha256(reports.docker.bytes))
+  assert.equal(snapshot.proxy.reportSha256, sha256(reports.proxy.bytes))
+  assert.match(snapshot.e2e.reportSha256, /^[0-9a-f]{64}$/)
+  assert.deepEqual(snapshot.e2e.flags,
+    Object.fromEntries(GATE_E2E_FLAGS.map(flag => [flag, true])))
+  assert.equal(snapshot.e2e.rendererProof.browserWindowCount, 2)
+  assert.equal(snapshot.e2e.rendererProof.windowsHidden, true)
+  assert.equal(snapshot.e2e.rendererProof.backgroundThrottlingDisabled, true)
+  assert.equal(snapshot.e2e.stepCount, 36)
+  assert.deepEqual(snapshot.docker.flags,
+    Object.fromEntries(REQUIRED_DOCKER_EVIDENCE_FLAGS.map(flag => [flag, true])))
+  assert.deepEqual(snapshot.proxy.flags,
+    Object.fromEntries(REQUIRED_PROXY_EVIDENCE_FLAGS.map(flag => [flag, true])))
+
+  // Values are copied from the report; a failing report is never rewritten to true.
+  const failing = e2eReport()
+  failing.result = 'FAIL'
+  failing.evidence.realElectron = false
+  failing.evidence.rendererProof.windowsHidden = false
+  failing.evidence.rendererProof.backgroundThrottlingDisabled = false
+  failing.evidence.stepCount = 1
+  const failingSnapshot = buildGateEvidenceSnapshot({
+    e2e: { bytes: Buffer.from('tampered report bytes'), report: failing },
+    docker: null,
+    proxy: null,
+  })
+  assert.equal(failingSnapshot.e2e.result, 'FAIL')
+  assert.equal(failingSnapshot.e2e.flags.realElectron, false)
+  assert.equal(failingSnapshot.e2e.rendererProof.windowsHidden, false)
+  assert.equal(failingSnapshot.e2e.rendererProof.backgroundThrottlingDisabled, false)
+  assert.equal(failingSnapshot.e2e.stepCount, 1)
+  assert.equal(failingSnapshot.e2e.reportSha256, sha256(Buffer.from('tampered report bytes')))
+  assert.equal(failingSnapshot.docker.reportSha256, null)
+  assert.equal(failingSnapshot.proxy.reportSha256, null)
+
+  const steps = REQUIRED_GATE_COMMANDS.map(required => ({
+    id: required.id,
+    label: required.id,
+    command: 'npm',
+    args: required.command.replace(/^npm\s+/, '').split(' '),
+  }))
+  const commandStartMs = NOW - 100_000
+  const results = steps.map((step, index) => ({
+    id: step.id,
+    label: step.label,
+    command: [step.command, ...step.args].join(' '),
+    code: 0,
+    durationMs: 500,
+    startedAt: new Date(commandStartMs + index * 1_000).toISOString(),
+    finishedAt: new Date(commandStartMs + index * 1_000 + 500).toISOString(),
+  }))
+  const summary = buildGateSummary({
+    results,
+    steps,
+    revision: REV,
+    revisionAfter: REV,
+    startedAtMs: NOW - 120_000,
+    finishedAtMs: NOW - 1_000,
+    gateEvaluation: {
+      ok: true,
+      workingTreeBefore: { clean: true },
+      workingTreeAfter: { clean: true },
+    },
+    e2eReport: e2e,
+    reports,
+  })
+  assert.deepEqual(summary.evidence, snapshot)
+  const validation = validateGateSummary(summary, {
+    currentRevision: REV,
+    nowMs: NOW,
+    notBeforeMs: NOW - 180_000,
+  })
+  assert.equal(validation.ok, true, validation.errors.join('\n'))
 })
 
 test('git status parsing includes untracked paths and both sides of renames', () => {

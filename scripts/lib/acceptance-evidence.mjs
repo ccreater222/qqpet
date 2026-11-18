@@ -6,7 +6,9 @@
  * stale, belongs to another revision, omits required evidence, or records a
  * failed/incomplete scenario.
  */
+import { createHash } from 'node:crypto'
 import { mkdir, rm } from 'node:fs/promises'
+import { isDeepStrictEqual } from 'node:util'
 
 /** The current C12 E2E contains all mandatory §16.6 scenarios plus the setup/teardown steps. */
 export const E2E_MIN_STEPS = 36
@@ -115,7 +117,32 @@ export const REQUIRED_GATE_COMMAND_IDS = Object.freeze(
 )
 export const GATE_SUMMARY_SCHEMA_VERSION = 1
 
+/** Proof flags copied verbatim from the E2E report into the gate summary. */
+export const GATE_EVIDENCE_E2E_FLAGS = Object.freeze([
+  'twoProcesses',
+  'realStandaloneServer',
+  'realWebSocket',
+  'realElectron',
+  'realRenderer',
+  'rendererCoverage',
+  'guiCoverage',
+])
+/** Boolean renderer proof fields copied verbatim from the E2E report. */
+export const GATE_EVIDENCE_RENDERER_PROOF_FLAGS = Object.freeze([
+  'windowsHidden',
+  'backgroundThrottlingDisabled',
+  'preloadApiExposed',
+  'contextIsolation',
+  'sandboxedPreload',
+  'nodeIntegrationDisabled',
+])
+/** The summary only needs to prove a real multi-window run; the E2E report itself enforces 36. */
+export const GATE_EVIDENCE_MIN_E2E_STEPS = 18
+/** Clock tolerance between a recorded duration and its ISO timestamp span. */
+export const GATE_COMMAND_DURATION_TOLERANCE_MS = 2_000
+
 const GATE_REVISION_PATTERN = /^[0-9a-f]{40}$/i
+const GATE_REPORT_SHA256_PATTERN = /^[0-9a-f]{64}$/
 const RAW_UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
 
 function rawUuidPaths(value, path = '$') {
@@ -216,6 +243,39 @@ function validationResult(errors) {
   return { ok: errors.length === 0, errors }
 }
 
+/** Only a plain object with at least one own key counts as scenario evidence. */
+function nonEmptyPlainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) return false
+  return Object.keys(value).length > 0
+}
+
+/** Normalize a recorded command line so Windows `npm.cmd` still matches `npm`. */
+export function normalizeGateCommandLine(value) {
+  if (typeof value !== 'string') return null
+  return value
+    .replace(/\bnpm\.cmd\b/gi, 'npm')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** Lowercase sha256 of a report file's exact bytes; this binds reports to the summary. */
+export function gateReportSha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+function isSha256Hex(value) {
+  return typeof value === 'string' && GATE_REPORT_SHA256_PATTERN.test(value)
+}
+
+function sameRevision(value, revision) {
+  return typeof value === 'string'
+    && typeof revision === 'string'
+    && revision.length > 0
+    && value.toLowerCase() === revision.toLowerCase()
+}
+
 function validateCommon(report, options = {}) {
   const errors = []
   const nowMs = options.nowMs ?? Date.now()
@@ -306,6 +366,9 @@ export function validateE2EReport(report, options = {}) {
         errors.push('E2E mandatory scenario "' + name + '" did not pass')
       } else if (required.detail === undefined || required.detail === null) {
         errors.push('E2E mandatory scenario "' + name + '" is missing its gate detail')
+      } else if (nonEmptyPlainObject(required.detail) === false) {
+        errors.push('E2E mandatory scenario "' + name
+          + '" must record a non-empty plain-object gate detail')
       }
     }
     for (const step of namedSteps) {
@@ -351,6 +414,7 @@ export function validateE2EReport(report, options = {}) {
         'rendererDocumentLoaded',
         'guiElementPresent',
         'windowsHidden',
+        'backgroundThrottlingDisabled',
       ]) {
         if (rendererProof[flag] !== true) {
           errors.push('E2E rendererProof requires ' + flag + ' === true')
@@ -413,9 +477,237 @@ export function validateProxySmokeReport(report, options = {}) {
   return validationResult(errors)
 }
 
+function reportDigestOf(entry) {
+  const file = objectValue(entry)
+  if (file === null) return null
+  const { bytes } = file
+  return Buffer.isBuffer(bytes) || typeof bytes === 'string' ? gateReportSha256(bytes) : null
+}
+
+function evidenceFlagSnapshot(source, flags) {
+  const evidence = objectValue(source)
+  const snapshot = {}
+  for (const flag of flags) snapshot[flag] = evidence !== null && evidence[flag] === true
+  return snapshot
+}
+
+/**
+ * Snapshot the proof-bearing fields of the three reports plus the sha256 of
+ * their exact bytes. Every value is copied from the report (never assumed), so
+ * a report that did not prove a flag yields false/null here and fails
+ * validateGateSummary. Entries are `{ path, bytes, report }` as read once by
+ * the gate, keeping the digest and the parsed values on the same bytes.
+ */
+export function buildGateEvidenceSnapshot(reports = {}) {
+  const e2eFile = objectValue(reports.e2e)
+  const dockerFile = objectValue(reports.docker)
+  const proxyFile = objectValue(reports.proxy)
+  const e2eReport = objectValue(e2eFile?.report) ?? {}
+  const e2eEvidence = objectValue(e2eReport.evidence) ?? {}
+  const rendererProof = objectValue(e2eEvidence.rendererProof) ?? {}
+  const dockerEvidence = objectValue(objectValue(dockerFile?.report)?.evidence) ?? {}
+  const proxyEvidence = objectValue(objectValue(proxyFile?.report)?.evidence) ?? {}
+  return {
+    e2e: {
+      reportSha256: reportDigestOf(e2eFile),
+      result: typeof e2eReport.result === 'string' ? e2eReport.result : null,
+      codeRevision: typeof e2eReport.codeRevision === 'string' ? e2eReport.codeRevision : null,
+      stepCount: Number.isSafeInteger(e2eEvidence.stepCount) ? e2eEvidence.stepCount : null,
+      flags: evidenceFlagSnapshot(e2eEvidence, GATE_EVIDENCE_E2E_FLAGS),
+      rendererProof: {
+        browserWindowCount: Number.isSafeInteger(rendererProof.browserWindowCount)
+          ? rendererProof.browserWindowCount
+          : null,
+        rendererProcessCount: Number.isSafeInteger(rendererProof.rendererProcessCount)
+          ? rendererProof.rendererProcessCount
+          : null,
+        windowsHidden: rendererProof.windowsHidden === true,
+        backgroundThrottlingDisabled: rendererProof.backgroundThrottlingDisabled === true,
+        preloadApiExposed: rendererProof.preloadApiExposed === true,
+        contextIsolation: rendererProof.contextIsolation === true,
+        sandboxedPreload: rendererProof.sandboxedPreload === true,
+        nodeIntegrationDisabled: rendererProof.nodeIntegrationDisabled === true,
+      },
+    },
+    docker: {
+      reportSha256: reportDigestOf(dockerFile),
+      result: typeof objectValue(dockerFile?.report)?.result === 'string'
+        ? dockerFile.report.result
+        : null,
+      codeRevision: typeof objectValue(dockerFile?.report)?.codeRevision === 'string'
+        ? dockerFile.report.codeRevision
+        : null,
+      flags: evidenceFlagSnapshot(dockerEvidence, REQUIRED_DOCKER_EVIDENCE_FLAGS),
+    },
+    proxy: {
+      reportSha256: reportDigestOf(proxyFile),
+      result: typeof objectValue(proxyFile?.report)?.result === 'string'
+        ? proxyFile.report.result
+        : null,
+      codeRevision: typeof objectValue(proxyFile?.report)?.codeRevision === 'string'
+        ? proxyFile.report.codeRevision
+        : null,
+      flags: evidenceFlagSnapshot(proxyEvidence, REQUIRED_PROXY_EVIDENCE_FLAGS),
+    },
+  }
+}
+
+/**
+ * Build the authoritative machine summary from the exact command results and
+ * report files the gate validated. The summary carries every mandatory
+ * scenario detail and a sha256-bound evidence snapshot, so a renamed scenario
+ * or a dropped proof cannot silently pass.
+ */
+export function buildGateSummary(options = {}) {
+  const resultsById = new Map((options.results ?? []).map(result => [result.id, result]))
+  const steps = options.steps ?? []
+  const commands = steps.map(step => {
+    const result = resultsById.get(step.id)
+    if (result === undefined) {
+      return {
+        id: step.id,
+        label: step.label,
+        command: [step.command, ...step.args].join(' '),
+        exitCode: null,
+        durationMs: 0,
+        startedAt: null,
+        finishedAt: null,
+        status: 'NOT_RUN',
+      }
+    }
+    return {
+      id: step.id,
+      label: step.label,
+      command: result.command,
+      exitCode: result.code,
+      durationMs: result.durationMs,
+      startedAt: result.startedAt,
+      finishedAt: result.finishedAt,
+      status: result.code === 0 ? 'PASS' : 'FAIL',
+    }
+  })
+  const stepByName = new Map((options.e2eReport?.steps ?? []).map(step => [step.name, step]))
+  const scenarios = REQUIRED_E2E_SCENARIO_NAMES.map(name => {
+    const step = stepByName.get(name)
+    return {
+      name,
+      status: typeof step?.status === 'string' ? step.status.toLowerCase() : 'missing',
+      durationMs: Number.isFinite(step?.durationMs) ? step.durationMs : null,
+      detail: step?.detail ?? null,
+    }
+  })
+  return {
+    schemaVersion: GATE_SUMMARY_SCHEMA_VERSION,
+    result: options.gateEvaluation?.ok ? 'PASS' : 'FAIL',
+    codeRevision: options.revision,
+    startedAt: new Date(options.startedAtMs).toISOString(),
+    finishedAt: new Date(options.finishedAtMs).toISOString(),
+    cleanTree: {
+      before: options.gateEvaluation?.workingTreeBefore?.clean === true,
+      after: options.gateEvaluation?.workingTreeAfter?.clean === true,
+    },
+    head: {
+      before: options.revision,
+      after: options.revisionAfter,
+    },
+    commands,
+    scenarios,
+    evidence: buildGateEvidenceSnapshot(options.reports),
+  }
+}
+
 function validIsoTimestamp(value) {
   if (typeof value !== 'string') return Number.NaN
   return Date.parse(value)
+}
+
+/**
+ * The summary is only authoritative if it carries the proof the gate observed:
+ * digest-bound e2e/docker/proxy reports, passing results at the same revision,
+ * every required flag, real multi-window renderer proof and enough E2E steps.
+ */
+function appendGateEvidenceErrors(errors, evidence, summaryRevision, kind) {
+  if (evidence === null) {
+    errors.push(kind + ' must include an evidence object binding the e2e, docker and proxy reports')
+    return
+  }
+  const e2e = objectValue(evidence.e2e)
+  if (e2e === null) {
+    errors.push(kind + ' evidence must include an e2e object')
+  } else {
+    if (e2e.result !== 'PASS') {
+      errors.push(kind + ' evidence.e2e.result must be exactly "PASS" (got '
+        + JSON.stringify(e2e.result) + ')')
+    }
+    if (sameRevision(e2e.codeRevision, summaryRevision) === false) {
+      errors.push(kind + ' evidence.e2e.codeRevision ' + JSON.stringify(e2e.codeRevision)
+        + ' must equal the summary codeRevision ' + JSON.stringify(summaryRevision))
+    }
+    const flags = objectValue(e2e.flags)
+    if (flags === null) {
+      errors.push(kind + ' evidence.e2e must include a flags object')
+    } else {
+      for (const flag of GATE_EVIDENCE_E2E_FLAGS) {
+        if (flags[flag] !== true) errors.push(kind + ' evidence.e2e.flags.' + flag + ' must be true')
+      }
+    }
+    const proof = objectValue(e2e.rendererProof)
+    if (proof === null) {
+      errors.push(kind + ' evidence.e2e must include a rendererProof object')
+    } else {
+      for (const count of ['browserWindowCount', 'rendererProcessCount']) {
+        if (Number.isSafeInteger(proof[count]) === false || proof[count] < 2) {
+          errors.push(kind + ' evidence.e2e.rendererProof.' + count
+            + ' must record at least two real BrowserWindows/renderer processes')
+        }
+      }
+      for (const flag of GATE_EVIDENCE_RENDERER_PROOF_FLAGS) {
+        if (proof[flag] !== true) {
+          errors.push(kind + ' evidence.e2e.rendererProof.' + flag + ' must be true')
+        }
+      }
+    }
+    if (Number.isSafeInteger(e2e.stepCount) === false
+      || e2e.stepCount < GATE_EVIDENCE_MIN_E2E_STEPS) {
+      errors.push(kind + ' evidence.e2e.stepCount must be an integer >= '
+        + GATE_EVIDENCE_MIN_E2E_STEPS)
+    }
+    if (isSha256Hex(e2e.reportSha256) === false) {
+      errors.push(kind + ' evidence.e2e.reportSha256 must be a 64-character lowercase sha256 digest')
+    }
+  }
+  for (const [key, requiredFlags] of [
+    ['docker', REQUIRED_DOCKER_EVIDENCE_FLAGS],
+    ['proxy', REQUIRED_PROXY_EVIDENCE_FLAGS],
+  ]) {
+    const section = objectValue(evidence[key])
+    if (section === null) {
+      errors.push(kind + ' evidence must include a ' + key + ' object')
+      continue
+    }
+    if (section.result !== 'PASS') {
+      errors.push(kind + ' evidence.' + key + '.result must be exactly "PASS" (got '
+        + JSON.stringify(section.result) + ')')
+    }
+    if (sameRevision(section.codeRevision, summaryRevision) === false) {
+      errors.push(kind + ' evidence.' + key + '.codeRevision ' + JSON.stringify(section.codeRevision)
+        + ' must equal the summary codeRevision ' + JSON.stringify(summaryRevision))
+    }
+    const flags = objectValue(section.flags)
+    if (flags === null) {
+      errors.push(kind + ' evidence.' + key + ' must include a flags object')
+    } else {
+      for (const flag of requiredFlags) {
+        if (flags[flag] !== true) {
+          errors.push(kind + ' evidence.' + key + '.flags.' + flag + ' must be true')
+        }
+      }
+    }
+    if (isSha256Hex(section.reportSha256) === false) {
+      errors.push(kind + ' evidence.' + key
+        + '.reportSha256 must be a 64-character lowercase sha256 digest')
+    }
+  }
 }
 
 /**
@@ -536,6 +828,16 @@ export function validateGateSummary(summary, options = {}) {
       }
       if (typeof command.command !== 'string' || command.command.trim().length === 0) {
         errors.push(kind + ' command ' + required.id + ' must include its command line')
+      } else if (normalizeGateCommandLine(command.command) !== normalizeGateCommandLine(required.command)) {
+        errors.push(kind + ' command ' + required.id + ' recorded command line '
+          + JSON.stringify(command.command) + ' does not match the required command '
+          + JSON.stringify(required.command))
+      }
+      const expectedStatus = command.exitCode === 0 ? 'PASS' : 'FAIL'
+      if (command.status !== expectedStatus) {
+        errors.push(kind + ' command ' + required.id + ' status ' + JSON.stringify(command.status)
+          + ' contradicts exitCode ' + JSON.stringify(command.exitCode)
+          + ' (expected ' + expectedStatus + ')')
       }
       const commandStartedMs = validIsoTimestamp(command.startedAt)
       const commandFinishedMs = validIsoTimestamp(command.finishedAt)
@@ -556,6 +858,14 @@ export function validateGateSummary(summary, options = {}) {
       if (Number.isFinite(commandFinishedMs) && Number.isFinite(finishedAtMs)
         && commandFinishedMs > finishedAtMs) {
         errors.push(kind + ' command ' + required.id + ' finished after the gate summary')
+      }
+      if (Number.isSafeInteger(command.durationMs)
+        && Number.isFinite(commandStartedMs) && Number.isFinite(commandFinishedMs)) {
+        const elapsedMs = commandFinishedMs - commandStartedMs
+        if (Math.abs(command.durationMs - elapsedMs) > GATE_COMMAND_DURATION_TOLERANCE_MS) {
+          errors.push(kind + ' command ' + required.id + ' durationMs ' + command.durationMs
+            + ' does not match its ' + elapsedMs + 'ms startedAt/finishedAt span')
+        }
       }
     }
     for (const id of commandById.keys()) {
@@ -596,6 +906,9 @@ export function validateGateSummary(summary, options = {}) {
       }
       if (scenario.detail === undefined || scenario.detail === null) {
         errors.push(kind + ' mandatory scenario "' + name + '" is missing its detail')
+      } else if (nonEmptyPlainObject(scenario.detail) === false) {
+        errors.push(kind + ' mandatory scenario "' + name
+          + '" must record a non-empty plain-object detail')
       }
     }
     for (const name of scenarioByName.keys()) {
@@ -605,12 +918,93 @@ export function validateGateSummary(summary, options = {}) {
     }
   }
 
+  appendGateEvidenceErrors(
+    errors,
+    objectValue(parsed.evidence),
+    typeof parsed.codeRevision === 'string' ? parsed.codeRevision : '',
+    kind,
+  )
+
   return {
     ok: errors.length === 0,
     errors,
     commandCount: commands?.length ?? 0,
     scenarioCount: scenarios?.length ?? 0,
   }
+}
+
+const GATE_EVIDENCE_REPORT_LABELS = Object.freeze({
+  e2e: 'E2E',
+  docker: 'Docker smoke',
+  proxy: 'TLS/WSS proxy smoke',
+})
+
+/**
+ * Bind a gate summary to the exact sub-report files it claims. The CLI reads
+ * the in-repository default reports once and passes `{ path, bytes }` per kind;
+ * the summary is rejected when a report is missing, its bytes do not hash to
+ * the recorded sha256, or its result/revision disagree with the summary. The
+ * summary snapshot must also equal the values recomputed from those bytes, so
+ * hard-coded true flags cannot be paired with a failing report.
+ */
+export function validateGateEvidenceFiles(summary, files = {}) {
+  const parsed = objectValue(summary)
+  if (parsed === null) return validationResult(['Gate summary is missing or not a JSON object'])
+  const errors = []
+  const evidence = objectValue(parsed.evidence)
+  const summaryRevision = typeof parsed.codeRevision === 'string' ? parsed.codeRevision : ''
+  for (const kind of ['e2e', 'docker', 'proxy']) {
+    const label = GATE_EVIDENCE_REPORT_LABELS[kind]
+    const file = objectValue(objectValue(files)?.[kind])
+    const path = typeof file?.path === 'string' ? file.path : '(unknown path)'
+    const bytes = file?.bytes
+    if ((Buffer.isBuffer(bytes) || typeof bytes === 'string') === false) {
+      errors.push(label + ' report file is missing: ' + path)
+      continue
+    }
+    const digest = gateReportSha256(bytes)
+    const recordedSection = objectValue(objectValue(evidence)?.[kind])
+    const recordedDigest = recordedSection?.reportSha256 ?? null
+    if (digest !== recordedDigest) {
+      errors.push(label + ' report sha256 digest ' + digest + ' at ' + path
+        + ' does not match gate-summary evidence.' + kind + '.reportSha256 '
+        + JSON.stringify(recordedDigest))
+    }
+    let report
+    try {
+      report = JSON.parse(Buffer.isBuffer(bytes) ? bytes.toString('utf8') : bytes)
+    } catch (error) {
+      errors.push(label + ' report at ' + path + ' is not valid JSON: '
+        + (error instanceof Error ? error.message : String(error)))
+      continue
+    }
+    const parsedReport = objectValue(report)
+    if (parsedReport === null) {
+      errors.push(label + ' report at ' + path + ' must be a JSON object')
+      continue
+    }
+    if (parsedReport.result !== 'PASS') {
+      errors.push(label + ' report at ' + path + ' result must be exactly "PASS" (got '
+        + JSON.stringify(parsedReport.result) + ')')
+    }
+    if (sameRevision(parsedReport.codeRevision, summaryRevision) === false) {
+      errors.push(label + ' report codeRevision ' + JSON.stringify(parsedReport.codeRevision)
+        + ' does not match gate summary codeRevision ' + JSON.stringify(summaryRevision))
+    }
+    if (recordedSection !== null) {
+      const recomputed = buildGateEvidenceSnapshot({
+        [kind]: { path, bytes, report: parsedReport },
+      })[kind]
+      const recorded = { ...recordedSection }
+      delete recomputed.reportSha256
+      delete recorded.reportSha256
+      if (isDeepStrictEqual(recomputed, recorded) === false) {
+        errors.push(label + ' report evidence does not match the values recorded in '
+          + 'gate-summary evidence.' + kind + ' (' + path + ')')
+      }
+    }
+  }
+  return validationResult(errors)
 }
 
 /** Remove every old artifact before a gate run so a missing/failed run cannot reuse evidence. */

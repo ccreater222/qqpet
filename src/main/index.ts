@@ -16,7 +16,7 @@ import { handleScheme, registerScheme } from './protocol'
 import { exportSave, getSave, importSave, loadEmptySaveView, loadSave, patchSave, resetSave, setSaveView } from './save'
 import { createPetTray } from './tray'
 import { frontName } from './front'
-import { createPetWindow, openGameWindow } from './window'
+import { createPetWindow, e2eWindowsHidden, openGameWindow } from './window'
 import { LanNode, persistedLanId } from './lan'
 import { WebhookServer } from './webhook'
 import { VisitQueue } from './visit-queue'
@@ -264,7 +264,8 @@ app.whenReady().then(async () => {
     if (process.platform === 'win32' && click.kind === 'state' && getSave().havePet) {
       focusTaken = !win.isFocusable()
       if (focusTaken) win.setFocusable(true)
-      win.focus()
+      // A hidden E2E window must never be presented by a synthetic tray click.
+      if (!e2eWindowsHidden()) win.focus()
     }
     const b = win.getBounds()
     const z = getSave().settings.zoom
@@ -476,7 +477,7 @@ app.whenReady().then(async () => {
     // The window is born unfocusable; setFocusable alone does not make it key, so IME stays on the previous app.
     if (on) {
       if (process.platform === 'darwin') app.focus({ steal: true })
-      win.focus()
+      if (!e2eWindowsHidden()) win.focus()
     }
   })
   ipcMain.on(IPC.setAutoStart, (_e, on: boolean) => app.setLoginItemSettings({ openAtLogin: on }))

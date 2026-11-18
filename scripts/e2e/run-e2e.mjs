@@ -28,14 +28,6 @@ const CATCHUP_WAIT_MS = Number(process.env.QQPET_E2E_CATCHUP_WAIT_MS ?? '62000')
 const CODE_REVISION = process.env.QQPET_CODE_REVISION?.trim()
   || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim()
 
-/**
- * Real Electron windows stay invisible for the whole E2E run. A human
- * debugging the run may set QQPET_E2E_SHOW_WINDOWS=1 to watch it.
- */
-const WINDOWS_ENV = {
-  QQPET_E2E_HIDE_WINDOWS: process.env.QQPET_E2E_SHOW_WINDOWS === '1' ? '0' : '1',
-}
-
 if (process.platform === 'linux' && process.env.DISPLAY === undefined && process.env.QQPET_E2E_XVFB === undefined) {
   const wrapped = spawnSync('xvfb-run', ['-a', process.execPath, fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
     stdio: 'inherit',
@@ -121,7 +113,6 @@ class ElectronApp {
       cwd: ROOT,
       env: {
         ...process.env,
-        ...WINDOWS_ENV,
         QQPET_E2E_USER_DATA: this.options.userData,
         QQPET_E2E_SERVER_URL: this.options.serverUrl,
         QQPET_E2E_PAIRING_CODE: this.options.pairingCode,

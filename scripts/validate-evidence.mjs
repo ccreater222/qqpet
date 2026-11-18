@@ -7,6 +7,7 @@ import {
   parseGitStatusPorcelain,
   validateDockerSmokeReport,
   validateE2EReport,
+  validateGateEvidenceFiles,
   validateGateSummary,
   validateProxySmokeReport,
 } from './lib/acceptance-evidence.mjs'
@@ -199,7 +200,23 @@ async function main() {
       : kind === 'proxy'
         ? validateProxySmokeReport(report, validationOptions)
         : validateGateSummary(report, validationOptions)
-  const errors = [...cliErrors, ...validation.errors]
+  // A gate summary is only meaningful together with the exact report bytes it
+  // measured. Re-read the same default in-repository reports and bind them by
+  // sha256, result and revision; a rewritten summary alone cannot pass.
+  let gateBindingErrors = []
+  if (kind === 'gate') {
+    const evidenceFiles = {}
+    for (const evidenceKind of ['e2e', 'docker', 'proxy']) {
+      const path = DEFAULT_REPORTS[evidenceKind]
+      try {
+        evidenceFiles[evidenceKind] = { path, bytes: await readFile(path) }
+      } catch {
+        evidenceFiles[evidenceKind] = { path, bytes: null }
+      }
+    }
+    gateBindingErrors = validateGateEvidenceFiles(report, evidenceFiles).errors
+  }
+  const errors = [...cliErrors, ...validation.errors, ...gateBindingErrors]
   if (errors.length > 0) {
     process.stderr.write('[evidence] FAIL ' + kind + ': ' + reportPath + '\n')
     for (const error of errors) process.stderr.write('- ' + error + '\n')
@@ -216,6 +233,12 @@ async function main() {
       + ' browserWindows=' + String(evidence.rendererProof?.browserWindowCount ?? 'missing')
       + ' rendererProcesses=' + String(evidence.rendererProof?.rendererProcessCount ?? 'missing')
       + '\n')
+  }
+  if (kind === 'gate') {
+    const evidence = report?.evidence ?? {}
+    process.stdout.write('[evidence] gate evidence digests: e2e='
+      + String(evidence.e2e?.reportSha256) + ' docker=' + String(evidence.docker?.reportSha256)
+      + ' proxy=' + String(evidence.proxy?.reportSha256) + '\n')
   }
   process.stdout.write('[evidence] PASS ' + kind + ': ' + reportPath + '\n')
 }
