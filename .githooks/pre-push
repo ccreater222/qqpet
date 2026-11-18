@@ -1,0 +1,11 @@
+#!/bin/sh
+# qqpet-docs-hook: managed
+# Git LFS legacy hook forwarder: no-op when no legacy hook exists.
+set -u
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$REPO_ROOT" || exit 0
+LEGACY="$(git rev-parse --git-path hooks)/pre-push"
+if [ -x "$LEGACY" ] && [ "$LEGACY" != "$0" ]; then
+  exec "$LEGACY" "$@"
+fi
+exit 0

@@ -1,8 +1,12 @@
+node_modules
 node_modules/
 out/
 dist/
 *.log
 .DS_Store
+
+tmp/
+.githooks/runtime
 
 # Runtime Compose secrets (the deployment directory is otherwise tracked).
 server/deploy/owner-admin-credential

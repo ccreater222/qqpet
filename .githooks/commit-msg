@@ -1,0 +1,32 @@
+#!/bin/sh
+# qqpet-docs-hook: managed
+# 校验 DOCS_CHECK=off 时的跳过理由，防止静默绕过文档门禁。
+set -u
+
+MESSAGE_FILE=${1:-}
+if [ -z "$MESSAGE_FILE" ]; then
+  echo "commit-msg failed: missing commit message file." >&2
+  exit 2
+fi
+if [ ! -f "$MESSAGE_FILE" ]; then
+  echo "commit-msg failed: commit message file not found: $MESSAGE_FILE" >&2
+  exit 2
+fi
+
+docs_check=$(printf '%s' "${DOCS_CHECK:-}" | tr '[:upper:]' '[:lower:]')
+if [ "$docs_check" = "off" ]; then
+  if ! awk '
+    /^Docs-Check: off — / {
+      reason = $0
+      sub(/^Docs-Check: off — /, "", reason)
+      if (length(reason) >= 8) found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$MESSAGE_FILE"; then
+    echo "commit-msg failed: DOCS_CHECK=off 需要在 commit message 中写入一行：" >&2
+    echo "  Docs-Check: off — <至少 8 个字符的理由>" >&2
+    exit 1
+  fi
+fi
+
+exit 0
