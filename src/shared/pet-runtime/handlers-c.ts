@@ -7,7 +7,6 @@ import {
   clearAllActivities,
   grantGoods,
   isBusy,
-  readTaskProgress,
   reject,
   requireLivingPet,
   requireNotPaused,
@@ -15,7 +14,8 @@ import {
   writeSharedBlob,
   writeTaskProgress,
 } from './runtime-helpers'
-import { counterValue, taskDefinitionAt } from './runtime-tasks'
+import { counterValue, ensureTaskTables, taskDefinitionAt } from './runtime-tasks'
+import { dayKeyAt } from './time'
 import { answerIslandQuiz, startExam, startIslandQuiz, submitExam, type SessionHandlerOutcome } from './sessions'
 import type { HandlerContext, HandlerResult } from './handler-types'
 import type { JsonObject, JsonValue } from './types'
@@ -147,7 +147,13 @@ export function stopActivity(context: HandlerContext): HandlerResult {
 export function claimTaskReward(context: HandlerContext, payload: CommandPayloadMap['task.claim']): HandlerResult {
   requireLivingPet(context.state)
   const save = context.state.save
-  const progress = readTaskProgress(save)
+  const progress = ensureTaskTables(
+    save,
+    context.ctx.gameTimeMs,
+    context.state.timeZone,
+    context.rng,
+    context.state.environment.calendarByDay?.[dayKeyAt(context.ctx.gameTimeMs, context.state.timeZone)],
+  )
   const definition = taskDefinitionAt(progress, payload.tab, payload.index)
   const entry = progress.taskList[payload.tab][payload.index]
   if (definition === undefined || entry === undefined) reject('not_available', 'unknown task')

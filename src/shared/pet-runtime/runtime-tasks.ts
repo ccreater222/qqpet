@@ -133,6 +133,57 @@ export function buildResetStaticTaskLists(
   return reset
 }
 
+const STATIC_TASK_TABS = ['ddw', 'growth', 'travel'] as const
+
+/**
+ * Static task tables are canonical state, but a legacy or imported save only
+ * carries counters until the first 06:00 daily reset runs. Materialize the
+ * missing entries on demand so claims never depend on a reset having happened.
+ */
+export function ensureStaticTaskLists(save: SharedSaveData, rng: RuntimeRng): TaskProgress {
+  const progress = readTaskProgress(save)
+  let changed = false
+  for (const tab of STATIC_TASK_TABS) {
+    const templates = STATIC_TASKS[tab]
+    const current = progress.taskList[tab]
+    if (Array.isArray(current) && current.length >= templates.length) continue
+    progress.taskList[tab] = templates.map((template, index) => {
+      const existing = Array.isArray(current) ? current[index] : undefined
+      return existing ?? entryFor(template, rng)
+    })
+    changed = true
+  }
+  if (changed) writeTaskProgress(save, progress)
+  return progress
+}
+
+/**
+ * Periodic task content is canonical state, but only the 06:00 boundary used to
+ * generate the daily table (and the static tables before their fix). Fill every
+ * missing piece on demand so the first tick, adoption or claim of a day never
+ * runs against an empty table. A boundary that just rolled makes this a no-op,
+ * so the reset semantics (and its counters) stay untouched.
+ */
+export function ensureTaskTables(
+  save: SharedSaveData,
+  gameTimeMs: number,
+  timeZone: string,
+  rng: RuntimeRng,
+  calendarDay?: CalendarInput,
+): TaskProgress {
+  ensureStaticTaskLists(save, rng)
+  const progress = readTaskProgress(save)
+  const boundary = currentBoundarySeconds(gameTimeMs, timeZone)
+  if (
+    progress.daily.length === 0 ||
+    progress.taskList.daily.length < progress.daily.length ||
+    progress.dailyDay !== boundary
+  ) {
+    rollDailyTasks(save, gameTimeMs, timeZone, rng, calendarDay)
+  }
+  return readTaskProgress(save)
+}
+
 export function resetDailyTasks(
   save: SharedSaveData,
   gameTimeMs: number,

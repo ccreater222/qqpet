@@ -33,7 +33,7 @@ import { selfCare } from './self-care'
 import { materializeIslandDay } from './island-runtime'
 import { tickFarmState } from './farm-runtime'
 import { tickFishingState } from './fishing-runtime'
-import { resetDailyTasks } from './runtime-tasks'
+import { ensureTaskTables, resetDailyTasks } from './runtime-tasks'
 import { resetFishLimits, settlePinkDiamond } from './handlers-b'
 import type { EngineState, JsonObject, RuntimeContext } from './types'
 import type { RuntimeBatchOutcome } from './runtime-types'
@@ -412,6 +412,13 @@ export function advanceMinuteInPlace(state: EngineState, ctx: RuntimeContext): D
     }
     state.nextDailyBoundaryMs = nextDailyBoundaryMs(state.nextDailyBoundaryMs, state.timeZone)
   }
+  ensureTaskTables(
+    state.save,
+    nextGameTimeMs,
+    state.timeZone,
+    rng,
+    state.environment.calendarByDay?.[dayKeyAt(nextGameTimeMs, state.timeZone)],
+  )
   events.push(...processDueJobs(state, nextGameTimeMs, rng))
   events.push(...passiveMinute(state, ctx, weather, rng))
   state.rng = rng.state
