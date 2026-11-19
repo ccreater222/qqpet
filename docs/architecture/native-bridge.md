@@ -95,6 +95,7 @@ iOS 没有 `QQPetNative`：桥用 WKScriptMessageHandler，handler 名固定 `qq
 3. **旧壳缺隐藏/旋转能力**：`setHidden?`、`rotatableScreen?` 用可选调用；缺失时页面按「不支持」处理（`src/android/bridge.ts:55`、`src/harmony/bridge.ts:47`、`src/harmony/bridge.ts:230`）。
 4. **iOS 明确不提供的能力**：`autoStart`、`clipboardWatch`、`frontWatch` 为 `false` 且带 `*Reason`（`src/ios/bridge.ts:77-82`）；导入的桌面设置里这三项会被强制关掉（`src/ios/bridge.ts:270-272`、`src/ios/bridge.ts:427-428`），避免「设置看起来开着、实际不生效」。
 5. **iOS 存档写入使用 generation**：`IOSSaveWriter` 要求非空 generation（`src/ios/save-writer.ts:15-17`），一次只排一个写者，旧的排队快照在被替换后失效（`src/ios/save-writer.ts:5-22`）。页面缺少 generation 时直接失败，不做「无 generation 也能写」的兜底。
+6. **客户端数据上游**：`calendar`、`weather`、`latestRelease` 不新增原生方法，三桥从设备本地 `settings.upstreamUrl` 经共享 `normalizeUpstreamUrl` 取 HTTP origin（`src/android/bridge.ts:187`、`src/harmony/bridge.ts:172`、`src/ios/bridge.ts:120`）。未配置有效上游时 `weather`/`latestRelease` 显式抛 `upstream_not_configured`，`calendar` 仍用共享纯函数本地计算；旧壳或未配置服务器不会崩溃，也不会回退到第三方域名。
 
 ## 5. 同步返回值 vs 异步 resolve 的判据
 
