@@ -1,7 +1,8 @@
 import { cloneRngState, createRngState } from '../pet-runtime/rng'
-import { assertJsonSafe, stableStringify } from '../pet-runtime/serialization'
+import { assertJsonSafe, cloneJsonState, stableStringify } from '../pet-runtime/serialization'
 import { assertTimeZone, dayKeyAt, isDayKey, nextDailyBoundaryMs } from '../pet-runtime/time'
 import { RUNTIME_SCHEMA_VERSION } from '../pet-runtime/types'
+import { STUDY_GOODS, TRAVEL_PROVINCES, WORK_GOODS } from '../pet-runtime/content/index'
 import type {
   CalendarInput,
   CoverageEndProvenance,
@@ -46,6 +47,7 @@ import {
   requireSafeInteger,
   type SchemaError,
 } from './schema'
+import { normalizeSharedSaveDefaults } from './normalize'
 
 export const PORTABLE_BUNDLE_FORMAT = 'qqpet-portable-v1' as const
 export const PORTABLE_BUNDLE_SCHEMA_VERSION = 1 as const
@@ -593,7 +595,11 @@ const LEGACY_ENGINE_REQUIRED_KEYS = [
  */
 function backfillPortableBundleDefaults(bundle: Record<string, unknown>): string[] {
   const filled = backfillLegacySharedPetInfo(bundle.shared)
-  if (isRecord(bundle.engine)) filled.push(...backfillLegacySharedPetInfo(bundle.engine.save))
+  if (isRecord(bundle.shared)) filled.push(...normalizeSharedSaveDefaults(bundle.shared))
+  if (isRecord(bundle.engine)) {
+    filled.push(...backfillLegacySharedPetInfo(bundle.engine.save))
+    if (isRecord(bundle.engine.save)) filled.push(...normalizeSharedSaveDefaults(bundle.engine.save))
+  }
   return filled
 }
 
@@ -628,6 +634,54 @@ function legacySaveCandidate(value: unknown): SaveData {
   return candidate as unknown as SaveData
 }
 
+/**
+ * Legacy saves kept an in-flight activity only as `activeOption` plus the minutes already done in
+ * `saveJsonData.activity`; they carried no scheduled job. Migration rebuilds that pending job so
+ * the first tick continues the activity instead of silently clearing it without a reward.
+ * An activity id that this build does not know is left untouched (no job, no error).
+ */
+function restoreLegacyActivityJob(engine: EngineState): void {
+  const activity = engine.save.activeOption
+  let type: 'work' | 'study' | 'travel'
+  let activityId: string
+  let durationMinutes: number
+  if (typeof activity.work === 'string') {
+    const good = WORK_GOODS.find(candidate => candidate.id === activity.work)
+    if (good === undefined || typeof good.useTime !== 'number' || good.useTime <= 0) return
+    type = 'work'
+    activityId = good.id
+    durationMinutes = good.useTime
+  } else if (typeof activity.study === 'string') {
+    const good = STUDY_GOODS.find(candidate => candidate.id === activity.study)
+    if (good === undefined || typeof good.useTime !== 'number' || good.useTime <= 0) return
+    type = 'study'
+    activityId = good.id
+    durationMinutes = good.useTime
+  } else if (typeof activity.trip === 'string') {
+    if (TRAVEL_PROVINCES.some(province => province.name === activity.trip) === false) return
+    type = 'travel'
+    activityId = activity.trip
+    durationMinutes = 60
+  } else {
+    return
+  }
+  const raw: unknown = engine.save.saveJsonData.activity
+  const recorded = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : Number.NaN
+  const done = Number.isFinite(recorded) ? Math.min(durationMinutes, Math.max(0, recorded)) : 0
+  engine.scheduledJobs = [{
+    id: 1,
+    type,
+    dueAtGameMs: engine.gameTimeMs + (durationMinutes - done) * 60_000,
+    payload: {
+      activityKind: type,
+      activityId,
+      startedAtGameMs: Math.max(0, engine.gameTimeMs - done * 60_000),
+    },
+    status: 'pending',
+  }]
+  engine.nextScheduledJobId = 2
+}
+
 /** Deterministic migration of a legacy bare SaveData/config.json into a v1 portable bundle. */
 export function migrateLegacySaveDataToPortableBundle(
   legacy: unknown,
@@ -659,7 +713,9 @@ export function migrateLegacySaveDataToPortableBundle(
   } catch {
     failSchema('invalid_schema', '$.legacyMigration.options.seedHex', 'invalid non-zero 128-bit RNG seed')
   }
-  const shared = toSharedSaveData(legacySaveCandidate(legacy))
+  const candidate = cloneJsonState(legacySaveCandidate(legacy))
+  normalizeSharedSaveDefaults(candidate)
+  const shared = toSharedSaveData(candidate)
   const engine: EngineState = {
     schemaVersion: RUNTIME_SCHEMA_VERSION,
     save: shared,
@@ -688,6 +744,7 @@ export function migrateLegacySaveDataToPortableBundle(
     shared,
     engine,
   }
+  restoreLegacyActivityJob(engine)
   assertPortablePetBundle(bundle)
   return bundle
 }

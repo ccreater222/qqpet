@@ -47,7 +47,7 @@ const {
   resetDailyTasks,
   rollDailyTasks,
 } = await import('../../src/shared/pet-runtime/runtime-tasks.ts')
-const { createRuntimeRng, lootGoods, mailGoods } = await import('../../src/shared/pet-runtime/runtime-helpers.ts')
+const { createRuntimeRng, currentBoundarySeconds, lootGoods, mailGoods } = await import('../../src/shared/pet-runtime/runtime-helpers.ts')
 const { claimOnlineGift, claimBirthdayGift } = await import('../../src/shared/pet-runtime/handlers-d.ts')
 const { startTravel } = await import('../../src/shared/pet-runtime/handlers-c.ts')
 const { takeTravelPhoto } = await import('../../src/shared/pet-runtime/travel.ts')
@@ -327,7 +327,7 @@ test('group C: work, study, travel, activity cancellation and task claims', () =
     doNums: { Eat: 1 },
     taskList: { daily: [{ take: false, good: [reward] }], ddw: [], growth: [], travel: [] },
     daily: [{ label: 'Eat task', msg: 'eat', obj: 'Eat', num: 1 }],
-    dailyDay: Math.floor(GAME_TIME_MS / 1000),
+    dailyDay: currentBoundarySeconds(GAME_TIME_MS, 'Asia/Shanghai'),
   })
   const claimed = ok(taskState, 'task.claim', { tab: 'daily', index: 0 })
   assert.equal(claimed.state.save.petInfo.yb, 5000)
@@ -339,9 +339,78 @@ test('group C: work, study, travel, activity cancellation and task claims', () =
     doNums: { Eat: 0 },
     taskList: { daily: [{ take: false, good: [reward] }], ddw: [], growth: [], travel: [] },
     daily: [{ label: 'Eat task', msg: 'eat', obj: 'Eat', num: 1 }],
-    dailyDay: Math.floor(GAME_TIME_MS / 1000),
+    dailyDay: currentBoundarySeconds(GAME_TIME_MS, 'Asia/Shanghai'),
   })
   rejected(incomplete, 'task.claim', { tab: 'daily', index: 0 }, {}, 'not_available')
+})
+
+test('group C: static task tab rewards are claimable before the first daily reset', () => {
+  const fresh = baseState()
+  assert.deepEqual(blob(fresh, 'task'), {})
+  let poked = fresh
+  for (let index = 0; index < 5; index++) poked = ok(poked, 'pet.pokeFace', { spotId: 'H' }).state
+  // Reproduces an imported/handed-off save: counters advance while static tab lists stay empty.
+  const before = blob(poked, 'task')
+  assert.equal(before.doNums.Amusing, 5)
+  assert.deepEqual(before.taskList, { daily: [], ddw: [], growth: [], travel: [] })
+
+  const claimed = ok(poked, 'task.claim', { tab: 'ddw', index: 0 })
+  const task = blob(claimed.state, 'task')
+  assert.equal(task.taskList.ddw.length, STATIC_TASKS.ddw.length)
+  assert.equal(task.taskList.growth.length, STATIC_TASKS.growth.length)
+  assert.equal(task.taskList.travel.length, STATIC_TASKS.travel.length)
+  assert.equal(task.taskList.ddw[0].take, true)
+  assert.equal(task.taskList.ddw[1].take, false)
+  assert.equal(claimed.state.save.selfGoodDatas.food.find(entry => entry.startsWith('_102010001*')), '_102010001*6')
+  assert.equal(claimed.result.goods[0].id, '102010001')
+  rejected(claimed.state, 'task.claim', { tab: 'ddw', index: 0 }, {}, 'already_claimed')
+  rejected(claimed.state, 'task.claim', { tab: 'ddw', index: 1 }, {}, 'not_available')
+})
+
+test('group C: static task tabs materialize missing entries and keep existing ones intact', () => {
+  const partial = baseState()
+  const kept = goodOf('nums', 'yb', 10)
+  partial.save.saveJsonData.task = JSON.stringify({
+    doNums: { Amusing: 10 },
+    taskList: { daily: [], ddw: [{ take: true, good: [kept] }], growth: [], travel: [] },
+  })
+  rejected(partial, 'task.claim', { tab: 'ddw', index: 0 }, {}, 'already_claimed')
+  const claimed = ok(partial, 'task.claim', { tab: 'ddw', index: 1 })
+  const task = blob(claimed.state, 'task')
+  assert.deepEqual(task.taskList.ddw[0], { take: true, good: [kept] })
+  assert.equal(task.taskList.ddw[1].take, true)
+  assert.equal(task.taskList.ddw.length, STATIC_TASKS.ddw.length)
+
+  const rerolled = baseState()
+  rerolled.save.saveJsonData.task = JSON.stringify({
+    doNums: { Amusing: 25 },
+    taskList: { daily: [], ddw: [], growth: [], travel: [] },
+  })
+  const rolled = ok(rerolled, 'task.claim', { tab: 'ddw', index: 4 })
+  const rolledTask = blob(rolled.state, 'task')
+  assert.equal(rolledTask.taskList.ddw[4].take, true)
+  assert.equal(rolledTask.taskList.ddw[4].good.length, 2)
+  assert.equal(rolled.result.goods.length, 2)
+})
+
+test('group C: every static task entry is claimable from an untouched save', () => {
+  for (const tab of ['ddw', 'growth', 'travel']) {
+    STATIC_TASKS[tab].forEach((template, index) => {
+      const state = baseState()
+      const doNums = template.obj === 'Travel2' ? {} : { [template.obj]: template.num }
+      state.save.saveJsonData.task = JSON.stringify({
+        doNums,
+        taskList: { daily: [], ddw: [], growth: [], travel: [] },
+      })
+      if (template.obj === 'Travel2') {
+        state.save.gameSaveDatas.travel_china = Array.from({ length: template.num }, (_, day) => ({ name: 'city-' + String(day), value: 1 }))
+      }
+      const claimed = ok(state, 'task.claim', { tab, index })
+      const entry = blob(claimed.state, 'task').taskList[tab][index]
+      assert.equal(entry.take, true, tab + '#' + String(index) + ' take')
+      assert.equal(claimed.result.goods.length, entry.good.length, tab + '#' + String(index) + ' goods')
+    })
+  }
 })
 
 test('group C: exams persist answers, reject wrong devices and expose projections only', () => {
@@ -858,7 +927,9 @@ test('C3 deterministic golden scenario replays byte-identically', () => {
     .digest('hex')
   // #75: the scenario signs in, so the canonical digest now carries petInfo.diamond (3 -> 4) and
   // the extra reward.granted {source:'signin-diamond'} event. Replay determinism is still exact.
-  assert.equal(digest, '7a231dffa05d7ffe15f447eefeb2bd77246f2cae93d0a0e8dfb85d5d17f8eb89')
+  // F2: the first tick now materializes today's daily tasks (definitions + entries + dailyDay)
+  // before the work job settles, so the digest also covers that canonical table and its RNG draws.
+  assert.equal(digest, '853e8d8c61a35681745d927ea1f69361f627e0042d8a3f3cfd2cf891025945c1')
   assert.equal(validateEngineState(first.state), true)
 })
 
@@ -1323,9 +1394,30 @@ test('fresh static task rewards replay renderer load-then-reset RNG order', () =
     assert.deepEqual(actual.next.taskList.growth, expected.growth)
     assert.deepEqual(actual.next.taskList.travel, expected.travel)
   }
+  // Reset over tables that are already materialized (adoption fills them now):
+  // fixed goods are kept, only reroll entries draw, in tab order on a fresh stream.
+  function expectedMaterializedReset(seed) {
+    const rng = createRuntimeRng(createRngState(seed))
+    const reset = {}
+    for (const tab of ['ddw', 'growth', 'travel']) {
+      reset[tab] = STATIC_TASKS[tab].map(template => ({
+        take: false,
+        good: template.reroll
+          ? rewardFor(template, rng)
+          : (template.good ?? []).map(code => parseGoodCode(code)).filter(good => good !== null),
+      }))
+    }
+    return reset
+  }
   assertPath(baseState())
   assertPath(ok(baseState(), 'pet.reset', {}, { actorRole: 'owner' }).state)
-  assertPath(ok(ok(baseState(), 'pet.reset', {}, { actorRole: 'owner' }).state, 'pet.adopt', { sex: 'GG' }, { actorRole: 'owner' }).state)
+  const adopted = ok(ok(baseState(), 'pet.reset', {}, { actorRole: 'owner' }).state, 'pet.adopt', { sex: 'GG' }, { actorRole: 'owner' }).state
+  assert.equal(blob(adopted, 'task').taskList.ddw.length, STATIC_TASKS.ddw.length)
+  const materialized = expectedMaterializedReset(SEED)
+  const actual = resetDailyTasks(adopted.save, GAME_TIME_MS, 'Asia/Shanghai', createRuntimeRng(createRngState(SEED)))
+  assert.deepEqual(actual.next.taskList.ddw, materialized.ddw)
+  assert.deepEqual(actual.next.taskList.growth, materialized.growth)
+  assert.deepEqual(actual.next.taskList.travel, materialized.travel)
 })
 
 test('paused travel projection freezes active minutes and early rolls use current state', () => {
@@ -1518,4 +1610,73 @@ test('overdue travel completes once in the scheduled-job phase and never rewards
   assert.equal(nextTick.state.save.gameSaveDatas.travel_china.length, 1)
   assert.equal(blob(nextTick.state, 'album').length, 1)
   assert.equal(Object.values(blob(nextTick.state, 'email')).filter(mail => typeof mail.p === 'string').length, 1)
+})
+
+test('group C: an untouched save materializes today\'s daily tasks on the first tick', () => {
+  const fresh = baseState()
+  assert.deepEqual(blob(fresh, 'task'), {})
+  const boundary = currentBoundarySeconds(GAME_TIME_MS, 'Asia/Shanghai')
+  const ticked = advanceMinute(fresh, context(fresh, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(ticked.ok, true, JSON.stringify(ticked.ok ? ticked.result : ticked.error))
+  const task = blob(ticked.state, 'task')
+  assert.equal(task.dailyDay, boundary)
+  assert.equal(task.daily.length, 4)
+  assert.equal(task.taskList.daily.length, task.daily.length)
+
+  // Materializing today's tasks must not touch the counters that feed the claims.
+  const doNums = { Eat: 99, Clean: 99, Toy: 99, Amusing: 99, Work: 99, Study: 99, GameRound: 99, Game: 99, Travel1: 99 }
+  ticked.state.save.saveJsonData.task = JSON.stringify({ ...task, doNums })
+  const claimed = ok(ticked.state, 'task.claim', { tab: 'daily', index: 0 })
+  assert.equal(claimed.result.goods.length, 2)
+  assert.equal(blob(claimed.state, 'task').taskList.daily[0].take, true)
+
+  // C15: definitions present but entries truncated is the same gap on a partial blob.
+  const partial = baseState()
+  partial.save.saveJsonData.task = JSON.stringify({ ...task, doNums, taskList: { ...task.taskList, daily: [] } })
+  const repaired = ok(partial, 'task.claim', { tab: 'daily', index: 0 })
+  const repairedTask = blob(repaired.state, 'task')
+  assert.equal(repairedTask.daily.length, 4)
+  assert.equal(repairedTask.taskList.daily.length, 4)
+  assert.equal(repairedTask.taskList.daily[0].take, true)
+})
+
+test('group C: a newly adopted pet gets today\'s daily tasks immediately', () => {
+  const reset = ok(baseState(), 'pet.reset', {}, { actorRole: 'owner' })
+  const adopted = ok(reset.state, 'pet.adopt', { sex: 'MM' }, { actorRole: 'owner' })
+  const task = blob(adopted.state, 'task')
+  assert.equal(task.dailyDay, currentBoundarySeconds(adopted.state.gameTimeMs, adopted.state.timeZone))
+  assert.equal(task.daily.length, 4)
+  assert.equal(task.taskList.daily.length, 4)
+  assert.equal(task.daily.every(definition => definition.reroll === 1), true)
+})
+
+test('group C: crossing 06:00 rolls today\'s tasks exactly once', async () => {
+  const state = baseState()
+  const dayTick = advanceMinute(state, context(state, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(dayTick.ok, true, JSON.stringify(dayTick.ok ? dayTick.result : dayTick.error))
+  const beforeBoundary = blob(dayTick.state, 'task')
+  assert.equal(beforeBoundary.daily.length, 4)
+  dayTick.state.save.saveJsonData.task = JSON.stringify({ ...beforeBoundary, doNums: { Amusing: 7 } })
+  dayTick.state.gameTimeMs = NEXT_BOUNDARY_MS - 60000
+  dayTick.state.nextDailyBoundaryMs = NEXT_BOUNDARY_MS
+  dayTick.state.lastProcessedDayBoundaryKey = DAY_KEY
+
+  const crossed = advanceMinute(dayTick.state, context(dayTick.state, { sessionActive: false, activeClientCount: 0 }))
+  assert.equal(crossed.ok, true, JSON.stringify(crossed.ok ? crossed.result : crossed.error))
+  const task = blob(crossed.state, 'task')
+  assert.equal(task.dailyDay, NEXT_BOUNDARY_MS / 1000)
+  assert.equal(task.daily.length, 4)
+  assert.equal(task.taskList.daily.length, 4)
+  assert.deepEqual(task.doNums, {})
+  assert.equal(crossed.events.filter(event => event.type === 'task.progress' && event.payload.dailyReset === true).length, 1)
+
+  // The on-demand fill must be a no-op once the boundary just rolled: no second roll, no draws.
+  const { ensureTaskTables } = await import('../../src/shared/pet-runtime/runtime-tasks.ts')
+  const probe = createRuntimeRng(crossed.state.rng)
+  ensureTaskTables(crossed.state.save, crossed.state.gameTimeMs, crossed.state.timeZone, probe)
+  assert.equal(probe.state.draws, crossed.state.rng.draws)
+  const nextMinute = advanceMinute(crossed.state, context(crossed.state, { sessionActive: false, activeClientCount: 0 }))
+  const nextTask = blob(nextMinute.state, 'task')
+  assert.deepEqual(nextTask.daily, task.daily)
+  assert.equal(nextTask.dailyDay, task.dailyDay)
 })

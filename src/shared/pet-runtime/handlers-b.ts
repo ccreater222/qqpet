@@ -3,6 +3,7 @@ import type { SharedSaveData } from '../sync/data-boundary'
 import { DEAD, illOf, type Ill } from './content/ills'
 import { TRAVEL_PROVINCES, goodOf, goodMatchesType, type GoodType, type RuntimeGood } from './content/index'
 import { domainEvent, type DomainEvent } from './events'
+import { medicalQuote, type MedicalQuote } from './medical-cost'
 import {
   addGood,
   addTaskCount,
@@ -148,34 +149,28 @@ export function useInventoryItem(context: HandlerContext, payload: CommandPayloa
   return { result: json({ itemId: good.id, quantity: 1, ...goodSummary(good) }), events }
 }
 
-function cureForHealth(save: SharedSaveData): Ill {
-  if (save.petInfo.health === 0) return DEAD
-  const line = typeof save.activeOption.ill === 'string' ? save.activeOption.ill : '1-'
-  return illOf(line + save.petInfo.health)
-}
-
 export function medicalTreat(context: HandlerContext, payload: CommandPayloadMap['medical.treat']): HandlerResult {
   requirePet(context.state)
   const save = context.state.save
   if (save.petInfo.health === 5) reject('not_available', 'the pet is healthy')
-  const cure = cureForHealth(save)
-  let medicine: RuntimeGood
+  let quote: MedicalQuote
   try {
-    medicine = goodOf('medicine', cure.cure.id)
+    const resolved = medicalQuote(save)
+    if (resolved === null) return reject('not_available', 'the required medicine is unavailable')
+    quote = resolved
   } catch {
-    reject('not_available', 'the required medicine is unavailable')
+    return reject('not_available', 'the required medicine is unavailable')
   }
   if (payload.mode === 'doctor') {
-    if (save.petInfo.health > 0) {
-      const fee = (5 - save.petInfo.health) * 10
-      payYb(save, fee)
-    }
-    if (inventoryCount(save, 'medicine', medicine.id) > 0) {
-      takeGood(save, 'medicine', medicine.id, 1)
+    // The quote is the single source of the doctor's price: the renderer shows it
+    // and this handler bills it, so the two can never drift apart.
+    payYb(save, quote.fee)
+    if (quote.ownsMedicine) {
+      takeGood(save, 'medicine', quote.medicineId, 1)
     } else {
-      const price = medicine.price === undefined ? 50 : medicine.price
-      payYb(save, Math.round(price * 1.2))
+      payYb(save, quote.medicineCharge)
     }
+    const medicine = goodOf('medicine', quote.medicineId)
     applyGood(save, medicine)
     save.petInfo.health = 5
     save.activeOption.ill = null

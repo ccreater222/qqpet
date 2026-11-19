@@ -3,6 +3,7 @@ import type { Sex } from '../save'
 import type { SharedSaveData } from '../sync/data-boundary'
 import { createRngState } from './rng'
 import { dayKeyAt, nextDailyBoundaryMs } from './time'
+import { ensureTaskTables } from './runtime-tasks'
 import { levelAndCapsOf } from './level'
 import { domainEvent } from './events'
 import {
@@ -125,6 +126,13 @@ export function adoptPet(context: HandlerContext, payload: CommandPayloadMap['pe
   if (context.state.save.havePet) reject('wrong_phase', 'a pet already exists')
   context.state.save = newbornSave(context.state.save, payload.sex, context.ctx.gameTimeMs, context.rng)
   resetEngineForNewPet(context.state, false)
+  ensureTaskTables(
+    context.state.save,
+    context.ctx.gameTimeMs,
+    context.state.timeZone,
+    context.rng,
+    context.state.environment.calendarByDay?.[dayKeyAt(context.ctx.gameTimeMs, context.state.timeZone)],
+  )
   return {
     result: json({ sex: payload.sex }),
     events: [

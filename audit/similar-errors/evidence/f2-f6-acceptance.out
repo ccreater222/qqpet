@@ -1,0 +1,11 @@
+F2 first tick: ok=true daily=4 entries=4 dailyDay=1792447200
+F2 daily claim after materialization: ok=true goods=2
+F2 adopt: ok=true daily=4 entries=4
+F3 preview projection: goods=102010001 lootDraws=0 | legacy goods=2 legacyLootDraws=2
+F4 health4 no med: quote=70 charged=70 ok=true
+F4 health4 owned: quote=10 charged=10 ok=true
+F4 dead no med: quote=10560 charged=10560 ok=true
+F4 cart partial: remaining=b,c allOk=false
+F5 normalized import: validate=true buy=true work=ok tick=true travel=ok
+F6 migrated work job: type=work dueInMin=20 pendingAfter1=1
+F6 settle: ok=true work=null workCounter=1 completedJobs=1

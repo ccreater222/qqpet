@@ -7,7 +7,7 @@ registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier.startsWith('.') && context.parentURL &&
         /\/src\/shared\/(pet-runtime|sync)\//.test(context.parentURL) &&
-        /\.[cm]?[jt]s$/.test(specifier) === false) {
+        /\.[cm]?[jt]s$/.test(specifier) === false && specifier.endsWith('.json') === false) {
       return nextResolve(specifier + '.ts', context)
     }
     return nextResolve(specifier, context)

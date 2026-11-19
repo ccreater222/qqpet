@@ -6,6 +6,7 @@ import {
   type SessionCoverageInterval,
 } from '../../src/shared/pet-runtime/index'
 import { assertEngineState } from '../../src/shared/sync/portable'
+import { normalizeSharedSaveDefaults } from '../../src/shared/sync/normalize'
 import type { AuthorityRecord } from './db'
 import type { PortablePetBundleV1 } from '../../src/shared/sync/index'
 import { finalizeSurvivor, stableCoverageId, survivorDeviceId } from './coverage'
@@ -146,7 +147,13 @@ export function planPortableImport(options: ImportPlanOptions): ImportPlanResult
 
   let engine: EngineState
   try {
-    engine = JSON.parse(JSON.stringify(bundle.engine)) as EngineState
+    // Partial bundles (older builds/third parties) may omit canonical group members. Normalize a
+    // private copy before validation so the plan/commit below uses filled defaults while the
+    // caller's uploaded bundle stays untouched; a genuinely invalid type still fails the schema.
+    const normalized = JSON.parse(JSON.stringify(bundle)) as PortablePetBundleV1
+    normalizeSharedSaveDefaults(normalized.shared)
+    normalizeSharedSaveDefaults(normalized.engine.save)
+    engine = normalized.engine
     assertEngineState(engine)
   } catch {
     return fail('invalid_payload', 'bundle engine is invalid')

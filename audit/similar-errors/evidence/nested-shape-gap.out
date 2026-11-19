@@ -1,0 +1,4 @@
+activeOption={} | validator: passes assertSharedSaveData | job.startWork -> busy: the pet is already busy
+activeOption 缺 work | validator: passes assertSharedSaveData | job.startWork -> busy: the pet is already busy
+gameSaveDatas={} | validator: passes assertSharedSaveData | travel.completeCollection -> internal: Cannot read properties of undefined (reading 'length')
+selfGoodDatas 缺 food | validator: passes assertSharedSaveData | inventory.buy -> internal: Cannot read properties of undefined (reading 'findIndex')

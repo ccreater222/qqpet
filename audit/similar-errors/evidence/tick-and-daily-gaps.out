@@ -1,0 +1,8 @@
+C04 selfGoodUseOption={"background":null,"food":null,"clean":null} -> internal: Cannot read properties of undefined (reading 'left')
+C04 selfGoodUseOption={} -> internal: Cannot read properties of undefined (reading 'left')
+C15 daily definition present, taskList.daily empty -> not_available: unknown task
+F2 imported: daily=0 taskList.daily=0
+F2 after 841-min advance (cross 06:00): daily=4 taskList.daily=4 | ok=true
+C10 before tick: work=bz activity=30 jobs=0
+C10 tick -> ok | event types: pet.statsChanged
+C10 after tick: work=null activity=0 | doNums= undefined

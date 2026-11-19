@@ -715,6 +715,8 @@ export class LocalRepositoryHost {
 
   private parseImportBundle(value: unknown, at: number): PortablePetBundleV1 {
     if (isRecord(value) && value.format === LOCAL_DOCUMENT_FORMAT) {
+      // Imported local documents follow the same normalization as files loaded from disk.
+      backfillLegacyLocalPetDocumentDefaults(value)
       assertLocalPetDocumentV2(value)
       if (value.authority.state !== 'active') throw new Error('authority_not_active: imported local document is not active')
       return clone(value.bundle)
