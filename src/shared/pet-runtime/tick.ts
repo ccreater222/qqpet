@@ -330,12 +330,15 @@ function passiveMinute(state: EngineState, ctx: RuntimeContext, weather: ReturnT
   const cleanRate = rng.randIntInclusive(2, 3) + (busy ? 1 : 0)
   const grown = save.petInfo.mood <= 0 ? 0 : Math.min(1, save.petInfo.mood / moodRate)
   if (grown < 1 && busy) {
+    const cancelledKinds = [...new Set(state.scheduledJobs
+      .filter(job => job.status === 'pending' && (job.payload.activityKind === 'work' || job.payload.activityKind === 'study' || job.payload.activityKind === 'travel'))
+      .map(job => job.payload.activityKind as string))]
     cancelPendingJobs(state, job => job.payload.activityKind === 'work' || job.payload.activityKind === 'study' || job.payload.activityKind === 'travel')
     save.activeOption.work = null
     save.activeOption.study = null
     save.activeOption.trip = null
     writeSharedBlob(save, 'activity', 0)
-    events.push(event('activity.completed', { kind: 'all', cancelled: true, reason: 'mood_empty' }))
+    events.push(event('activity.completed', { kind: 'all', cancelled: true, reason: 'mood_empty', kinds: cancelledKinds }))
   }
   save.petInfo.mood = Math.max(save.petInfo.mood - moodRate, 0)
   save.petInfo.hunger = Math.max(save.petInfo.hunger - hungerRate, 0)

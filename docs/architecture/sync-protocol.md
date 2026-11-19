@@ -101,6 +101,7 @@
 - 下行帧超过 `maxFrameBytes` 时直接以 `4005` 关闭连接，不发截断内容（`server/src/session.ts:787-795`）。
 - 客户端把认证/协议错误视为终态：`auth_failed`/`protocol_mismatch` 立即 `terminalFailure` 并断开，不重试（`src/main/remote-repository.ts:1730-1734`）；关闭码 `4000`/`4001` 同样终态（`server/src/session.ts:31-32`、`src/main/remote-repository.ts:1897-1907`）。
 - 设备被撤销：服务端广播 `deviceRevoked` 并以 `4002 revoked` 关闭该设备的连接（`server/src/hub.ts:109-124`）；客户端丢弃投影缓存并标记 `device_revoked`（`src/main/remote-repository.ts:1908-1915`）。
+- 缓存只读启动：server 模式已配对且存在通过校验的 `RemoteProjectionCacheV2` 时，`RemoteRepository.start()` 不等待 ready，直接返回缓存投影并继续后台拨号/重连（`src/main/remote-repository.ts:412-444`、`src/main/remote-repository.ts:669-674`）。缓存不是权威：状态 `readOnly` 为真，`command()` 在 online 前仍返回 `offline`/`server_catching_up`，也不会写规范状态；没有缓存时保持原有的等待 ready 语义。
 - 空闲与心跳：`pingIntervalMs` 默认 20s，`idleTimeoutMs` 默认 60s；超过空闲以 `4002 idle_timeout` 关闭，`alive === false` 的连接直接 `terminate()`（`server/src/session.ts:144-162`、`server/src/config.ts:119-121`）。
 - 预鉴权阶段有独立预算：单帧超过 16 KiB 直接 `4005`（`server/src/session.ts:269-273`），预鉴权速率 5 次/秒、突发 10（`server/src/session.ts:38-39`），`helloTimeoutMs` 默认 5s，超时按 `4000 auth_failed` 关闭（`server/src/session.ts:219-222`）。
 

@@ -55,6 +55,8 @@
 - `eventSeq` 累加本批事件条数，起点是 `baseEventSeq + 1`。
 - 事件历史只保留最近 512 条（`src/shared/local-repository/host.ts:56`、`src/shared/local-repository/host.ts:1451-1452`），超出后旧事件淘汰，但 `eventSeq` 不回退。
 - 追赶分片里，同一分片的所有事件共用一个 `revision`（`src/shared/local-repository/host.ts:1594-1600`）。
+- 命令路径在统一出口 `toOutcome` 重算等级；若等级变化且本批事件尚未包含 `pet.levelChanged`，补发一条 `{ previousLevel, level }`（`src/shared/pet-runtime/runtime.ts:143-183`）。被动分钟 tick 已在自身路径发同一事件，因此不会重复。该事件只用于表现，权威等级仍以投影里的 `petComputedlInfo.level` 为准。
+- 心情耗尽取消进行中的活动时，`activity.completed` 的 `kind` 为 `all`，并携带 `kinds` 数组标明被取消的 `work`/`study`/`travel`；表现层据此选择原版 `stopWorkFoMood0`/`stopStudyFoMood0`/`overTripUpFoMood0` 台词（`src/shared/pet-runtime/tick.ts:333-343`）。
 
 ## 5. 存档结构与边界
 

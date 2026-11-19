@@ -3,6 +3,8 @@ import { setBackgroundPeeking } from '../ui/background'
 import { openEmail } from '../ui/email'
 import { floatMood } from '../ui/float'
 import { say } from '../ui/talk'
+import { windowView } from '../ui/window-view'
+import type { OrderedEvent } from '../../shared/pet-runtime/events'
 import { emitSaid } from './said'
 import { DEAD, illOf } from './data/ills'
 import { TALK, type Line } from './data/talk'
@@ -14,9 +16,10 @@ import { IDLE, rephrase } from './ai'
 import { dateTalk, festival, greeting, loadCalendar } from './calendar'
 import { listGoods, tickTimed } from './goods'
 import { doctor, useItem, useItemQuietly } from './items'
-import { deliverMails } from './mail'
+import { deliverMails, readMails } from './mail'
 import { Machine, type Pose } from './machine'
 import { moodDecayPerMinute } from './mood'
+import { activityCompletedCue, achievementCue, levelChangedCue, mailNoticeText, unreadMailNoticeText, unreadMailSummary } from './projection-feedback'
 import { rand } from './rand'
 import { lookUrl, restPlan, SINGLE_FRAME_HOLD, walkUrl } from './router'
 import {
@@ -24,12 +27,14 @@ import {
   addInfo,
   applyEdge,
   busy,
+  currentProjectionView,
   edgeSide,
   fatigue,
   growthPerMinute,
   info,
   mood,
   onInfoChange,
+  onProjectionApplied,
   onStoreEvent,
   petSize,
   playingDesk,
@@ -48,10 +53,16 @@ import { resetSignIn, tickGift } from './signin'
 import { resetTasks, rollDaily } from './tasks'
 import { dayStart, newDay } from './vip'
 import { uiCommands } from './command-map'
-import { dispatchRuntimeCommand } from './runtime-command'
+import { commandResultData, dispatchRuntimeCommand } from './runtime-command'
 import { weatherNews, weatherStrain } from './weather'
 
 let idleTimer = 0
+
+/** The idle timer is presentation-only and runs in both authority modes. */
+function scheduleIdle(): void {
+  clearTimeout(idleTimer)
+  idleTimer = window.setTimeout(idle, Math.trunc(Math.random() * 40000 + 20000))
+}
 
 const petSwf = new PetSwf(document.getElementById('pet')!)
 
@@ -62,16 +73,21 @@ export const machine = new Machine(petSwf, (over, next) => {
   // Projection mode owns all gameplay timers and transitions, but speech and
   // animation callbacks are presentation-only and must still run locally.
   if (runtimeProjectionMode) {
+    clearTimeout(idleTimer)
+    // Anything else (drag, click, a queued action) ends the rest.
+    if (next.a !== 'liedown' && next.a !== 'lying') endRest()
     over.e?.()
     next.s?.()
+    if (next.a === 'normal' || next.a === 'hideleft' || next.a === 'hideright') scheduleIdle()
+    const wasPeek = over.a === 'hideleft' || over.a === 'hideright'
+    const nowPeek = next.a === 'hideleft' || next.a === 'hideright'
+    if (wasPeek !== nowPeek) setBackgroundPeeking(nowPeek)
     return
   }
   clearTimeout(idleTimer)
   // Anything else (drag, click, a queued action) ends the rest.
   if (next.a !== 'liedown' && next.a !== 'lying') endRest()
-  if (next.a === 'normal' || next.a === 'hideleft' || next.a === 'hideright') {
-    idleTimer = window.setTimeout(idle, Math.trunc(Math.random() * 40000 + 20000))
-  }
+  if (next.a === 'normal' || next.a === 'hideleft' || next.a === 'hideright') scheduleIdle()
   over.e?.()
   next.s?.()
   const wasPeek = over.a === 'hideleft' || over.a === 'hideright'
@@ -79,8 +95,15 @@ export const machine = new Machine(petSwf, (over, next) => {
   if (wasPeek !== nowPeek) setBackgroundPeeking(nowPeek)
 })
 
-/** Answering the pet's small talk cheers it up. */
+/** Answering the pet's small talk cheers it up through the authority in projection mode. */
 function cheer(): void {
+  if (runtimeProjectionMode) {
+    void dispatchRuntimeCommand(uiCommands.cheer()).then((result) => {
+      const data = commandResultData<{ mood: number }>(result)
+      if (data !== null) void floatMood(data.mood)
+    })
+    return
+  }
   const v = rand(5, 15)
   void floatMood(v)
   setInfo('mood', Math.min(info.mood + v, 1000))
@@ -111,25 +134,34 @@ function leadClip(kind: 'hungry' | 'dirty' | 'poor'): string {
   return kind
 }
 
+/** Cooldowns use game time in projection mode; legacy has no projection view and keeps wall time. */
+function reminderNow(): number {
+  const view = currentProjectionView()
+  return runtimeProjectionMode && view !== null ? view.gameTimeMs / 1000 : Date.now() / 1000
+}
+
 /** A peeking pet only shows the bubble: the sick clip draws the full body and would walk it off the edge. */
 function complain(): void {
-  lastSick = Date.now() / 1000
-  speak({ s: illOf(activity('ill')! + info.health).tolk, b: '带你看病', now: true }, peeking() ? 'speak' : 'sick', { ok: doctor })
+  const ill = activity('ill')
+  if (!ill) return
+  lastSick = reminderNow()
+  speak({ s: illOf(ill + info.health).tolk, b: '带你看病', now: true }, peeking() ? 'speak' : 'sick', { ok: doctor })
 }
 
 /** Checked every minute, so a peeking pet (no idle timer) still brings it up. */
 function nag(): void {
-  if (!info.health || info.health === 5 || busy() || Date.now() / 1000 - lastSick < SICK_CD) return
+  if (!info.health || info.health === 5 || busy() || save.settings.paused) return
+  if (reminderNow() - lastSick < SICK_CD) return
   if (machine.pose.a === 'normal' || peeking()) complain()
 }
 
 /** Plays the official need animation (and the unused `state.eat` / `state.clean` lines). */
 function maybeLead(): boolean {
   if (machine.pose.a !== 'normal' || busy() || info.health < 5 || save.settings.paused) return false
-  if (Date.now() / 1000 - lastLead < LEAD_CD) return false
+  if (reminderNow() - lastLead < LEAD_CD) return false
   const kind = leadOf()
   if (!kind) return false
-  lastLead = Date.now() / 1000
+  lastLead = reminderNow()
   const talk = kind === 'hungry' ? 'eat' : kind === 'dirty' ? 'clean' : 'poor'
   speak({ c: 'state', s: talk, now: true }, leadClip(kind))
   return true
@@ -216,6 +248,7 @@ export function rest(): boolean {
 
 /** After 20-60 s of standing: walk / play / talk, same timer. Walk only if roam is on. */
 function idle(): void {
+  if (save.settings.hidden || window.__qqpetHostPaused || !save.havePet) return
   if (peeking() || playingDesk()) return
   if (maybeLead()) return
   if (Math.random() < 0.1 && rest()) return
@@ -318,6 +351,134 @@ export function bury(done?: () => void): void {
   speak({ c: 'state', s: 'bury' }, 'bury', { start: done })
 }
 
+let projectionMailTimer = 0
+let projectionMailTitle = ''
+let lastPresentedLevel = 0
+let projectionNeedsPrimed = false
+const projectionActivityMailIds = new Set<string>()
+const announcedMailIds = new Set<string>()
+const MAIL_ANNOUNCED_KEY = 'qqpet:mail-announced'
+
+function announcedMailThrough(): number {
+  try {
+    const value = Number(localStorage.getItem(MAIL_ANNOUNCED_KEY))
+    return Number.isFinite(value) ? value : 0
+  } catch {
+    return 0
+  }
+}
+
+function markMailAnnounced(latest: number): void {
+  try {
+    localStorage.setItem(MAIL_ANNOUNCED_KEY, String(latest))
+  } catch {
+    // Presentation-only marker; a blocked localStorage must not break startup.
+  }
+}
+
+/** Startup catch-up for mail that arrived before this renderer connected. */
+function announceStartupMail(): void {
+  if (save.settings.hidden || window.__qqpetHostPaused) return
+  let mails: ReturnType<typeof readMails>
+  try {
+    mails = readMails()
+  } catch {
+    return
+  }
+  const summary = unreadMailSummary(mails, announcedMailThrough())
+  if (summary === null) return
+  if (announcedMailIds.has(summary.mailId)) {
+    markMailAnnounced(summary.latest)
+    return
+  }
+  announcedMailIds.add(summary.mailId)
+  markMailAnnounced(summary.latest)
+  speak({ s: unreadMailNoticeText(summary), b: '这就去' }, 'speak', { ok: openEmail })
+}
+
+function presentLevel(level: number, previous: number): void {
+  const cue = levelChangedCue({ previousLevel: previous, level })
+  if (cue !== null) speak({ c: cue.c, now: true }, cue.action)
+}
+
+/** A snapshot without events (long offline/replay fallback) can still raise the visible level once. */
+function presentProjectionLevel(level: number): void {
+  if (Number.isFinite(level) === false || level <= 0) return
+  if (lastPresentedLevel === 0) {
+    lastPresentedLevel = level
+    return
+  }
+  if (level > lastPresentedLevel) presentLevel(level, lastPresentedLevel)
+  lastPresentedLevel = level
+}
+
+/** Coalesce a boundary batch's mail arrivals into one bubble. */
+function queueProjectionMail(title: string): void {
+  if (title.length > 0) projectionMailTitle = title
+  if (projectionMailTimer) return
+  projectionMailTimer = window.setTimeout(() => {
+    projectionMailTimer = 0
+    const text = mailNoticeText(projectionMailTitle)
+    projectionMailTitle = ''
+    speak({ s: text, b: '这就去' }, 'speak', { ok: openEmail })
+  }, 250)
+}
+
+/** Domain events are presentation material in projection mode; canonical state is already in the projection. */
+function handleProjectionEvent(event: OrderedEvent): void {
+  const payload = event.payload as Record<string, unknown>
+  switch (event.type) {
+    case 'pet.died':
+      setTray('dead')
+      machine.play(save.isBury ? { a: 'bury' } : { a: 'dying', s: () => machine.add({ a: 'die' }) })
+      return
+    case 'activity.completed': {
+      if (typeof payload.mailId === 'string') projectionActivityMailIds.add(payload.mailId)
+      const cue = activityCompletedCue(payload)
+      if (cue !== null) speak({ c: cue.c, s: cue.s, now: true }, cue.action)
+      return
+    }
+    case 'mail.arrived': {
+      const mailId = typeof payload.mailId === 'string' ? payload.mailId : ''
+      if (mailId.length > 0) {
+        const partOfActivity = projectionActivityMailIds.delete(mailId)
+        if (partOfActivity || announcedMailIds.has(mailId)) {
+          announcedMailIds.add(mailId)
+          return
+        }
+        announcedMailIds.add(mailId)
+      }
+      queueProjectionMail(typeof payload.title === 'string' ? payload.title : '')
+      return
+    }
+    case 'pet.levelChanged': {
+      const previous = Number(payload.previousLevel)
+      const level = Number(payload.level)
+      if (Number.isFinite(previous) && Number.isFinite(level) && level > previous && level > lastPresentedLevel) {
+        presentLevel(level, previous)
+        lastPresentedLevel = level
+      }
+      return
+    }
+    case 'achievement.unlocked': {
+      const cue = achievementCue(payload)
+      if (cue !== null) windowView({ title: cue.title, msg: cue.msg, goods: [{ url: cue.src, name: cue.name }] })
+      return
+    }
+    case 'task.progress':
+      if (payload.dailyReset === true && !save.settings.hidden && !window.__qqpetHostPaused) void daily()
+      return
+    case 'pet.illnessChanged': {
+      // A command's own medicine/diagnosis presentation is handled by items.ts.
+      if (event.commandSeq !== undefined) return
+      const health = Number(payload.health)
+      if (Number.isFinite(health) && health > 0 && health < 5 && activity('ill') &&
+        (machine.pose.a === 'normal' || machine.pose.a === 'hideleft' || machine.pose.a === 'hideright')) complain()
+      return
+    }
+  }
+}
+
 if (runtimeProjectionMode === false) {
   let lastMood = mood()
   onInfoChange((key, prev) => {
@@ -337,11 +498,24 @@ if (runtimeProjectionMode === false) {
     }
   })
 } else {
-  // Projection mode owns death/revival state; only the pose is local.
-  onStoreEvent((event) => {
-    if (event.type !== 'pet.died') return
-    setTray('dead')
-    machine.play(save.isBury ? { a: 'bury' } : { a: 'dying', s: () => machine.add({ a: 'die' }) })
+  // Projection mode owns death/revival and all canonical mutations; this layer
+  // only turns ordered events into local animation/speech.
+  onStoreEvent(handleProjectionEvent)
+  onProjectionApplied((projection, events) => {
+    presentProjectionLevel(projection.save.petComputedlInfo.level)
+    // The first projection establishes the reminder baseline; don't greet a
+    // reconnect with a stale hunger/sickness complaint.
+    if (!projectionNeedsPrimed) {
+      projectionNeedsPrimed = true
+      return
+    }
+    // Command deliveries already have their own action feedback; evaluating
+    // reminders here would talk over the item/medicine line.
+    if (events.length === 0 || events.some(event => event.commandSeq !== undefined)) return
+    if (projection.save.settings.paused || projection.save.isBury || projection.save.petInfo.health === 0) return
+    // One evaluation per projection, never per catch-up event.
+    nag()
+    maybeLead()
   })
   onInfoChange((key, previous) => {
     if (key === 'health' && previous === 0 && info.health > 0) machine.play({ a: 'revival' })
@@ -509,6 +683,44 @@ async function daily(): Promise<void> {
   if (f) speak({ s: f }, 'speak')
   void weatherTalk(true)
   if (deliverMails(today)) speak({ s: '[host]，邮箱里来了新邮件，快去看看吧~', b: '这就去' }, 'speak', { ok: openEmail })
+}
+
+
+let projectionStarted = false
+
+/**
+ * Projection startup is presentation-only: no renderer tick, no canonical
+ * growth write. Enter/first, the greeting, daily calendar/weather/festival and
+ * the idle timer are all local; gameplay values remain projection-fed.
+ */
+export function startProjectionPet(first = false): void {
+  if (projectionStarted) return
+  projectionStarted = true
+  refreshTray()
+  if (save.isBury) {
+    speak({ c: 'state', s: 'bury' })
+    return
+  }
+  if (info.health === 0) {
+    speak({ s: DEAD.tolk, b: '别走~' })
+    return
+  }
+  if (info.health < 5) setTray('ill')
+  const action = first || info.growth === 0 ? 'first' : 'enter'
+  const greetingLine = action === 'enter' && Math.random() < 0.5 ? greeting() : null
+  machine.play({
+    a: action,
+    s: () => {
+      speak(greetingLine ? { s: greetingLine.tolk, b: greetingLine.submitText } : { c: action })
+      // Wait for the entrance pose to own the machine before queueing daily
+      // lines; otherwise Machine.play clears the queue when it starts enter.
+      void daily()
+      announceStartupMail()
+    },
+  })
+  setInterval(() => {
+    if (!save.settings.hidden && !window.__qqpetHostPaused) void weatherTalk(false)
+  }, 3600_000)
 }
 
 let growthTimer: ReturnType<typeof setInterval> | null = null
