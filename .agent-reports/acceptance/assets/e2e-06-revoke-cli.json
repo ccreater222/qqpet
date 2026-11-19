@@ -1,0 +1,15 @@
+{
+  "t": "commandResult",
+  "v": 1,
+  "requestId": "admin-revoke",
+  "opId": "admin-revoke-9d7f7990-108e-40c8-8f28-f53935de666f",
+  "commandType": "device.revoke",
+  "status": "applied",
+  "commandSeq": 15,
+  "revision": 48,
+  "eventSeq": 53,
+  "result": {
+    "deviceId": "9d7f7990-108e-40c8-8f28-f53935de666f",
+    "revokedAtMs": 1795092021619
+  }
+}

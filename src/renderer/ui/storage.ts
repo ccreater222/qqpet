@@ -1,5 +1,5 @@
 import type { DeviceInfo, StorageStatusView } from '../../shared/storage'
-import { buildStoragePanelModel } from '../../shared/storage'
+import { buildStoragePanelModel, storageStatusRows } from '../../shared/storage'
 import type { Option } from './setup'
 import { windowView } from './window-view'
 
@@ -17,6 +17,20 @@ let knownRestoreGeneration: number | undefined
 let redraw = (): void => {}
 let subscribed = false
 const draft = { serverUrl: '', pairingCode: '', deviceLabel: '我的宠物' }
+/** Android pairs as a server-pet client only; the local pet is paused, never uploaded. */
+const mobileModeHint = '服务器模式下本机宠物会暂停（不上传、不删除）；切回本机存储后恢复本机宠物。'
+const mobileStatusKeys: readonly string[] = ['mode', 'connection', 'authority', 'revision', 'eventSeq']
+
+/**
+ * Whether this host is the Android client-only server-mode host. The
+ * capability is declared on `QQPetApi.capabilities` by the mobile bridge, so it
+ * is read structurally: this pane does not depend on that type landing first.
+ */
+function serverModeClientOnlyHost(): boolean {
+  const capabilities: unknown = window.qqpet.capabilities
+  if (typeof capabilities !== 'object' || capabilities === null) return false
+  return (capabilities as { serverModeClientOnly?: boolean }).serverModeClientOnly === true
+}
 
 const reason = (e: unknown): string =>
   String(e instanceof Error ? e.message : e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
@@ -172,6 +186,7 @@ function storageOptions(): Option[] {
   }
   const status = statusValue
   if (status === null) return [{ type: 'see', label: '状态', value: message || '存储状态不可用。' }]
+  if (serverModeClientOnlyHost()) return mobileServerModeOptions(status)
   const model = buildStoragePanelModel(status, devicesValue, { knownRestoreGeneration, pairingDraft: draft })
   const options: Option[] = []
 
@@ -233,6 +248,124 @@ function storageOptions(): Option[] {
   options.push({ type: 'button', label: '既导入又可强制对时（allowClamp）', title: '仅当锚点超出 48 小时 / 5 分钟窗口且你明确接受对时；会平移所有剩余期限，不补发跳过的事件。', run: () => importBundle(true) })
   options.push({ type: 'button', label: '创建导入前备份', run: backupNow })
   return options
+}
+
+/**
+ * Android's server-mode client pane: pairing, mode switching and unpair only.
+ * Upload-to-server, server-pet handoff, handoff retry/rollback, bundle import,
+ * backups and owner device revocation are desktop storage-controller concepts
+ * the mobile host rejects, so this pane never renders or calls them.
+ */
+function mobileServerModeOptions(status: StorageStatusView): Option[] {
+  const options: Option[] = []
+  if (status.serverModeAvailable === false) {
+    options.push({ type: 'see', label: '注意', value: '服务器模式当前不可用：' + (status.serverModeReason ?? '宿主未报告原因') + '（本机存储不受影响）' })
+  }
+  if (status.notice === 'authority_reset_required') {
+    options.push({ type: 'see', label: '注意', value: '服务器权威已被操作员重置：缓存已丢弃，正在重新同步快照。' })
+  } else if (status.notice === 'device_revoked') {
+    options.push({ type: 'see', label: '注意', value: '这台设备已被服务器撤销，请解除配对后重新配对。' })
+  } else if (status.notice) {
+    options.push({ type: 'see', label: '注意', value: status.notice })
+  }
+  if (status.readOnly) options.push({ type: 'see', label: '注意', value: '当前投影只读：服务器权威尚未活动，游戏命令暂不可用。' })
+  if (status.lastError) options.push({ type: 'see', label: '最近错误', value: status.lastError })
+  for (const row of storageStatusRows(status)) {
+    if (mobileStatusKeys.includes(row.key)) options.push({ type: 'see', label: row.label, value: row.value })
+  }
+  if (status.serverUrl) options.push({ type: 'see', label: '服务器', value: status.serverUrl })
+  options.push({ type: 'see', label: '状态', value: busy ? '处理中…' : (message || '就绪') })
+  options.push({ type: 'see', label: '说明', value: mobileModeHint })
+
+  if (status.paired === false) {
+    options.push({ type: 'see', label: '本机测试', value: '电脑执行 adb reverse tcp:8787 tcp:8787 后填 ws://127.0.0.1:8787/v1/sync；其余场景一律用 wss://，不要用明文 ws://。' })
+    options.push({ type: 'input', label: '服务器地址（ws:// 或 wss://）', value: () => draft.serverUrl, set: (v) => { draft.serverUrl = v.trim(); redraw() } })
+    options.push({ type: 'input', label: '配对码（一次性，10 分钟有效）', value: () => draft.pairingCode, set: (v) => { draft.pairingCode = v.trim(); redraw() } })
+    options.push({ type: 'input', label: '设备名', value: () => draft.deviceLabel, set: (v) => { draft.deviceLabel = v.trim(); redraw() } })
+    options.push({ type: 'button', label: '配对并使用服务器宠物', run: pairAndUseServerPet })
+    return options
+  }
+
+  options.push({ type: 'see', label: '设备角色', value: status.deviceRole ?? 'player' })
+  options.push({ type: 'see', label: '设备 ID', value: status.deviceId ?? '—' })
+  options.push({ type: 'see', label: '宠物 ID', value: status.petId ?? '—' })
+  // Owner devices are displayed read-only; revocation stays on the desktop owner.
+  if (status.deviceRole === 'owner') {
+    for (const device of devicesValue) {
+      const revoked = device.revokedAtMs === undefined ? '' : '（已撤销）'
+      options.push({ type: 'see', label: '设备', value: device.role + ' / ' + device.label + revoked + ' ' + device.deviceId })
+    }
+  }
+  options.push({ type: 'button', label: '使用服务器宠物', run: useServerPet })
+  options.push({ type: 'button', label: '回到本机存储', run: backToLocal })
+  options.push({ type: 'button', label: '解除配对', run: unpairFromMobile })
+  return options
+}
+
+function pairAndUseServerPet(): void {
+  const storage = api()
+  if (storage === undefined) return
+  if (draft.serverUrl.length === 0 || draft.pairingCode.length === 0) {
+    message = '请先填写服务器地址与一次性配对码。'
+    redraw()
+    return
+  }
+  run('配对并切换到服务器', async () => {
+    await storage.pair({ serverUrl: draft.serverUrl, code: draft.pairingCode, deviceLabel: draft.deviceLabel || '我的宠物' })
+    draft.pairingCode = ''
+    await storage.setMode({ mode: 'server' })
+  })
+}
+
+function useServerPet(): void {
+  const storage = api()
+  const status = statusValue
+  if (storage === undefined || status === null) return
+  if (status.mode === 'server') {
+    message = '当前已在使用服务器宠物。'
+    redraw()
+    return
+  }
+  windowView({
+    title: '使用服务器宠物',
+    msg: '本机宠物会暂停（不上传、不删除），游戏改由服务器权威推进；切回本机存储后恢复本机宠物。确定吗？',
+    ok: (close) => {
+      close()
+      run('使用服务器宠物', () => storage.setMode({ mode: 'server' }))
+    },
+  })
+}
+
+function backToLocal(): void {
+  const storage = api()
+  const status = statusValue
+  if (storage === undefined || status === null) return
+  if (status.mode === 'local') {
+    message = '当前已回到本机存储。'
+    redraw()
+    return
+  }
+  windowView({
+    title: '回到本机存储',
+    msg: '切回本机后恢复本机宠物；服务器宠物仍由服务器管理，本机令牌保留，可随时再切回。确定吗？',
+    ok: (close) => {
+      close()
+      run('回到本机存储', () => storage.setMode({ mode: 'local' }))
+    },
+  })
+}
+
+function unpairFromMobile(): void {
+  const storage = api()
+  if (storage === undefined) return
+  windowView({
+    title: '解除配对',
+    msg: '会清除本机保存的服务器设备令牌与投影缓存，服务器上的宠物不受影响；本机宠物恢复可用。确定吗？',
+    ok: (close) => {
+      close()
+      run('解除配对', () => storage.unpair())
+    },
+  })
 }
 
 function unpairNow(): void {

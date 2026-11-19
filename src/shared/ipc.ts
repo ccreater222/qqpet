@@ -279,8 +279,10 @@ export interface QQPetApi {
     autoStart?: boolean; autoStartReason?: string
     clipboardWatch?: boolean; clipboardWatchReason?: string
     frontWatch?: boolean; frontWatchReason?: string
-    /** Mobile hosts explicitly report false; no pairing/WSS/RemoteRepository bundle exists. */
+    /** This host can talk to a qqpet-server (pairing + WSS repository). */
     serverMode?: boolean
+    /** Android's client-only server-mode pane: the local pet is paused, never uploaded. */
+    serverModeClientOnly?: boolean
     /** True only when this renderer is using the explicit dev local-runtime-v2 authority. */
     localRepositoryV2?: boolean
     localRepositoryV2Reason?: string
@@ -294,7 +296,7 @@ export interface QQPetApi {
   runtimeInfo(): Promise<RendererRuntimeInfo>
   /** Desktop-only C10 server mode; omitted on mobile builds. Kept for compatibility. */
   remote?: DesktopRemoteApi
-  /** C11 storage/mode/admin surface; absent on mobile builds, which always stay local. */
+  /** C11 storage/mode/admin surface; Android exposes a client-only subset, iOS/Harmony stay local without it. */
   storage?: StorageApi
   /** Executes one semantic command through the local/remote repository. */
   command<K extends CommandKey>(

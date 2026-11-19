@@ -99,6 +99,13 @@ test('mobile bridges default to local runtime and expose the rollback build flag
     const source = readFileSync(new URL('../../' + relative, import.meta.url), 'utf8')
     assert.match(source, /VITE_QQPET_LOCAL_RUNTIME_V2_ROLLBACK/)
     assert.match(source, /LOCAL_RUNTIME_V2_FLAG = LOCAL_RUNTIME_V2_ROLLBACK === false/)
+  }
+  // Android bundles the client-only server host; iOS/Harmony stay local-only.
+  const android = readFileSync(new URL('../../src/android/bridge.ts', import.meta.url), 'utf8')
+  assert.match(android, /serverMode: serverRuntime !== null/)
+  assert.match(android, /serverModeClientOnly: serverRuntime !== null/)
+  for (const relative of ['src/harmony/bridge.ts', 'src/ios/bridge.ts']) {
+    const source = readFileSync(new URL('../../' + relative, import.meta.url), 'utf8')
     assert.match(source, /serverMode:\s*false/)
   }
 })

@@ -1,6 +1,6 @@
 # 同步协议（服务端权威）
 
-> 结论：桌面版与 `qqpet-server` 之间只有一条 JSON over WebSocket 的语义通道，协议版本固定为 `1`（`src/shared/sync/protocol.ts:12`）。服务端是唯一权威：客户端上行只允许 `hello`、`command`、`commandStatus`、`exportBundle`、`resync`、`ping` 六种帧（`src/shared/sync/protocol.ts:441`），业务状态只能由服务端下行；鉴权、协议版本、权威代次（epoch）、恢复世代（restoreGeneration）、连续事件游标任何一个不匹配都直接关闭连接或整体重发快照，不做部分修补。客户端展示数据（更新检查、天气、农历/节假日、内容包索引与文件）不占用这条通道，走服务端公开只读的 `GET /v1/client/*` HTTP 端点（见第 12 节）。
+> 结论：客户端（桌面 Electron 与 Android WebView）与 `qqpet-server` 之间只有一条 JSON over WebSocket 的语义通道，协议版本固定为 `1`（`src/shared/sync/protocol.ts:12`）。服务端是唯一权威：客户端上行只允许 `hello`、`command`、`commandStatus`、`exportBundle`、`resync`、`ping` 六种帧（`src/shared/sync/protocol.ts:441`），业务状态只能由服务端下行；鉴权、协议版本、权威代次（epoch）、恢复世代（restoreGeneration）、连续事件游标任何一个不匹配都直接关闭连接或整体重发快照，不做部分修补。协议状态机只有一份：`src/shared/remote/repository.ts`，桌面主进程与 Android 移动宿主各自注入 transport 与 token store（见第 1.1 节）。客户端展示数据（更新检查、天气、农历/节假日、内容包索引与文件）不占用这条通道，走服务端公开只读的 `GET /v1/client/*` HTTP 端点（见第 12 节）。
 
 ## 1. 传输与端点
 
@@ -8,8 +8,15 @@
 - 预鉴权连接数超过 `maxPreAuthConnections`（默认 64）时回 429，不进 WebSocket（`server/src/index.ts:161-165`、`server/src/config.ts:141-146`）。
 - `ws` 层 `maxPayload = maxFrameBytes + 1`，禁用 `perMessageDeflate`（`server/src/index.ts:146-154`）。多出的 1 字节是为了让应用层先看到超限帧并给出协议级关闭码，而不是被解析器直接掐断。
 - `ws` 的 `1009` 关闭码被重写成协议默认的 `4005 payload_too_large`（`server/src/index.ts:170-185`）。
-- 桌面客户端用运行时全局 `WebSocket`（Electron 主进程的 Node 22），**不 import `ws`**，移动端因此可以整块摇掉远程路径（`src/main/remote-websocket-transport.ts:26-33`）；连接前先用 `assertRemoteServerUrl` 校验 URL（`src/main/remote-websocket-transport.ts:35-37`）。
+- 传输实现宿主中立：`createWebSocketTransport()` 用运行时全局 `WebSocket`（Node 22、Electron 主进程、Chromium/WebView 均可），**不 import `ws`**（`src/shared/remote/websocket-transport.ts:31-45`）；连接前先 `assertRemoteServerUrl`（`src/shared/remote/websocket-transport.ts:36`）。
 - TLS/WSS 由反向代理终止，代理链路契约由 `npm run smoke:proxy` 覆盖（见 `docs/reviews/c12-final-gate/2026-11-18-c12-final-gate.md`）。
+
+### 1.1 客户端宿主与传输约束
+
+- 远程客户端实现已从 `src/main/` 移到 `src/shared/remote/`：协议状态机 `repository.ts`、URL 策略 `endpoint.ts`、WebSocket 适配器 `websocket-transport.ts`。旧路径 `src/main/remote-repository.ts`、`src/main/remote-endpoint.ts`、`src/main/remote-websocket-transport.ts` 只是 `export *` 兼容 shim（`src/main/remote-repository.ts:1-7`），新代码必须直接引用 `src/shared/remote/*`。
+- 桌面端：Electron 主进程注入全局 `WebSocket`，token 由 `safeStorage` 加密文件承载；入口仍是 `DesktopStorageController`（`src/main/storage-controller.ts:437-470`）。
+- Android：WebView 页面注入同一套 `RemoteRepository`，token 走 Android Keystore（`MobileRemoteTokenStore`，密封文件由 `PetService.Bridge.saveRemoteToken/loadRemoteToken/clearRemoteToken` 提供）。宿主开关是 `capabilities.serverMode` / `serverModeClientOnly`（`src/android/bridge.ts:364-374`、运行时委托 `:505-530`），UI 只做配对、切换与状态展示（`src/renderer/ui/storage.ts:259-299`（动作处理 `:301-365`））；device 角色由服务端配对码决定（player/owner），移动端不提供上传本机宠物、权威交接与撤销设备。**Android 只允许 `wss://` 或 loopback `ws://127.0.0.1`/`localhost`**：页面 origin 是 `https://appassets.androidplatform.net`，WebView 安全上下文会拒绝指向私网地址的明文 `ws://`，`mixedContentMode` 不是可靠开关；局域网/模拟器联调统一用 `adb reverse tcp:8787 tcp:8787` + `ws://127.0.0.1:8787/v1/sync`。共享校验器 `assertRemoteServerUrl` 对私网 `ws://` 仍然放行（桌面 LAN 场景需要）；Android 的收紧守卫 `assertAndroidServerUrl` 在移动宿主层，只额外拒绝非 loopback 的 `ws://`，不放宽共享规则（`src/mobile/server-mode.ts:158-172`、`src/shared/remote/endpoint.ts:47-84`）。
+- iOS/HarmonyOS：仍然不编入远程客户端，`capabilities.serverMode` 保持 `false`。
 
 ## 2. 协议版本
 
@@ -22,7 +29,7 @@
 
 版本不合的处理是**关闭连接**而不是降级：`hello.v !== PROTOCOL_VERSION` 直接以 `4001 protocol_mismatch` 关闭（`server/src/session.ts:392-395`）；已鉴权后收到版本不合的帧同样以 `4001` 关闭（`server/src/session.ts:312-320`）。服务端在 `welcome` 里回传自己的 `protocolVersion` 与服务端 `saveSchemaVersion`，客户端据此记录（`server/src/session.ts:458-459`）。
 
-协议校验器 `parseClientMessage`/`parseServerMessage` 是唯一入口：它检查方向、消息类型白名单、需要 `requestId` 的消息是否带 `requestId`、事件流是否单调、payload 是否 JSON 安全且不含禁止字段（`src/shared/sync/protocol-validation.ts:34-44`、`src/shared/sync/protocol-validation.ts:60-94`）。客户端发帧前也先自检一次（`src/main/remote-repository.ts:763-769`），避免把非法帧送到线上。
+协议校验器 `parseClientMessage`/`parseServerMessage` 是唯一入口：它检查方向、消息类型白名单、需要 `requestId` 的消息是否带 `requestId`、事件流是否单调、payload 是否 JSON 安全且不含禁止字段（`src/shared/sync/protocol-validation.ts:34-44`、`src/shared/sync/protocol-validation.ts:60-94`）。客户端发送前也先自检：命令走 `parsePetCommand`（`src/shared/remote/repository.ts:524`），`hello` 走 `parseClientMessage`（`src/shared/remote/repository.ts:806`），避免把非法帧送到线上。
 
 ## 3. hello 与鉴权
 
@@ -72,7 +79,7 @@
 | `authority_mismatch` | `authorityId` 不同 | 同上 |
 | 正常 | 三项都匹配 | 进入投递计划 |
 
-`authorityResetRequired` 帧带 `reason`、`requireFullSnapshot: true` 和新权威戳（`server/src/session.ts:754-781`）。客户端收到后清掉缓存权威并以 `discardCachedAuthority: true` 重连/重同步（`src/main/remote-repository.ts:1682-1692`、`src/main/remote-repository.ts:1809`）；即使连接先断，`4002` 的 `authority_reset_required`/`superseded` 也会保留「下次 hello 不带 cachedAuthority」的意图（`src/main/remote-repository.ts:1916-1921`）。
+`authorityResetRequired` 帧带 `reason`、`requireFullSnapshot: true` 和新权威戳（`server/src/session.ts:754-781`）。客户端收到后清掉缓存权威并以 `discardCachedAuthority: true` 重连/重同步（`src/shared/remote/repository.ts:1617-1631`、`src/shared/remote/repository.ts:1842-1880`）；即使连接先断，`4002` 的 `authority_reset_required`/`superseded` 也会保留「下次 hello 不带 cachedAuthority」的意图（`src/shared/remote/repository.ts:1960-1966`）。
 
 交接（本地 ↔ 服务端）会推进 epoch：`nextEpoch = authority.epoch + 1` 并生成新的 `handoffId`（`server/src/command-service.ts:451`、`server/src/command-service.ts:540-548`）。因此 epoch 只增不减，客户端拿到更大的 epoch 就必须整体重放，不能沿用旧缓存。
 
@@ -99,9 +106,10 @@
 - 服务端启动前先校验恢复世代文件、把所有宠物的权威状态解码一遍，任一损坏就不监听端口（`server/src/index.ts:193-209`）。
 - 投影出口做终检：`assertPublicSave` 拒绝设备本地字段与任何 never-upload 字段，`assertPublicEvent` 拒绝事件里的同类内容；失败时记 `projection.boundary_rejected` 并**丢弃该次广播**（`server/src/hub.ts:82-88`、`server/src/validation.ts:9-19`）。
 - 下行帧超过 `maxFrameBytes` 时直接以 `4005` 关闭连接，不发截断内容（`server/src/session.ts:787-795`）。
-- 客户端把认证/协议错误视为终态：`auth_failed`/`protocol_mismatch` 立即 `terminalFailure` 并断开，不重试（`src/main/remote-repository.ts:1730-1734`）；关闭码 `4000`/`4001` 同样终态（`server/src/session.ts:31-32`、`src/main/remote-repository.ts:1897-1907`）。
-- 设备被撤销：服务端广播 `deviceRevoked` 并以 `4002 revoked` 关闭该设备的连接（`server/src/hub.ts:109-124`）；客户端丢弃投影缓存并标记 `device_revoked`（`src/main/remote-repository.ts:1908-1915`）。
-- 缓存只读启动：server 模式已配对且存在通过校验的 `RemoteProjectionCacheV2` 时，`RemoteRepository.start()` 不等待 ready，直接返回缓存投影并继续后台拨号/重连（`src/main/remote-repository.ts:412-444`、`src/main/remote-repository.ts:669-674`）。缓存不是权威：状态 `readOnly` 为真，`command()` 在 online 前仍返回 `offline`/`server_catching_up`，也不会写规范状态；没有缓存时保持原有的等待 ready 语义。
+- 客户端把认证/协议错误视为终态：`auth_failed`/`protocol_mismatch` 立即 `terminalFailure` 并断开，不重试（`src/shared/remote/repository.ts:1738-1745`）；关闭码 `4000`/`4001` 同样终态（`server/src/session.ts:31-32`、`src/shared/remote/repository.ts:1940-1953`）。
+- 设备被撤销：服务端广播 `deviceRevoked` 并以 `4002 revoked` 关闭该设备的连接（`server/src/hub.ts:109-124`）；客户端丢弃投影缓存并标记 `device_revoked`（`src/shared/remote/repository.ts:870-885`）。
+- 缓存只读启动：server 模式已配对且存在通过校验的 `RemoteProjectionCacheV2` 时，`RemoteRepository.start()` 不等待 ready，直接返回缓存投影并继续后台拨号/重连（`src/shared/remote/repository.ts:441-475`、`src/shared/remote/repository.ts:980-1025`）。缓存不是权威：状态 `readOnly` 为真，`command()` 在 online 前仍返回 `offline`/`server_catching_up`，也不会写规范状态；没有缓存时保持原有的等待 ready 语义。
+- Android 宿主：设备 token 只以 Keystore AEAD 密文落盘（`remote-token.bin` 不在页面可写文件白名单），三个状态文件 `storage-config.json`/`sync-config.json`/`remote-projection-cache.json` 才走 `readStateFile`/`writeAtomic`/`removeStateFile`（`android/app/src/main/java/net/ankio/qqpet/PetService.kt:411-420`、`:462-466`、`:517-566`）。`storage-config.json` 只存非机密的模式/服务器地址/设备名（配对或切换模式时原子写入），token 单独走 Keystore；启动无缓存且 5 秒内连不上服务器时显式回退本机并保留配对信息，不静默降级。传输只接受 `wss://` 或 loopback `ws://`（见 §1.1）。
 - 空闲与心跳：`pingIntervalMs` 默认 20s，`idleTimeoutMs` 默认 60s；超过空闲以 `4002 idle_timeout` 关闭，`alive === false` 的连接直接 `terminate()`（`server/src/session.ts:144-162`、`server/src/config.ts:119-121`）。
 - 预鉴权阶段有独立预算：单帧超过 16 KiB 直接 `4005`（`server/src/session.ts:269-273`），预鉴权速率 5 次/秒、突发 10（`server/src/session.ts:38-39`），`helloTimeoutMs` 默认 5s，超时按 `4000 auth_failed` 关闭（`server/src/session.ts:219-222`）。
 
@@ -133,7 +141,7 @@
 | 现象 | 原因 | 可观察行为 | 定位 |
 | --- | --- | --- | --- |
 | 连上即断、reason `protocol_mismatch` | `hello.v` 与服务端不一致 | 关闭码 `4001` | `server/src/session.ts:392-395` |
-| 连上即断、reason `auth_failed` | token 撤销/不匹配，配对码已用或过期 | 关闭码 `4000`，客户端终态 | `server/src/auth.ts:23-56`、`src/main/remote-repository.ts:1730-1734` |
+| 连上即断、reason `auth_failed` | token 撤销/不匹配，配对码已用或过期 | 关闭码 `4000`，客户端终态 | `server/src/auth.ts:23-56`、`src/shared/remote/repository.ts:1738-1745` |
 | 反复重连且每次拿全量快照 | 回放缺口超过 `maxReplayEvents` 或帧过大 | `delivery: 'snapshot'` | `server/src/session.ts:500-523` |
 | 命令全部 `server_catching_up` | 服务端追赶空档未完成 | 客户端进入 `catching_up` 并等待 | `server/src/command-service.ts:184-190` |
 | 命令全部 `authority_not_active` | 权威归档/交接中 | 只读 + 状态提示 | `server/src/session.ts:486-496` |
@@ -154,9 +162,10 @@ node --experimental-strip-types --test scripts/tests/sync-data-boundary.test.mjs
 # 服务端集成（真实 SQLite、真实 WSS、失败关闭）
 npm --prefix server test
 
-# 客户端远程仓库与模式切换
+# 客户端远程仓库与模式切换（桌面 + Android 移动宿主）
 node --experimental-strip-types --test scripts/tests/remote-repository.test.mjs
 node --experimental-strip-types --test scripts/tests/storage-c11.test.mjs
+node --experimental-strip-types --test scripts/tests/mobile-server-mode.test.mjs
 
 # 真实服务端 + 两个 Electron 的端到端
 npm run test:e2e
@@ -195,10 +204,11 @@ npm run test:e2e
 
 ## 13. 变更影响
 
-- **改协议版本**：必须同时改 `src/shared/sync/protocol.ts:12`、`parseClientMessage`/`parseServerMessage` 的版本判定、`server/src/session.ts:392-395` 的 `4001` 分支，以及客户端终态处理（`src/main/remote-repository.ts:1897-1907`）。旧客户端不会被兼容，属于破坏性变更。
-- **新增消息类型**：要同时进 `CLIENT_MESSAGE_TYPES`/`SERVER_MESSAGE_TYPES`（`src/shared/sync/protocol.ts:441-445`）、校验器、`src/main/remote-repository.ts:806-850` 的分发 switch，漏掉会命中 `unknown_message_type`。
+- **改协议版本**：必须同时改 `src/shared/sync/protocol.ts:12`、`parseClientMessage`/`parseServerMessage` 的版本判定、`server/src/session.ts:392-395` 的 `4001` 分支，以及客户端终态处理（`src/shared/remote/repository.ts:1940-1953`）。旧客户端不会被兼容，属于破坏性变更。
+- **新增消息类型**：要同时进 `CLIENT_MESSAGE_TYPES`/`SERVER_MESSAGE_TYPES`（`src/shared/sync/protocol.ts:441-445`）、校验器、`src/shared/remote/repository.ts:833-900` 的分发 switch，漏掉会命中 `unknown_message_type`。
 - **新增命令**：`CommandPayloadMap`、`ResultDataMap`、`COMMAND_ROLES` 三张表缺一不可（`src/shared/sync/protocol.ts:20-101`、`src/shared/sync/command-validation.ts:236-242`），并要同步服务端 `server/src/command-service.ts` 的分支与本地运行时 handler（`src/shared/pet-runtime/runtime.ts:189-262`）。
-- **改权威语义**：`epoch`/`restoreGeneration` 任何变化都会波及 `server/src/session.ts`、`src/main/remote-repository.ts`、`src/main/storage-controller.ts` 与 `scripts/tests/storage-c11.test.mjs`；这类改动属于重大变更，必须先过规格门禁。
+- **改权威语义**：`epoch`/`restoreGeneration` 任何变化都会波及 `server/src/session.ts`、`src/shared/remote/repository.ts`、`src/main/storage-controller.ts` 与 `scripts/tests/storage-c11.test.mjs`；这类改动属于重大变更，必须先过规格门禁。
+- **改客户端宿主**：`src/shared/remote/**` 是桌面与 Android 共用的唯一协议状态机，改动必须同时验证 `npm --prefix server test`、`scripts/tests/remote-repository.test.mjs` 与 `scripts/tests/mobile-server-mode.test.mjs`；`src/main/remote-*.ts` 只是 shim，新增导入一律指向 `src/shared/remote/*`，不要在两个位置各写一份实现。移动宿主新增/缺失原生能力时的降级规则见 `docs/architecture/native-bridge.md` §4。
 - **改限流/帧上限**：`server/src/config.ts:136-153` 是唯一来源，改完要跑 `npm --prefix server test` 与 `npm run test:e2e`，否则客户端会把新的关闭码当成未知错误。
 - **改投影出口**：只能在 `server/src/validation.ts` 与 `src/shared/sync/data-boundary.ts` 的名单里改，不要在 `hub.broadcastProjection` 里加特例。
 - **改客户端数据端点**：`server/src/index.ts` 的 `handleClientHttp`、`server/src/client-data.ts`，以及客户端 `src/shared/{upstream,update,weather,calendar}.ts` 需同步；这些端点必须保持公开只读，客户端展示数据不得回退到任何第三方域名。

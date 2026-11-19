@@ -474,7 +474,7 @@ test('mobile local host parity: same command and scheduler sequence as desktop L
   await mobile.stop()
 })
 
-test('mobile bundles gate v2 explicitly, hide server mode, and never import server/WSS code', async () => {
+test('mobile bundles gate v2 explicitly; Android is a server client while iOS/Harmony hide server mode', async () => {
   const root = new URL('../../', import.meta.url)
   const sources = [
     'src/android/bridge.ts',
@@ -484,7 +484,6 @@ test('mobile bundles gate v2 explicitly, hide server mode, and never import serv
   for (const relative of sources) {
     const source = readFileSync(new URL(relative, root), 'utf8')
     assert.match(source, /VITE_QQPET_LOCAL_RUNTIME_V2/, relative)
-    assert.match(source, /serverMode:\s*false/, relative)
     assert.match(source, /localRepositoryV2/, relative)
     assert.match(source, /rendererCapability:\s*true/, relative)
     assert.match(source, /resolveMobileLegacyAuthority/, relative)
@@ -494,7 +493,23 @@ test('mobile bundles gate v2 explicitly, hide server mode, and never import serv
     assert.match(source, /importPortableBundleJson/, relative)
     assert.match(source, /QQPet-portable-/, relative)
     assert.doesNotMatch(source, /legacy save (?:export|import) is disabled while local runtime v2 is enabled/, relative)
-    assert.doesNotMatch(source, /RemoteRepository|new WebSocket|wss:\/\//, relative)
+  }
+
+  // Android is the client-only server-mode host: it imports the shared remote
+  // state machine through the mobile adapter, but the page itself never opens a
+  // WebSocket (the transport is in src/shared/remote).
+  const android = readFileSync(new URL('src/android/bridge.ts', root), 'utf8')
+  assert.match(android, /createMobileServerRuntime/)
+  assert.match(android, /serverModeClientOnly/)
+  assert.match(android, /api\.storage = runtime\.storage/)
+  assert.doesNotMatch(android, /new WebSocket/)
+  assert.doesNotMatch(android, /remote-token\.bin/)
+
+  // iOS and Harmony remain local-only hosts: no pairing, no WSS repository.
+  for (const relative of ['src/harmony/bridge.ts', 'src/ios/bridge.ts']) {
+    const source = readFileSync(new URL(relative, root), 'utf8')
+    assert.match(source, /serverMode:\s*false/, relative)
+    assert.doesNotMatch(source, /RemoteRepository|server-mode|new WebSocket|wss:\/\//, relative)
   }
   const core = readFileSync(new URL('src/shared/local-repository/host.ts', root), 'utf8')
   const coreCode = core.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
@@ -517,7 +532,16 @@ test('mobile bundles gate v2 explicitly, hide server mode, and never import serv
   assert.match(androidAllowlist, /save\.v2\.json\.bak/)
   assert.match(androidAllowlist, /save\.json\.bak/)
   assert.match(androidAllowlist, /save\.v2\.json\.corrupt-/)
+  assert.match(androidAllowlist, /storage-config\.json/)
+  assert.match(androidAllowlist, /sync-config\.json/)
+  assert.match(androidAllowlist, /remote-projection-cache\.json/)
   assert.doesNotMatch(androidAllowlist, /"save\.json"/)
+  assert.doesNotMatch(androidAllowlist, /remote-token\.bin/)
+  assert.match(androidNative, /saveRemoteToken/)
+  assert.match(androidNative, /loadRemoteToken/)
+  assert.match(androidNative, /clearRemoteToken/)
+  assert.match(androidNative, /removeStateFile/)
+  assert.match(androidNative, /AndroidKeyStore/)
 
   const harmonyNative = readFileSync(new URL('harmony/entry/src/main/ets/pet/Native.ets', root), 'utf8')
   assert.match(harmonyNative, /readStateFile/)

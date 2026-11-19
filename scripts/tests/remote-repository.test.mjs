@@ -1908,9 +1908,8 @@ test('C11 enables desktop server mode by default while mobile stays explicitly d
   assert.equal(typeof IPC.storageSetMode, 'string')
 })
 
-test('mobile builds never import the desktop remote implementation', () => {
+test('iOS/Harmony and the local mobile bridge never import the desktop remote implementation', () => {
   const files = [
-    'src/android/bridge.ts',
     'src/harmony/bridge.ts',
     'src/ios/bridge.ts',
     'src/mobile/local-repository-bridge.ts',
@@ -1920,6 +1919,17 @@ test('mobile builds never import the desktop remote implementation', () => {
     assert.doesNotMatch(source, /RemoteRepository|remote-repository|pairing-store|server-mode|remote-websocket-transport|new WebSocket|wss:\/\//, file)
     assert.match(source, /serverMode:\s*false/, file)
   }
+})
+
+test('Android reaches the shared remote client through its mobile adapter, not a page WebSocket', () => {
+  const android = readFileSync(join(ROOT, 'src/android/bridge.ts'), 'utf8')
+  assert.match(android, /createMobileServerRuntime/)
+  assert.match(android, /serverModeClientOnly/)
+  assert.match(android, /api\.storage = runtime\.storage/)
+  assert.doesNotMatch(android, /new WebSocket/)
+  const shared = readFileSync(join(ROOT, 'src/shared/remote/repository.ts'), 'utf8')
+  assert.match(shared, /export class RemoteRepository/)
+  assert.doesNotMatch(shared, /from 'node:/)
 })
 
 test('protocol validation rejects unsupported versions before the repository accepts frames', () => {
