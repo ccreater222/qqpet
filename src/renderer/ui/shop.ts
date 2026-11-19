@@ -1,12 +1,13 @@
 import { describe, goodOf, TYPE_NAMES, type Good, type GoodType } from '../pet/data/goods'
 import SHOP from '../pet/data/shop.json'
 import { listGoods, onGoodsChange } from '../pet/goods'
-import { buy, discount, price, useItem } from '../pet/items'
+import { buy, buyRuntime, discount, price, useItem } from '../pet/items'
 import { speak } from '../pet/pet'
-import { avatar, info, onInfoChange, save } from '../pet/store'
+import { avatar, info, onInfoChange, runtimeProjectionMode, save } from '../pet/store'
 import { openFrame } from './box'
 import './css/shop.css'
 import { button, div, img } from './dom'
+import { settleCartLines } from './shop-cart'
 import { windowView } from './window-view'
 
 interface Tab {
@@ -129,6 +130,7 @@ export function openShop(): void {
   const cartList = div('cartGoodList')
   const cartCount = div('cg_total fcc')
   const cartTotal = div('cg_totalPay f1 fcc')
+  const cartHint = div('attributeTotal')
   const cartMark = div('markFull fcc')
   const busyMark = div('markFull fcc', '购买中，请稍后···')
   const fly = div('markFullNone')
@@ -224,7 +226,9 @@ export function openShop(): void {
                     'rG_buts f1 fc',
                     div('rG_dj fc h100 f1 w0', `等级 ${g.needLevel || 0}`),
                     button(`rG_cart${off}`, () => !why && addToCart(g, pic, i)),
-                    button(`rG_pay${off}`, () => !why && checkout([[g, 1]], false)),
+                    button(`rG_pay${off}`, () => {
+                      if (!why) void checkout([[g, 1]], false)
+                    }),
                   ),
                 ),
                 { title: ['', '等级不足', '无粉钻会员'][why] },
@@ -237,6 +241,7 @@ export function openShop(): void {
           div('f1'),
           div('paging fc', ...pager('rsfb', mall.page, pages.length, (page) => drawRight({ ...mall, page }))),
           button('shoppingCart por', () => {
+            cartHint.textContent = ''
             drawCart()
             cartMark.style.display = ''
           }),
@@ -299,17 +304,44 @@ export function openShop(): void {
     cartTotal.textContent = `${total} YB`
   }
 
-  /** Buys the given goods behind the original's 0.5 s "buying" overlay; false when 元宝 run short. */
-  function checkout(items: [Good, number][], quiet: boolean): boolean {
+  /**
+   * Buys the given goods behind the original's 0.5 s "buying" overlay. False when
+   * 元宝 run short, or — in projection mode — when the authority rejected any
+   * purchase. `lines` is the live cart the purchase came from: bought rows leave
+   * it, rejected rows stay. Rejections are already presented by the shared
+   * command-error modal; the cart only adds one summary line.
+   */
+  async function checkout(
+    items: [Good, number][],
+    quiet: boolean,
+    lines?: Map<string, Good & { cartNum: number }>,
+  ): Promise<boolean> {
     const total = items.reduce((s, [g, n]) => s + price(g) * n, 0)
     if (info.yb < total) {
       windowView({ msg: '抱歉您的余额不足' })
       return false
     }
+    cartHint.textContent = ''
     busyMark.style.display = ''
-    for (const [g, n] of items) buy(g, n, quiet)
-    setTimeout(() => (busyMark.style.display = 'none'), 500)
-    return true
+    try {
+      if (runtimeProjectionMode === false) {
+        for (const [g, n] of items) buy(g, n, quiet)
+        return true
+      }
+      const rows = items.map(([g, n]) => ({ key: g.id, good: g, n }))
+      const settled: { key: string; ok: boolean }[] = []
+      for (const row of rows) settled.push({ key: row.key, ok: await buyRuntime(row.good, row.n, quiet) })
+      const result = settleCartLines(rows, settled)
+      if (lines !== undefined) {
+        // The pure settlement decides which rows are gone; the cart only drops them.
+        const kept = new Set(result.remaining.map((row) => row.key))
+        for (const row of rows) if (kept.has(row.key) === false) lines.delete(row.key)
+      }
+      if (result.allOk === false) cartHint.textContent = '部分商品没能买到，已保留在购物车'
+      return result.allOk
+    } finally {
+      setTimeout(() => (busyMark.style.display = 'none'), 500)
+    }
   }
 
   const shop = div(
@@ -331,21 +363,18 @@ export function openShop(): void {
       button('cartClose', () => (cartMark.style.display = 'none')),
       cartList,
       div('totalMsg fc', cartCount, cartTotal),
-      div('attributeTotal'),
+      cartHint,
       div(
         'scm_foot',
         button('qrzf', () => {
-          if (
-            !cart.size ||
-            !checkout(
-              [...cart.values()].map((g) => [g, g.cartNum]),
-              true,
-            )
-          )
-            return
-          cart.clear()
-          cartMark.style.display = 'none'
-          setTimeout(() => speak({ s: '谢谢[host],帮我清空了购物车~~', now: true }, 'speak'), 500)
+          if (!cart.size) return
+          void checkout([...cart.values()].map((g) => [g, g.cartNum]), true, cart).then((allOk) => {
+            drawCart()
+            if (allOk === false) return
+            cart.clear()
+            cartMark.style.display = 'none'
+            setTimeout(() => speak({ s: '谢谢[host],帮我清空了购物车~~', now: true }, 'speak'), 500)
+          })
         }),
         button('jxgw', () => (cartMark.style.display = 'none')),
       ),

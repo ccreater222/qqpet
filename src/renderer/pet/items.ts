@@ -1,5 +1,6 @@
 import { floatMood } from '../ui/float'
 import { windowView } from '../ui/window-view'
+import { medicalQuote, type MedicalQuote } from '../../shared/pet-runtime/medical-cost'
 import { goodOf, type Good, type TimedType } from './data/goods'
 import { DEAD, illOf } from './data/ills'
 import { addGood, hasGood, startTimed, takeGood } from './goods'
@@ -202,13 +203,23 @@ export const discount = (yb: number): number => Math.round(yb * 0.8)
 /** Unit price; pink diamond members get 20% off. */
 export const price = (g: Good): number => (info.pinkDiamond ? discount(g.price!) : g.price!)
 
+/**
+ * Buys n of a good through the authority and reports whether the command was
+ * accepted. A rejection already reached the shared `qqpet-command-error` modal,
+ * so this adds no second dialog; a success thanks the host unless `quiet`.
+ */
+export async function buyRuntime(g: Good, n = 1, quiet = false): Promise<boolean> {
+  const result = await dispatchRuntimeCommand(uiCommands.buy(g.type, g.id, n))
+  if (commandSucceeded(result) === false) return false
+  if (!quiet) speak({ c: 'pay', s: g.type, now: true }, 'speak')
+  return true
+}
+
 /** Buys n of a good; `quiet` skips the thank-you line (cart checkout). */
 export function buy(g: Good, n = 1, quiet = false): boolean {
   if (runtimeProjectionMode) {
-    void dispatchRuntimeCommand(uiCommands.buy(g.type, g.id, n)).then((result) => {
-      if (quiet || commandSucceeded(result) === false) return
-      speak({ c: 'pay', s: g.type, now: true }, 'speak')
-    })
+    // Fire-and-forget only for an immediate purchase; cart settlement awaits buyRuntime.
+    void buyRuntime(g, n, quiet)
     return true
   }
   if (g.needLevel && save.petComputedlInfo.level < g.needLevel) {
@@ -225,25 +236,34 @@ export function buy(g: Good, n = 1, quiet = false): boolean {
   return true
 }
 
+/** Why the doctor charges what the quote says: visit fee plus the cure, owned or bought on the spot. */
+function doctorQuoteText(quote: MedicalQuote): string {
+  if (quote.dead) {
+    return quote.ownsMedicine
+      ? `[host]已经死亡，使用背包中的${quote.medicineName}就能复活，点击确认进行复活~`
+      : `[host]已经死亡，需要花费${quote.medicineCharge}元宝购买${quote.medicineName}来复活（无诊疗费），点击确认进行复活~`
+  }
+  const medicine = quote.ownsMedicine
+    ? `使用背包中的${quote.medicineName}`
+    : `另需${quote.medicineCharge}元宝购买${quote.medicineName}（药价加收20%）`
+  return `诊疗费${quote.fee}元宝，${medicine}，合计${quote.total}元宝，点击确认进行看病~`
+}
+
 /** The doctor: a consultation by health, then the cure, from the inventory or bought on the spot (price +20%). */
 export function doctor(): void {
   if (runtimeProjectionMode) {
-    const line = activity('ill')
-    if (info.health === 0) {
-      void dispatchRuntimeCommand(uiCommands.treatDoctor()).then((result) => {
-        if (commandSucceeded(result)) speak({ s: '[host],我复活啦~', now: true }, 'revival')
-      })
-      return
-    }
-    if (line === null) return speak({ s: '[host],我不需要看病的~', now: true }, 'speak')
-    const fee = (5 - info.health) * 10
+    // One authoritative quote drives both the dialog and the handler's charge.
+    const quote = medicalQuote(save)
+    if (quote === null) return speak({ s: '[host],我不需要看病的~', now: true }, 'speak')
+    const revival = quote.dead
     windowView({
-      title: '看病',
-      msg: `当前需要花费${fee}元宝，点击确认进行看病~`,
+      title: revival ? '复活' : '看病',
+      msg: doctorQuoteText(quote),
       ok: (close) => {
         close()
         void dispatchRuntimeCommand(uiCommands.treatDoctor()).then((result) => {
-          if (commandSucceeded(result)) speak({ s: '[host],病治好啦~', now: true }, 'recover')
+          if (commandSucceeded(result) === false) return
+          speak({ s: revival ? '[host],我复活啦~' : '[host],病治好啦~', now: true }, revival ? 'revival' : 'recover')
         })
       },
     })
