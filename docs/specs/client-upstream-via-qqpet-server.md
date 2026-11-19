@@ -87,7 +87,7 @@
 - `from` 缺省为服务端当前本地日期；`days` 1..31，默认 31。
 - 200：`CalendarDay[]`，每项 `{date,lunar,term,holiday}`，与 `src/shared/ipc.ts:158-167` 完全一致。
 - 400：`invalid_range`（日期/天数非法）。
-- 农历用 `Intl.DateTimeFormat('zh-CN-u-ca-chinese')` 转换中文月/日；节气用标准 24 节气近似算法；法定节假日/调休用 `src/shared/calendar-data.ts` 内置的 2025–2027 数据（来源 holiday-cn，MIT），超出年份 `holiday: null`。
+- 农历用 `src/shared/lunar.ts` 内置的 1900–2100 月表转换（数据/算法源自 solarlunar，ISC），不依赖 ICU；节气用标准 24 节气近似算法；法定节假日/调休用 `src/shared/calendar-data.ts` 内置的 2025–2027 数据（来源 holiday-cn，MIT），超出年份 `holiday: null`。
 - 纯计算，无网络、无缓存。
 
 #### `GET /v1/client/packs.json`
@@ -145,7 +145,7 @@ export function clientUrl(base: string, path: string): string
 - `src/shared/update.ts`：`latestRelease(fetch, base)`；无 base 抛 `upstream_not_configured`；请求 `${base}/v1/client/release`。
 - `src/shared/weather.ts`：`weather(fetch, base, city)`；无 base 抛 `upstream_not_configured`；抽取 `normalizeWeatherReply()` 供服务端复用。
 - `src/shared/calendar.ts`：`calendar(fetch, base?)`；有 base 请求 `${base}/v1/client/calendar?from=...&days=31`；无 base 调 `computeCalendarDays()` 本地计算。
-- 新增 `src/shared/calendar-data.ts`：纯函数 `computeCalendarDays(from, days)` + `lunarDateText()` + `solarTerm()` + 2025–2027 节假日表。
+- 新增 `src/shared/calendar-data.ts`：纯函数 `computeCalendarDays(from, days)` + `solarTerm()` + 2025–2027 节假日表；新增 `src/shared/lunar.ts`（1900–2100 农历月表与转换，源自 solarlunar/ISC）。
 - `src/main/index.ts` 的 `calendar/weather/latestRelease` IPC 增加 `clientUpstreamBase()`：
   - server 模式：`httpBaseFromServerUrl(storage.status().serverUrl)`。
   - 否则：`normalizeUpstreamUrl(getSave().settings.upstreamUrl)`。
@@ -227,7 +227,7 @@ npm run smoke:proxy   # 改 nginx/Caddy 配置时
 - **回滚**：服务端变更纯增量（新路由、新配置默认空目录、无 schema 变更），可直接回退到旧版本服务器；客户端保留本地日历计算，上游地址为空即离线，不依赖新服务端。
 - **旧客户端**：已发布外壳仍读旧 GitHub `packs.json` 与 ankio；本变更不修改旧索引，不影响其现状（旧上游是否能访问不由本变更负责）。
 - **风险**：
-  0. 2027 年 `Intl` 农历在“新月距北京午夜几分钟”的月份可能晚一天（已知 2027 正月）；其余 2025–2027 与香港天文台逐日对拍一致。需要彻底修复时另立农历算法规格。
+  0. 农历表覆盖 1900–2100；表外日期回退到 ICU（历史回放），2027 正月已按发布日历修正为 2027-02-06 初一。2028+ 节假日表仍需每年刷新。
   1. wttr.in 可用性/限流：上游可配置，失败返回 502/504，客户端不崩。
   2. 节假日数据 2028+ 缺失：`holiday: null`，不阻塞；发布流程需每年更新 `calendar-data.ts`。
   3. Lite 首启必须知道服务器地址：UI 明示；完整安装包不受影响。
