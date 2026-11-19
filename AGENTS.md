@@ -63,7 +63,7 @@
 | `npm run smoke:compose` / `npm run smoke:docker` / `npm run smoke:proxy` | Compose 失败关闭、镜像/备份恢复、TLS/WSS 代理 | 部署、镜像、代理、健康检查改动 |
 | `npm run gate:acceptance` | 发布阻断级完整验收，证据写 `.agent-reports/acceptance/` | 发布前或任务明确要求时 |
 
-CI 事实：`.github/workflows/ci.yml` 含 `root`（typecheck、test:docs、check:docs、check:docs:range、compat、四个 Web 构建）、`server`（typecheck + test）、`e2e`、`docker-smoke`、`proxy-wss` 五个作业；`.github/workflows/build.yml` 负责 tag 发布产物。CI 绿灯不能替代本地针对性验证，CI 未覆盖的改动必须在交付说明中写明验证方式。
+CI 事实：`.github/workflows/ci.yml` 含 `root`（typecheck、test:docs、check:docs、check:docs:range、compat、四个 Web 构建）、`server`（typecheck + test）、`e2e`、`docker-smoke`、`proxy-wss` 五个作业；另有 `.github/workflows/docs.yml` 专跑文档门禁（test:docs、check:docs、check:docs:range），避免主工作流故障时文档门禁静默失效。`.github/workflows/build.yml` 负责 tag 发布产物。CI 绿灯不能替代本地针对性验证，CI 未覆盖的改动必须在交付说明中写明验证方式。
 
 ### 5.1 文档门禁的退出码与跳过
 

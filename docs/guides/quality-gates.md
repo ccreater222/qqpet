@@ -138,6 +138,7 @@ node --experimental-strip-types --test scripts/tests/sync-protocol.test.mjs
 
 | CI 作业（`.github/workflows/ci.yml`） | 覆盖 |
 | --- | --- |
+| `docs.yml` | 独立 docs 门禁：`test:docs`、`check:docs`、`check:docs:range`；不依赖主 CI 工作流，避免主工作流故障时文档门禁静默失效 |
 | `root`（`:18-48`） | `typecheck`、`test:docs`、`check:docs`、`check:docs:range`、`test:compat`、`build`、三个平台 Web 构建 |
 | `server`（`:49-64`） | `npm --prefix server run typecheck`、`npm --prefix server test` |
 | `e2e`（`:65-104`） | `xvfb-run -a npm run test:e2e`，随后 `validate-evidence.mjs e2e …` |

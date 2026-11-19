@@ -161,7 +161,8 @@
         "scripts/docs/*.mjs",
         ".githooks/**",
         "docs/doc-map.json",
-        ".github/workflows/ci.yml"
+        ".github/workflows/ci.yml",
+        ".github/workflows/docs.yml"
       ],
       "exclude": [],
       "docs": [
