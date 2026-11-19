@@ -82,6 +82,15 @@ A player may submit ordinary gameplay commands.
 | `/health` | GET | Public aggregate health. With an owner device token (`Authorization: Bearer ...`), returns detailed health scoped to that owner's pet. |
 | `/health/detail` | GET | Explicit owner-authenticated detailed health. Same authentication and response as `/health` with a bearer token. |
 | `/v1/sync` | WebSocket upgrade | Canonical data plane. `/sync` is retained as an alias. |
+| `/v1/client/release` | GET | Public read-only release manifest from `client-data/release.json`. |
+| `/v1/client/weather?city=` | GET | Public read-only weather proxy for wttr.in, cached per city in process. |
+| `/v1/client/calendar?from=YYYY-MM-DD&days=31` | GET | Public read-only lunar/solar-term/holiday calendar computed locally. |
+| `/v1/client/packs.json` | GET | Public read-only content-pack index from `client-data/packs.json`, with `url` rewritten to this server. |
+| `/v1/client/packs/<name>.qqpetpack` | GET | Public read-only streamed content pack with `content-length`, `ETag`, and `If-None-Match` 304. |
+
+The `/v1/client/*` endpoints are GET-only, unauthenticated, and expose no pet
+state. Error bodies are always `{ "ok": false, "error": "<code>" }` and never
+contain upstream response bodies.
 
 Do not expose `/v1/sync` publicly as plain `ws://`. Use Caddy/Nginx or another
 TLS terminator and forward WebSocket upgrade headers. Public health responses
@@ -93,6 +102,41 @@ those diagnostics plus revision, command/event sequence numbers, game time,
 scheduler catch-up state, per-pet connection count, authority
 state/epoch/generation, and operational metrics. They never include save JSON,
 pairing codes, device tokens, or session tokens.
+
+## Client data (`/v1/client/*`)
+
+Desktop and mobile clients use this server as their only runtime data upstream
+(update check, weather, calendar, content packs). No client hardcodes a
+third-party data host. All responses are `application/json; charset=utf-8`.
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `/v1/client/release` | 200 `{ version, url }` from `client-data/release.json`; a leading `v` is stripped from `version`, and `url` must be absolute `http(s)`. | 404 `release_unavailable`, 503 `release_invalid`. |
+| `/v1/client/weather?city=` | 200 `{ code, max, min, tomorrowMax, hours }` normalized from wttr.in `format=j1`, always all 8 three-hour slots (clients trim by their own clock). An empty `city` requests the upstream root path, which wttr.in resolves from this **server's network egress IP**; the endpoint never reads pet settings. Cached per city for `QQPET_SYNC_WEATHER_CACHE_MS` (at most 64 cities, LRU), and concurrent requests for one city share a single upstream call. Upstream bodies above 2 MiB are rejected. | 400 `invalid_city` (>64 chars), 502 `weather_upstream_failed`, 503 `weather_unavailable`, 504 `weather_upstream_timeout`. |
+| `/v1/client/calendar?from=YYYY-MM-DD&days=31` | 200 `CalendarDay[]` computed locally (lunar date, solar term, built-in 2025–2027 statutory holidays). `from` defaults to the server's local date, `days` to 31. | 400 `invalid_range`. |
+| `/v1/client/packs.json` | 200 content-pack index. Each entry's `url` must be a bare relative file name and is rewritten to `/v1/client/packs/<name>`. | 404 `packs_unavailable`, 503 `packs_invalid`. |
+| `/v1/client/packs/<name>.qqpetpack` | 200 streamed file with `content-type: application/octet-stream`, `content-length`, `etag`, and `cache-control: public, max-age=31536000, immutable`; `If-None-Match` returns 304. | 400 `invalid_pack_name`, 404 `pack_not_found`. |
+
+Pack names must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.qqpetpack$` and resolve
+inside `QQPET_SYNC_CLIENT_DATA_DIR`; traversal, absolute paths, and non-pack
+names are rejected. There is no Range/partial-download support.
+
+### Publishing client data
+
+The operator owns the directory; the server only reads it:
+
+```bash
+# 1. Build packs and both indexes (packs.json for GitHub, packs-server.json with relative urls).
+node --experimental-strip-types scripts/pack-content.mjs --version 0.8.2 --full --url-prefix ''
+# 2. Copy packs-server.json into the client-data dir as packs.json, with release.json and *.qqpetpack.
+#    Docker: docker compose cp ./release.json qqpet-sync:/var/lib/qqpet-sync/client-data/
+#            docker compose cp ./packs-server.json qqpet-sync:/var/lib/qqpet-sync/client-data/packs.json
+#    systemd: copy to /var/lib/qqpet-sync/client-data/ as the service user.
+```
+
+`release.json` is `{ "version": "0.8.2", "url": "https://github.com/TinyBrian/qqPet/releases/tag/v0.8.2" }`.
+Content packs are checked by clients against the `size`/`sha256` in
+`packs.json`; the server never validates pack contents, only paths.
 
 ## WebSocket protocol
 
@@ -237,6 +281,10 @@ paths. Unknown environment variables are ignored.
 | `QQPET_OWNER_ADMIN_CREDENTIAL` | unset | Path to a `0600` file containing the token of a non-revoked owner device. Restore verifies the token against the hashed device row in the source/restored database. |
 | `QQPET_SYNC_TIME_ZONE` | host IANA zone | Initial pet timezone. Runtime timezone changes are persisted per pet. |
 | `QQPET_SYNC_WEATHER_LOCATION` | empty | Initial canonical server weather city. Empty means deterministic fallback/automatic behavior. |
+| `QQPET_SYNC_CLIENT_DATA_DIR` | sibling `client-data/` of DB | Absolute directory holding `release.json`, `packs.json`, and `*.qqpetpack`. Created on startup. |
+| `QQPET_SYNC_WEATHER_UPSTREAM` | `https://wttr.in` | Absolute `http(s)` URL of the weather proxy upstream. The server requests `<upstream>/<city>?format=j1`. |
+| `QQPET_SYNC_WEATHER_TIMEOUT_MS` | `10000` | Weather upstream timeout in milliseconds, `1000..60000`. |
+| `QQPET_SYNC_WEATHER_CACHE_MS` | `600000` | In-process per-city weather cache TTL in milliseconds, `0..3600000`. `0` disables caching; the cache itself is bounded to 64 cities. |
 | `QQPET_SYNC_ADVANCE_WHILE_EMPTY` | `1` | Seeds the initial `advanceWhileEmpty` setting. The runtime setting is persisted in SQLite afterwards. |
 | `QQPET_SYNC_CATCHUP_CHUNK_TICKS` | `1440` | Maximum game minutes per bounded catch-up chunk. One game day equals 1440 ticks. |
 | `QQPET_SYNC_COMMAND_RETENTION` | `10000` | Retained command/idempotency rows per pet. |
@@ -331,7 +379,8 @@ Keep the host file mode `0600` and out of version control.
 
 `docker-compose.yml` uses:
 
-- a named `qqpet-data` volume mounted at `/var/lib/qqpet-sync`;
+- a named `qqpet-data` volume mounted at `/var/lib/qqpet-sync` holding the
+  database, backups, and `client-data/`;
 - a read-only container root with a small writable `tmpfs` at `/tmp`;
 - `no-new-privileges`;
 - a server healthcheck and Caddy dependency on health;
@@ -341,8 +390,10 @@ Keep the host file mode `0600` and out of version control.
   being auto-created as a host directory.
 
 Caddy obtains TLS certificates automatically and proxies WebSocket upgrades by
-default. The server is not published on the public interface directly. If you
-use a different hostname or an internal CA, edit `deploy/Caddyfile`.
+default. Its catch-all `reverse_proxy` also forwards `/v1/client/*`; no Caddyfile
+change is required for client data. The server is not published on the public
+interface directly. If you use a different hostname or an internal CA, edit
+`deploy/Caddyfile`.
 
 Initialize a fresh Compose volume before pairing:
 
@@ -391,6 +442,8 @@ upstream.
   `/v1/sync` and its `/sync` alias;
 - exact proxy locations for the documented `/health`, `/health/detail`,
   `/healthz`, and `/readyz` probes;
+- a `location ^~ /v1/client/` prefix proxy for client data and streamed packs,
+  with `proxy_buffering off` and a 300-second read timeout;
 - a long `proxy_read_timeout`/`proxy_send_timeout`;
 - a 20 MiB client body limit;
 - a 301 redirect from HTTP to HTTPS.

@@ -26,6 +26,7 @@ import type { DeviceLocalOverlay, SharedSaveData } from './data-boundary'
 import {
   assertDeviceLocalOverlay,
   assertNoForbiddenJsonKey,
+  backfillDeviceLocalSettingsDefaults,
   assertNoNeverUpload,
   assertSharedSaveData,
   backfillLegacySharedPetInfo,
@@ -609,7 +610,9 @@ function backfillPortableBundleDefaults(bundle: Record<string, unknown>): string
  */
 export function backfillLegacyLocalPetDocumentDefaults(value: unknown): string[] {
   if (isRecord(value) === false || isRecord(value.bundle) === false) return []
-  return backfillPortableBundleDefaults(value.bundle)
+  const filled = backfillPortableBundleDefaults(value.bundle)
+  if (isRecord(value.device)) filled.push(...backfillDeviceLocalSettingsDefaults(value.device))
+  return filled
 }
 
 function legacySaveCandidate(value: unknown): SaveData {
@@ -787,6 +790,12 @@ function migratePortablePetBundleV0(value: Record<string, unknown>): PortablePet
 }
 
 /** Pure migration for legacy local v2 documents carrying a duplicate runtime.localDeviceId. */
+/** In-place upgrade for a remote projection cache written before a device-local setting existed. */
+export function backfillRemoteProjectionCacheDefaults(value: unknown): string[] {
+  if (isRecord(value) === false) return []
+  return backfillDeviceLocalSettingsDefaults(value.device)
+}
+
 export function migrateLegacyLocalPetDocumentV2(value: unknown): LocalPetDocumentV2 {
   try {
     assertJsonSafe(value)

@@ -18,7 +18,7 @@ import { setFaceClick } from './face'
 import { readopt, setHidden } from './menu'
 import { wakeFromHidden } from '../host-pause'
 import { pageZoom, windowDirectionAvailable } from './viewport'
-import { checkUpdate, ipcError, packReady } from './update'
+import { checkUpdate, ipcError, packReady, setUpstreamUrl, upstreamMissing } from './update'
 import { windowView } from './window-view'
 import { onCustodyChange } from '../pet/custody'
 import { btn, check, cheatSection, refreshLive, sweetSection } from './setup-sections'
@@ -247,7 +247,7 @@ function setCity(v: string): void {
   update('settings', { weatherCity: city })
   weatherNow().then(
     (t) => speak({ s: t, now: true }, 'speak'),
-    () => speak({ s: `[host]，查不到「${city || '当前位置'}」的天气，换个写法试试吧~`, now: true }, 'speak'),
+    (e) => speak({ s: upstreamMissing(e) ? '[host]，还没配置上游服务器，暂时查不了天气~' : `[host]，查不到「${city || '当前位置'}」的天气，换个写法试试吧~`, now: true }, 'speak'),
   )
 }
 
@@ -388,7 +388,7 @@ const TABS: Tab[] = [
         { type: 'button', label: '宠物不见了？点我试试', run: homing },
         { type: 'radio', label: '开机自启', title: '仅 Windows、macOS 和 Android 有效', on: () => s.autoStart, run: toggleAutoStart },
         { type: 'radio', label: '开启免打扰模式', on: () => s.quiet, run: () => update('settings', { quiet: !s.quiet }) },
-        { type: 'input', label: '天气城市（留空按网络位置自动定位）', value: () => s.weatherCity, set: setCity },
+        { type: 'input', label: '天气城市（留空按上游服务器网络位置自动定位）', value: () => s.weatherCity, set: setCity },
         { type: 'button', label: '重生~~~（注意数据丢失）', run: readopt },
         { type: 'button', label: '重生为另一个性别~~~（注意数据丢失）', run: rebornAsOther },
         head('显示'),
@@ -534,6 +534,13 @@ const TABS: Tab[] = [
       { type: 'see', label: '软件', value: `QQPet v${APP_VERSION}`, run: tapVersion },
       { type: 'button', label: '检查更新', title: '有新版本时打开 GitHub 下载页', run: () => void checkUpdate(true) },
       { type: 'radio', label: '每天自动检查更新', on: () => s.autoUpdate, run: () => update('settings', { autoUpdate: !s.autoUpdate }) },
+      {
+        type: 'input',
+        label: '上游服务器（qqpet-server 地址）',
+        title: '天气、更新和内容包从这台 qqpet-server 获取；留空则离线（农历仍在本地计算）。支持 https:// 或 wss://，仅保存在本设备，不会同步。',
+        value: () => s.upstreamUrl,
+        set: setUpstreamUrl,
+      },
       { type: 'see', label: '简介', value: description },
       { type: 'see', label: '作者', value: 'Ankio' },
       { type: 'see', label: '邮箱', value: 'ankio@ankio.net' },

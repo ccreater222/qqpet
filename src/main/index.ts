@@ -9,6 +9,7 @@ import { calendar } from '../shared/calendar'
 import { latestRelease } from '../shared/update'
 import { toShape, type ShapeRect } from '../shared/hit-shape'
 import { weather } from '../shared/weather'
+import { httpBaseFromServerUrl, normalizeUpstreamUrl } from '../shared/upstream'
 import { contentMissing } from './content'
 import { openFirstRun, registerPackIpc } from './first-run'
 import { relaunch, spawnSelf } from './relaunch'
@@ -52,7 +53,30 @@ registerScheme()
 
 app.whenReady().then(async () => {
   handleScheme()
-  registerPackIpc()
+  // C11: the storage controller picks the authoritative repository (local or paired server) further down.
+  let storage: DesktopStorageController | null = null
+  // Whether a save view exists yet: the lite first run starts before one and supplies its own server address (#28).
+  let saveReady = false
+  /**
+   * Where the client's own data (release, weather, calendar, content packs) comes from: the paired server in server
+   * storage mode, else the device-local upstream setting. Null means offline — there is no third-party fallback.
+   */
+  const clientUpstreamBase = (): string | null => {
+    if (storage !== null) {
+      const status = storage.status()
+      if (status.activeMode === 'server' && status.serverUrl) return httpBaseFromServerUrl(status.serverUrl)
+    }
+    return saveReady ? normalizeUpstreamUrl(getSave().settings.upstreamUrl) : null
+  }
+  /**
+   * The city to ask the upstream for: in server storage mode the pet's canonical setting (renderer edits go through
+   * storage.setWeatherCity), else the renderer's device-local one.
+   */
+  const weatherCity = (requested: string): string => {
+    const status = storage?.status()
+    return status !== undefined && status.activeMode === 'server' ? status.weatherCity : requested
+  }
+  registerPackIpc(clientUpstreamBase)
   // A lite installer's first run: get the pet's content before there is a pet (#28).
   if (contentMissing()) return void openFirstRun()
   app.dock?.hide()
@@ -64,7 +88,6 @@ app.whenReady().then(async () => {
   const startupAuthority = desktopStartupAuthority(existsSync(v2Document))
   const userDataPath = app.getPath('userData')
   let rendererRuntime: DesktopRendererRuntime | null = null
-  let storage: DesktopStorageController | null = null
   if (startupAuthority === 'runtime') {
     // C7: the window must exist before catch-up can take time. Read the
     // device-local overlay synchronously first so window placement, zoom and
@@ -101,6 +124,8 @@ app.whenReady().then(async () => {
   } else {
     loadSave()
   }
+  // Any path that starts the pet has a save view now (the projection replaces the provisional one later).
+  saveReady = true
   installRendererRuntimeIpc(storage)
   installStorageIpc(storage)
   // C7 readiness: start the C11 authority asynchronously so the window and the
@@ -434,13 +459,14 @@ app.whenReady().then(async () => {
       rebindLocalSessions: parsed.rebindLocalSessions === true,
     })
   })
-  ipcMain.handle(IPC.calendar, () => calendar(net.fetch))
+  // Calendar works offline (computed locally); weather and the release check need a configured upstream.
+  ipcMain.handle(IPC.calendar, () => calendar(net.fetch, clientUpstreamBase()))
 
   ipcMain.handle(IPC.aiModels, (_e, c) => aiModels(net.fetch, c))
   ipcMain.handle(IPC.aiChat, (_e, c, messages) => aiChat(net.fetch, c, messages))
   ipcMain.handle(IPC.webSearch, (_e, query: string) => webSearch(net.fetch, query, 6, getSave().settings.searchBackend, getSave().settings.searchKey))
-  ipcMain.handle(IPC.weather, (_e, city: string) => weather(net.fetch, city))
-  ipcMain.handle(IPC.latestRelease, () => latestRelease(net.fetch))
+  ipcMain.handle(IPC.weather, (_e, city: string) => weather(net.fetch, clientUpstreamBase(), weatherCity(city)))
+  ipcMain.handle(IPC.latestRelease, () => latestRelease(net.fetch, clientUpstreamBase()))
   // A focusable pet window holds a full panel (社区, 密室...) that would cover a normal game window.
   let panel = false
   ipcMain.on(IPC.openGame, (event, swf: string, windowId?: number) => {

@@ -24,7 +24,7 @@
 2. `gameTimeMs += 60000` 并同步 `save.nowTimeLine`。
 3. 暂停/死亡/埋葬分支：把所有 `scheduledJobs.dueAtGameMs`、`startedAtGameMs`、活动会话的 `startedAt/expiresAt`、`nextDailyBoundaryMs` 整体平移一分钟并**不产出任何事件**（`src/shared/pet-runtime/tick.ts:385-401`）。
 4. 从 `state.rng` 建立本 tick 的 RNG。
-5. 解析当日天气：先查 `environment.weatherByDay[dayKey]`，缺失才用 `seedHex + dayKey` 派生（`src/shared/pet-runtime/tick.ts:55-62`）——天气消耗的是确定性派生，不是随机游标。
+5. 解析当日天气：先查 `environment.weatherByDay[dayKey]`，缺失才用 `seedHex + dayKey` 派生（`src/shared/pet-runtime/tick.ts:55-62`）——天气消耗的是确定性派生，不是随机游标。客户端展示用的 `GET /v1/client/weather` 与 `GET /v1/client/calendar`（见 [同步协议](sync-protocol.md) §12）只是展示数据，不写入 `engine.environment`；服务端引擎仍用 `seedHex + dayKey` 的确定性 fallback，本次不改变存档 schema。
 6. 处理跨过的每日边界，单 tick 最多 4 个（`src/shared/pet-runtime/tick.ts:43`、`src/shared/pet-runtime/tick.ts:406-414`）。
 7. 处理到期任务，排序键为 `dueAtGameMs` 再 `id`（`src/shared/pet-runtime/tick.ts:177-180`）。
 8. 被动分钟结算，内部顺序固定：心情/饥饿/清洁三项抽签 → 成长 → 自我照料 → 活动投影 → 旅行早归掷骰 → 定时道具衰减 → 在线时长 → 疾病 → 农场 → 钓鱼 → `pet.statsChanged`（`src/shared/pet-runtime/tick.ts:324-378`）。
@@ -162,7 +162,7 @@ npm run test:compat
 - **新增 `EngineState` 字段**：要同时改 `src/shared/pet-runtime/types.ts`、`assertEngineState`（`src/shared/sync/portable.ts:494`）、`src/shared/sync/portable.ts` 的 `ENGINE_STATE_KEYS`，否则新字段会被序列化校验拒绝。
 - **新增存档字段**：`SaveData`（`src/shared/save.ts:161-178`）、`RULES` 兜底（`src/shared/save-logic.ts:27-129`）、`SHARED_/DEVICE_` 白名单（`src/shared/sync/data-boundary.ts:51-81`）三处必须一起改，否则字段要么被修复表丢掉，要么跨设备泄漏。
 - **改幂等语义**：会动 `src/shared/pet-runtime/idempotency.ts` 的 schema 版本与 `src/shared/sync/protocol.ts` 的错误码，需同步服务端 `server/src/command-service.ts` 的重复判定。
-- **改追赶分片**：`CATCHUP_CHUNK_TICKS`（`src/shared/pet-runtime/scheduler.ts:10`）与服务端 `catchupChunkTicks`（`server/src/config.ts:104`）需一致，否则两端追赶进度不可比。
+- **改追赶分片**：`CATCHUP_CHUNK_TICKS`（`src/shared/pet-runtime/scheduler.ts:10`）与服务端 `catchupChunkTicks`（`server/src/config.ts:132`）需一致，否则两端追赶进度不可比。
 - **修 §7 的桌面锚点缺陷**：属于运行时契约修正，需补一条「1 秒轮询 60 次后 `gameTimeMs` 前进 60 秒」的回归测试。
 
 历史设计取径见冻结文档 [local-or-server pet data design](../reviews/legacy/2026-10-20-local-or-server-pet-data-design.md)（只读）。

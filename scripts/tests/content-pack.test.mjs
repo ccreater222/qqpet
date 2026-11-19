@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { MANIFEST, checkPath, compareVersion, installPack, installedLayers, lookup, packBlocker, parseManifest, readPack, sha256, writeZip } from '../../src/main/content-pack.ts'
+import { fileURLToPath } from 'node:url'
+import { MANIFEST, checkPath, compareVersion, downloadTo, installPack, installedLayers, lookup, packBlocker, packUrl, packsIndexUrl, parseManifest, readPack, sha256, writeZip } from '../../src/main/content-pack.ts'
 
 const dir = () => mkdtempSync(join(tmpdir(), 'qqpet-pack-'))
 
@@ -149,4 +151,73 @@ test('a full pack from a newer release goes on any program that reads packs (#54
   assert.equal(defaultMinShell('0.6.7'), '0.6.8')
   assert.equal(packBlocker({ version: '0.7.0', base: '0.6.9', minShell: defaultMinShell('0.6.9') }, '0.6.9', '0.6.9'), null)
   assert.match(packBlocker({ version: '0.7.0', base: '0.6.9', minShell: defaultMinShell('0.6.9') }, '0.6.8', '0.6.9'), /增量包/)
+})
+
+test('pack-content.mjs writes packs-server.json with bare file names next to the published packs.json (#client-upstream)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'qqpet-pack-index-'))
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=Pack Test', '-c', 'user.email=pack@example.test', '-c', 'commit.gpgsign=false', ...args], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+  try {
+    mkdirSync(join(root, 'resources/pet'), { recursive: true })
+    writeFileSync(join(root, 'resources/pet/a.swf'), 'AAA')
+    git('init', '-q')
+    git('add', '.')
+    git('commit', '-qm', 'fixture')
+    const out = join(root, 'out')
+    execFileSync(process.execPath, [
+      '--experimental-strip-types', fileURLToPath(new URL('../pack-content.mjs', import.meta.url)),
+      '--version', '0.0.0', '--out', out, '--url-prefix', 'https://github.com/o/r/releases/download/v0.0.0/',
+    ], { cwd: root, encoding: 'utf8' })
+    const published = JSON.parse(readFileSync(join(out, 'packs.json'), 'utf8'))
+    const served = JSON.parse(readFileSync(join(out, 'packs-server.json'), 'utf8'))
+    assert.equal(published.packs.length, 1)
+    // The GitHub index keeps the absolute url; the server one differs only in `url`.
+    assert.equal(published.packs[0].url, 'https://github.com/o/r/releases/download/v0.0.0/QQPet-content-0.0.0.qqpetpack')
+    assert.deepEqual(served, { schema: 1, packs: published.packs.map((p) => ({ ...p, url: p.name })) })
+    assert.equal(served.packs[0].url, 'QQPet-content-0.0.0.qqpetpack')
+    // A bare name is exactly what the server serves from its client-data directory.
+    assert.ok(existsSync(join(out, served.packs[0].url)))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the release workflow builds both indexes into the directory it uploads', () => {
+  const ci = readFileSync(new URL('../../.github/workflows/build.yml', import.meta.url), 'utf8')
+  // --out artifacts + `files: artifacts/*` publishes packs.json and packs-server.json as release assets.
+  assert.match(ci, /scripts\/pack-content\.mjs[\s\S]*?--out artifacts/)
+  assert.match(ci, /files: artifacts\/\*/)
+})
+
+test('packs.json and pack files come from the qqpet-server that serves them', () => {
+  const base = 'https://pet.example.com'
+  assert.equal(packsIndexUrl(base), `${base}/v1/client/packs.json`)
+  assert.equal(packsIndexUrl(`${base}/`), `${base}/v1/client/packs.json`)
+  // The server rewrites entries to its own paths; both forms resolve against the base that served the index.
+  assert.equal(packUrl('/v1/client/packs/QQPet-content-0.7.0.qqpetpack', base), `${base}/v1/client/packs/QQPet-content-0.7.0.qqpetpack`)
+  assert.equal(packUrl('QQPet-content-0.7.0.qqpetpack', base), `${base}/QQPet-content-0.7.0.qqpetpack`)
+  // Without a base an absolute url is used as published (a legacy direct host)...
+  const absolute = 'https://cdn.example.com/QQPet-content-0.7.0.qqpetpack'
+  assert.equal(packUrl(absolute), absolute)
+  // ...but with a base it must stay on that server: absolute, protocol-relative and foreign paths are refused,
+  // so a tampered packs.json can never redirect the download to another host.
+  for (const foreign of [absolute, '//evil.example.com/QQPet-content-0.7.0.qqpetpack', 'https:\\evil.example.com\\x.qqpetpack', '/etc/passwd', '/../x.qqpetpack', 'sub/x.qqpetpack', '..\\x.qqpetpack'])
+    assert.throws(() => packUrl(foreign, base), /不可用/, foreign)
+})
+
+test('a pack url only needs a base when it is relative, and never guesses a host', async () => {
+  const file = join(dir(), 'x.qqpetpack')
+  const entry = { url: 'QQPet-content-0.7.0.qqpetpack', size: 1, sha256: '0'.repeat(64) }
+  const asked = []
+  const fetch = async (url) => {
+    asked.push(url)
+    return new Response('nope', { status: 404 })
+  }
+  await assert.rejects(downloadTo(fetch, entry, file), /上游服务器/)
+  assert.deepEqual(asked, [])
+  assert.equal(existsSync(file), false)
+  // An absolute url is used as published, with or without a base.
+  await assert.rejects(downloadTo(fetch, { ...entry, url: 'https://cdn.example.com/x.qqpetpack' }, file), /HTTP 404/)
+  assert.deepEqual(asked, ['https://cdn.example.com/x.qqpetpack'])
+  assert.throws(() => packsIndexUrl(''), /http/)
+  assert.throws(() => packUrl('x.qqpetpack', 'pet.example.com'), /http/)
 })

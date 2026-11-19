@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import { dirname, join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
 import { WebSocketServer } from 'ws'
+import { ClientDataService, etagMatches, type ClientDataResult, type ClientPackFile } from './client-data'
 import { createServerConfig, type ServerConfig } from './config'
 import { AuthService } from './auth'
 import { CommandService } from './command-service'
@@ -90,6 +91,8 @@ type DetailedHealthAuthorization =
 
 export interface SyncServerOptions {
   now?: () => number
+  /** Weather proxy network implementation; tests inject a deterministic fetch. */
+  fetch?: typeof globalThis.fetch
 }
 
 export class SyncServer {
@@ -99,6 +102,7 @@ export class SyncServer {
   private readonly sessions: SessionService
   readonly metrics: MetricsRegistry
   readonly scheduler: SchedulerService
+  readonly clientData: ClientDataService
   private readonly now: () => number
   private started = false
   private databaseLock: DatabaseLifetimeLock | undefined
@@ -132,6 +136,10 @@ export class SyncServer {
     this.scheduler = new SchedulerService(config, store, commands, this.sessions.hub, this.logger, this.metrics, now)
     commands.setCatchingUpGate(petId => this.scheduler.isCommandBlocked(petId))
     this.sessions.setCatchingUpSource(petId => this.scheduler.isCatchUpBlocked(petId))
+    this.clientData = new ClientDataService(config, {
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+      now,
+    })
     this.http = createServer((request, response) => {
       void this.handleHttp(request, response)
     })
@@ -181,6 +189,7 @@ export class SyncServer {
     if (this.started) return
     await mkdir(dirname(this.config.dbPath), { recursive: true })
     await mkdir(this.config.backupDir, { recursive: true })
+    await mkdir(this.config.clientDataDir, { recursive: true })
     this.databaseLock = acquireDatabaseLifetimeLock(this.config.dbPath)
     try {
       this.store.verifyRestoreGeneration(this.config.restoreGenerationFile)
@@ -412,6 +421,19 @@ export class SyncServer {
   }
 
   private async handleHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    try {
+      await this.routeHttp(request, response)
+    } catch (error) {
+      this.logger.error('http.request_failed', { error })
+      if (response.headersSent) {
+        response.destroy()
+        return
+      }
+      this.json(response, 500, { ok: false, error: 'internal_error' })
+    }
+  }
+
+  private async routeHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (request.method !== 'GET') {
       response.writeHead(405, { allow: 'GET' })
       response.end()
@@ -446,7 +468,104 @@ export class SyncServer {
       this.json(response, 200, this.publicHealth(this.health()))
       return
     }
+    if (url.pathname.startsWith('/v1/client/')) {
+      await this.handleClientHttp(request, response, url)
+      return
+    }
     this.json(response, 404, { ok: false, error: 'not_found' })
+  }
+
+  /**
+   * Public read-only client data endpoints. They expose no pet state and never
+   * proxy upstream error bodies; an empty weather `city` asks the upstream root,
+   * which locates by this server's egress IP.
+   */
+  private async handleClientHttp(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    if (url.pathname === '/v1/client/release') {
+      this.sendClientResult(response, await this.clientData.release())
+      return
+    }
+    if (url.pathname === '/v1/client/weather') {
+      this.sendClientResult(
+        response,
+        await this.clientData.weather(url.searchParams.get('city') ?? undefined),
+      )
+      return
+    }
+    if (url.pathname === '/v1/client/calendar') {
+      this.sendClientResult(
+        response,
+        this.clientData.calendar(
+          url.searchParams.get('from') ?? undefined,
+          url.searchParams.get('days') ?? undefined,
+        ),
+      )
+      return
+    }
+    if (url.pathname === '/v1/client/packs.json') {
+      this.sendClientResult(response, await this.clientData.packsIndex())
+      return
+    }
+    const packPrefix = '/v1/client/packs/'
+    if (url.pathname.startsWith(packPrefix)) {
+      const raw = url.pathname.slice(packPrefix.length)
+      if (raw === '' || raw.includes('/')) {
+        this.clientError(response, 400, 'invalid_pack_name')
+        return
+      }
+      let name: string
+      try {
+        name = decodeURIComponent(raw)
+      } catch {
+        this.clientError(response, 400, 'invalid_pack_name')
+        return
+      }
+      const result = await this.clientData.packFile(name)
+      if (result.ok === false) {
+        this.clientError(response, result.status, result.error)
+        return
+      }
+      const header = request.headers['if-none-match']
+      if (etagMatches(Array.isArray(header) ? header.join(',') : header, result.value.etag)) {
+        response.writeHead(304, {
+          etag: result.value.etag,
+          'cache-control': this.clientData.packCacheControl,
+        })
+        response.end()
+        return
+      }
+      this.streamPack(response, result.value)
+      return
+    }
+    this.json(response, 404, { ok: false, error: 'not_found' })
+  }
+
+  private sendClientResult<T>(response: ServerResponse, result: ClientDataResult<T>): void {
+    if (result.ok === false) {
+      this.clientError(response, result.status, result.error)
+      return
+    }
+    this.json(response, 200, result.value)
+  }
+
+  private clientError(response: ServerResponse, status: number, error: string): void {
+    this.json(response, status, { ok: false, error })
+  }
+
+  private streamPack(response: ServerResponse, pack: ClientPackFile): void {
+    const stream = this.clientData.createPackStream(pack)
+    response.writeHead(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': pack.size,
+      etag: pack.etag,
+      'cache-control': this.clientData.packCacheControl,
+    })
+    stream.on('error', error => {
+      this.logger.error('client.pack_stream_failed', { error })
+      response.destroy()
+    })
+    response.on('close', () => stream.destroy())
+    stream.pipe(response)
   }
 
   private publicHealth(health: ServerHealth): PublicHealth {

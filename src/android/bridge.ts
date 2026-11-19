@@ -6,6 +6,7 @@ import { aiChat, aiModels } from '../shared/ai'
 import { webSearch } from '../shared/websearch'
 import { calendar } from '../shared/calendar'
 import { abortReason, cloneJson } from '../shared/compat'
+import { normalizeUpstreamUrl } from '../shared/upstream'
 import { nextBounds } from '../mobile/bounds'
 import { cover } from '../mobile/overlay'
 import type { Fetch, Point, QQPetApi, TrayClick, TrayState } from '../shared/ipc'
@@ -181,6 +182,10 @@ let save: SaveData = startSave(legacyAuthorityProbe.canUseLegacy ? readSave() : 
 // Set while reloading into another save: the renderer's pending write must not land on it.
 let leaving = false
 const legacyAuthorityDisabled = (): boolean => legacyAuthorityProbe.legacyDisabled
+
+/** The device-local qqpet-server address; each shared data module reports upstream_not_configured without one. */
+const upstreamBase = (): string | null => normalizeUpstreamUrl(save.settings.upstreamUrl)
+
 const write = (): void => {
   if (legacyAuthorityDisabled()) return
   native.write(FILE, JSON.stringify(save))
@@ -390,12 +395,12 @@ const api: QQPetApi = {
     relaunch()
   },
   openGame: (swf, windowId) => forwardOpenGame(native, swf, windowId),
-  calendar: () => calendar(nativeFetch),
+  calendar: () => calendar(nativeFetch, upstreamBase()),
   aiModels: (c) => aiModels(nativeFetch, c),
   aiChat: (c, messages) => aiChat(nativeFetch, c, messages),
   webSearch: (query) => webSearch(nativeFetch, query),
-  weather: (city) => weather(nativeFetch, city),
-  latestRelease: () => latestRelease(nativeFetch),
+  weather: (city) => weather(nativeFetch, upstreamBase(), city),
+  latestRelease: () => latestRelease(nativeFetch, upstreamBase()),
   quit() {
     if (localRuntime === null) { native.quit(); return }
     const runtime = localRuntime

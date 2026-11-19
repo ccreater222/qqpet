@@ -565,7 +565,8 @@ const expectedMutationSiteCounts = {
     'src/renderer/ui/smallgame.ts|setInfo|mood': 1,
     'src/renderer/ui/state.ts|setInfo|sweetHeart': 1,
     'src/renderer/ui/travel.ts|update|gameSaveDatas': 1,
-    'src/renderer/ui/update.ts|update|settings': 1,
+    // Device-local upstream setting: the update-check timestamp plus the qqpet-server address (set + first-run adopt).
+    'src/renderer/ui/update.ts|update|settings': 3,
     'src/renderer/ui/visit.ts|setInfo|mood': 1,
     'src/shared/pet-runtime/farm-runtime.ts|earnYb|': 1,
     'src/shared/pet-runtime/fishing-runtime.ts|earnYb|': 2,
@@ -638,7 +639,7 @@ test('full renderer mutation gate classifies every canonical mutation/site to ru
     'src/renderer/swf/sol.ts': 'local SharedObject scratch storage only',
     'src/renderer/ui/community.ts': 'local community point/presentation blob and saveSpot',
     'src/renderer/ui/menu.ts': 'local tray/menu settings only',
-    'src/renderer/ui/update.ts': 'local update-check timestamp only',
+    'src/renderer/ui/update.ts': 'local update-check timestamp and device-local upstream address only',
     'src/renderer/ui/float.ts': 'visual float/presentation only',
     'src/renderer/ui/talk.ts': 'voice/presentation only',
     'src/renderer/swf/player.ts': 'SWF player presentation wrapper only',

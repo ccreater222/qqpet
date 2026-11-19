@@ -7,11 +7,15 @@ export interface ServerConfig {
   port: number
   dbPath: string
   backupDir: string
+  clientDataDir: string
   adminSocket: string
   restoreGenerationFile?: string
   ownerAdminCredential?: string
   timeZone: string
   weatherLocation: string
+  weatherUpstream: string
+  weatherTimeoutMs: number
+  weatherCacheMs: number
   advanceWhileEmpty: boolean
   catchupChunkTicks: number
   commandRetention: number
@@ -63,6 +67,19 @@ function absolutePath(value: string, name: string): string {
   return resolve(value)
 }
 
+function httpUrl(value: string, name: string): string {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error(name + ' must be an absolute http(s) URL')
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(name + ' must be an absolute http(s) URL')
+  }
+  return url.origin + url.pathname.replace(/\/+$/, '')
+}
+
 function defaultDataDirectory(): string {
   return join(homedir(), '.local', 'share', 'qqpet-sync')
 }
@@ -78,6 +95,10 @@ export function createServerConfig(input: ServerConfigInput = {}, env: NodeJS.Pr
     input.adminSocket ?? env.QQPET_ADMIN_SOCKET ?? join(dirname(dbPath), 'admin-' + hostname() + '.sock'),
     'QQPET_ADMIN_SOCKET',
   )
+  const clientDataDir = absolutePath(
+    input.clientDataDir ?? env.QQPET_SYNC_CLIENT_DATA_DIR ?? join(dirname(dbPath), 'client-data'),
+    'QQPET_SYNC_CLIENT_DATA_DIR',
+  )
   const timeZone = input.timeZone ?? env.QQPET_SYNC_TIME_ZONE ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC'
   assertTimeZone(timeZone)
   const restoreGenerationFile = input.restoreGenerationFile ?? env.QQPET_SYNC_RESTORE_GENERATION_FILE
@@ -87,6 +108,7 @@ export function createServerConfig(input: ServerConfigInput = {}, env: NodeJS.Pr
     port: integer(input.port ?? env.QQPET_SYNC_PORT, 8787, 'QQPET_SYNC_PORT', 0, 65_535),
     dbPath,
     backupDir,
+    clientDataDir,
     adminSocket,
     ...(restoreGenerationFile === undefined || restoreGenerationFile === ''
       ? {}
@@ -96,6 +118,12 @@ export function createServerConfig(input: ServerConfigInput = {}, env: NodeJS.Pr
       : { ownerAdminCredential: absolutePath(ownerAdminCredential, 'QQPET_OWNER_ADMIN_CREDENTIAL') }),
     timeZone,
     weatherLocation: input.weatherLocation ?? env.QQPET_SYNC_WEATHER_LOCATION ?? '',
+    weatherUpstream: httpUrl(
+      input.weatherUpstream ?? env.QQPET_SYNC_WEATHER_UPSTREAM ?? 'https://wttr.in',
+      'QQPET_SYNC_WEATHER_UPSTREAM',
+    ),
+    weatherTimeoutMs: integer(input.weatherTimeoutMs ?? env.QQPET_SYNC_WEATHER_TIMEOUT_MS, 10_000, 'weatherTimeoutMs', 1000, 60_000),
+    weatherCacheMs: integer(input.weatherCacheMs ?? env.QQPET_SYNC_WEATHER_CACHE_MS, 600_000, 'weatherCacheMs', 0, 3_600_000),
     advanceWhileEmpty: boolean(
       input.advanceWhileEmpty ?? env.QQPET_SYNC_ADVANCE_WHILE_EMPTY,
       true,

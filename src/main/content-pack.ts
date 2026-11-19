@@ -43,6 +43,8 @@ export interface PackIndex {
 }
 
 export const MANIFEST = 'manifest.json'
+/** Where a qqpet-server serves pack files; the only absolute path a packs.json entry may name. */
+const PACKS_PATH = '/v1/client/packs/'
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
 const ID = /^[a-z0-9][a-z0-9-]{0,31}$/
 const SHA = /^[0-9a-f]{64}$/
@@ -348,14 +350,37 @@ export const NO_CONTENT = '0'
 export const bundledContent = (resourcesRoot: string, shell: string): string | null => (existsSync(join(resourcesRoot, 'pet')) ? shell : null)
 
 /**
- * `url` through a download mirror. A mirror is a URL prefix in front of the GitHub URL (ghproxy style, e.g.
- * https://ghfast.top/). Empty means GitHub itself. The pack is still checked against the sha256 in packs.json.
+ * Where a pack file lives. Without a `base`, an absolute http(s) url is used as published and a relative one is an
+ * incomplete configuration. With a `base` (the qqpet-server that served packs.json) the entry must be one of the
+ * server's own pack files — a bare file name or a `/v1/client/packs/…` path — so a tampered index can never send the
+ * client to another host.
  */
-export function mirrored(url: string, mirror = ''): string {
-  const m = mirror.trim()
-  if (!m) return url
-  if (!/^https?:\/\/[^\s]+$/i.test(m)) throw new Error('镜像地址需要以 http:// 或 https:// 开头')
-  return m.replace(/\/*$/, '/') + url
+export function packUrl(url: string, base = ''): string {
+  const b = base.trim()
+  if (!b) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return url
+    throw new Error('内容包地址是相对路径，需要先配置上游服务器')
+  }
+  if (!/^https?:\/\/[^\s]+$/i.test(b)) throw new Error('上游服务器地址需要以 http:// 或 https:// 开头')
+  const entry = url.trim()
+  const shaped =
+    /^[a-z][a-z0-9+.-]*:/i.test(entry) || entry.startsWith('//') || entry.includes('\\') || entry.includes('..')
+      ? null
+      : entry.startsWith('/')
+        ? (entry.startsWith(PACKS_PATH) ? entry : null)
+        : (/^[^/]+$/.test(entry) ? entry : null)
+  if (shaped === null) throw new Error(`内容包地址不可用：${entry.slice(0, 120)}`)
+  const resolved = new URL(shaped, b.replace(/\/*$/, '/'))
+  // Belt and braces: the entry stays on the server that served the index.
+  if (resolved.origin !== new URL(b).origin) throw new Error(`内容包地址不在上游服务器上：${entry.slice(0, 120)}`)
+  return resolved.toString()
+}
+
+/** The pack index a qqpet-server upstream `base` publishes. */
+export function packsIndexUrl(base: string): string {
+  const b = base.trim().replace(/\/*$/, '')
+  if (!/^https?:\/\/[^\s]+$/i.test(b)) throw new Error('上游服务器地址需要以 http:// 或 https:// 开头')
+  return `${b}/v1/client/packs.json`
 }
 
 /** The newest full pack of an index that goes on `content` with this shell, or why none does. */
@@ -366,7 +391,7 @@ export function pickFullPack(index: PackIndex, content: string, shell: string): 
 }
 
 /** A network failure (DNS, refused, TLS, timeout...) as something a user can act on. */
-const unreachable = (e: unknown): Error => new Error(`连不上下载地址，请检查网络或换个镜像（${(e as Error)?.message ?? e}）`)
+const unreachable = (e: unknown): Error => new Error(`连不上下载地址，请检查网络和上游服务器地址（${(e as Error)?.message ?? e}）`)
 
 export async function fetchIndex(fetch: Fetch, url: string): Promise<PackIndex> {
   const r = await fetch(url, { signal: AbortSignal.timeout(20_000) }).catch((e) => {
@@ -387,10 +412,12 @@ export interface Progress {
 const STALL_MS = 30_000
 
 /**
- * Streams `entry` (through `mirror`) into `file`, hashing on the way, so a 360 MB pack never sits in memory.
- * Resolves once size and sha256 match packs.json; removes the file and rejects otherwise.
+ * Streams `entry` (its url resolved against `base`, the upstream that served packs.json) into `file`, hashing on the
+ * way, so a 360 MB pack never sits in memory. Resolves once size and sha256 match packs.json; removes the file and
+ * rejects otherwise.
  */
-export async function downloadTo(fetch: Fetch, entry: Pick<PackIndexEntry, 'url' | 'size' | 'sha256'>, file: string, opts: { mirror?: string; onProgress?: (p: Progress) => void; stallMs?: number } = {}): Promise<void> {
+export async function downloadTo(fetch: Fetch, entry: Pick<PackIndexEntry, 'url' | 'size' | 'sha256'>, file: string, opts: { base?: string; onProgress?: (p: Progress) => void; stallMs?: number } = {}): Promise<void> {
+  const url = packUrl(entry.url, opts.base)
   const abort = new AbortController()
   let stall: ReturnType<typeof setTimeout> | undefined
   const arm = (): void => {
@@ -402,7 +429,7 @@ export async function downloadTo(fetch: Fetch, entry: Pick<PackIndexEntry, 'url'
   let received = 0
   try {
     arm()
-    const r = await fetch(mirrored(entry.url, opts.mirror), { signal: abort.signal }).catch((e) => {
+    const r = await fetch(url, { signal: abort.signal }).catch((e) => {
       throw abort.signal.aborted ? e : unreachable(e)
     })
     if (!r.ok || !r.body) throw new Error(`下载失败：HTTP ${r.status}`)

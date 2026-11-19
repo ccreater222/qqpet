@@ -20,6 +20,7 @@
 |---|---|
 | [规格索引](specs/README.md) | 已批准方案列表与状态说明 |
 | [文档同步规范](specs/docs-sync-standards.md) | 本次文档体系初始化的批准稿：目录、检查器契约、hook、迁移与验收标准 |
+| [客户端数据上游迁移](specs/client-upstream-via-qqpet-server.md) | 客户端数据上游迁到 qqpet-server：`/v1/client/*` HTTP API、客户端上游地址与内容包托管 |
 
 ## 架构
 

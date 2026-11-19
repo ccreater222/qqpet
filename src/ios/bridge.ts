@@ -2,6 +2,7 @@ import { aiChat, aiModels } from '../shared/ai'
 import { webSearch } from '../shared/websearch'
 import { calendar } from '../shared/calendar'
 import { cloneJson } from '../shared/compat'
+import { normalizeUpstreamUrl } from '../shared/upstream'
 import type { Fetch, Point, QQPetApi, TrayClick, TrayState } from '../shared/ipc'
 import { legacyRendererStatus } from '../shared/renderer-api'
 import type { SaveData } from '../shared/save'
@@ -115,6 +116,9 @@ function listen<K extends keyof Events>(type: K, listener: (payload: Events[K]) 
   }, 0)
 }
 let model: SaveData | null = null
+/** The device-local qqpet-server address; each shared data module reports upstream_not_configured without one. */
+const upstreamBase = (): string | null => normalizeUpstreamUrl(model?.settings.upstreamUrl)
+
 let writer: IOSSaveWriter | null = null
 let leaving = false
 let operations: Promise<unknown> = Promise.resolve()
@@ -476,12 +480,12 @@ const api: QQPetApi = {
   }),
   openGame(swf, windowId) { void exclusive(async () => { await flushRenderer(); const { persistence } = requireOwner(); await rpc.request('openGame', openGameRequest(swf, windowId, persistence.generation)) }).catch((error) => reportError('openGame', error)) },
   closeGame: () => command('closeGame'),
-  calendar: () => calendar(nativeFetch),
+  calendar: () => calendar(nativeFetch, upstreamBase()),
   aiModels: (config) => aiModels(nativeFetch, config),
   aiChat: (config, messages) => aiChat(nativeFetch, config, messages),
   webSearch: (query) => webSearch(nativeFetch, query),
-  weather: (city) => weather(nativeFetch, city),
-  latestRelease: () => latestRelease(nativeFetch),
+  weather: (city) => weather(nativeFetch, upstreamBase(), city),
+  latestRelease: () => latestRelease(nativeFetch, upstreamBase()),
   quit() {
     if (gamePage) { command('closeGame'); return }
     if (localRuntime !== null) {

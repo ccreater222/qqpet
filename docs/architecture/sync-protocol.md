@@ -1,13 +1,13 @@
 # 同步协议（服务端权威）
 
-> 结论：桌面版与 `qqpet-server` 之间只有一条 JSON over WebSocket 的语义通道，协议版本固定为 `1`（`src/shared/sync/protocol.ts:12`）。服务端是唯一权威：客户端上行只允许 `hello`、`command`、`commandStatus`、`exportBundle`、`resync`、`ping` 六种帧（`src/shared/sync/protocol.ts:441`），业务状态只能由服务端下行；鉴权、协议版本、权威代次（epoch）、恢复世代（restoreGeneration）、连续事件游标任何一个不匹配都直接关闭连接或整体重发快照，不做部分修补。
+> 结论：桌面版与 `qqpet-server` 之间只有一条 JSON over WebSocket 的语义通道，协议版本固定为 `1`（`src/shared/sync/protocol.ts:12`）。服务端是唯一权威：客户端上行只允许 `hello`、`command`、`commandStatus`、`exportBundle`、`resync`、`ping` 六种帧（`src/shared/sync/protocol.ts:441`），业务状态只能由服务端下行；鉴权、协议版本、权威代次（epoch）、恢复世代（restoreGeneration）、连续事件游标任何一个不匹配都直接关闭连接或整体重发快照，不做部分修补。客户端展示数据（更新检查、天气、农历/节假日、内容包索引与文件）不占用这条通道，走服务端公开只读的 `GET /v1/client/*` HTTP 端点（见第 12 节）。
 
 ## 1. 传输与端点
 
-- 端点只接受 `/sync` 与 `/v1/sync`，其它路径在 HTTP Upgrade 阶段回 404 并断开（`server/src/index.ts:147-152`）。
-- 预鉴权连接数超过 `maxPreAuthConnections`（默认 64）时回 429，不进 WebSocket（`server/src/index.ts:153-157`、`server/src/config.ts:113-118`）。
-- `ws` 层 `maxPayload = maxFrameBytes + 1`，禁用 `perMessageDeflate`（`server/src/index.ts:141-146`）。多出的 1 字节是为了让应用层先看到超限帧并给出协议级关闭码，而不是被解析器直接掐断。
-- `ws` 的 `1009` 关闭码被重写成协议默认的 `4005 payload_too_large`（`server/src/index.ts:162-177`）。
+- 端点只接受 `/sync` 与 `/v1/sync`，其它路径在 HTTP Upgrade 阶段回 404 并断开（`server/src/index.ts:155-160`）。
+- 预鉴权连接数超过 `maxPreAuthConnections`（默认 64）时回 429，不进 WebSocket（`server/src/index.ts:161-165`、`server/src/config.ts:141-146`）。
+- `ws` 层 `maxPayload = maxFrameBytes + 1`，禁用 `perMessageDeflate`（`server/src/index.ts:146-154`）。多出的 1 字节是为了让应用层先看到超限帧并给出协议级关闭码，而不是被解析器直接掐断。
+- `ws` 的 `1009` 关闭码被重写成协议默认的 `4005 payload_too_large`（`server/src/index.ts:170-185`）。
 - 桌面客户端用运行时全局 `WebSocket`（Electron 主进程的 Node 22），**不 import `ws`**，移动端因此可以整块摇掉远程路径（`src/main/remote-websocket-transport.ts:26-33`）；连接前先用 `assertRemoteServerUrl` 校验 URL（`src/main/remote-websocket-transport.ts:35-37`）。
 - TLS/WSS 由反向代理终止，代理链路契约由 `npm run smoke:proxy` 覆盖（见 `docs/reviews/c12-final-gate/2026-11-18-c12-final-gate.md`）。
 
@@ -96,7 +96,7 @@
 
 ## 8. 失败关闭
 
-- 服务端启动前先校验恢复世代文件、把所有宠物的权威状态解码一遍，任一损坏就不监听端口（`server/src/index.ts:184-192`）。
+- 服务端启动前先校验恢复世代文件、把所有宠物的权威状态解码一遍，任一损坏就不监听端口（`server/src/index.ts:193-209`）。
 - 投影出口做终检：`assertPublicSave` 拒绝设备本地字段与任何 never-upload 字段，`assertPublicEvent` 拒绝事件里的同类内容；失败时记 `projection.boundary_rejected` 并**丢弃该次广播**（`server/src/hub.ts:82-88`、`server/src/validation.ts:9-19`）。
 - 下行帧超过 `maxFrameBytes` 时直接以 `4005` 关闭连接，不发截断内容（`server/src/session.ts:787-795`）。
 - 客户端把认证/协议错误视为终态：`auth_failed`/`protocol_mismatch` 立即 `terminalFailure` 并断开，不重试（`src/main/remote-repository.ts:1730-1734`）；关闭码 `4000`/`4001` 同样终态（`server/src/session.ts:31-32`、`src/main/remote-repository.ts:1897-1907`）。
@@ -163,13 +163,43 @@ npm run test:e2e
 
 通过标准：每个测试文件 `fail 0`；`npm --prefix server test` 汇总行 `fail 0`；`npm run test:e2e` 退出码 `0` 且报告断言真实服务端、真实 WebSocket、渲染层覆盖为真。历史验收记录（含 TLS/WSS 代理与 Docker 备份恢复）见 [C12 final gate](../reviews/c12-final-gate/2026-11-18-c12-final-gate.md)。
 
-## 12. 变更影响
+## 12. 客户端数据 HTTP 端点（与 WS 协议并列）
+
+客户端展示数据不经过上面的 WebSocket 语义通道，而是走 `server/src/index.ts` 的 `/v1/client/*` HTTP 端点。它们与 `/v1/sync` 并列，但性质不同：**公开、只读、无认证**，不占用预鉴权或宠物连接配额，也不参与权威代次、恢复世代与事件游标。路由在健康检查之前分派（`server/src/index.ts:471-474`、`server/src/index.ts:483-541`）。
+
+通用约定：
+
+- 只接受 `GET`，其它方法返回 405 且带 `allow: GET`（`server/src/index.ts:437-441`）。
+- 成功响应 `content-type: application/json; charset=utf-8`、`cache-control: no-store`；出错统一 `{ "ok": false, "error": "<code>" }`，绝不回传上游原始错误体（`server/src/index.ts:551-553`、`server/src/index.ts:601-609`）。
+- `client-data` 目录在启动时 `mkdir`（`server/src/index.ts:192`），布局见部署指南。
+
+| 端点 | 成功 | 失败码 |
+| --- | --- | --- |
+| `GET /v1/client/release` | 200 `{version, url}`（version 去掉前导 `v`，url 必须是绝对 `http(s)`） | 404 `release_unavailable`；503 `release_invalid` |
+| `GET /v1/client/weather?city=` | 200 `Weather`，`hours` 为当天完整 8 个 3 小时时段 | 400 `invalid_city`（city > 64 字符）；502 `weather_upstream_failed`；504 `weather_upstream_timeout`；503 `weather_unavailable`（city 为空且无法定位） |
+| `GET /v1/client/calendar?from=YYYY-MM-DD&days=31` | 200 `CalendarDay[]`（`{date, lunar, term, holiday}`） | 400 `invalid_range`（日期/天数非法） |
+| `GET /v1/client/packs.json` | 200 `PackIndex`，每个 `url` 改写为 `/v1/client/packs/<name>` | 404 `packs_unavailable`；503 `packs_invalid` |
+| `GET /v1/client/packs/<name>.qqpetpack` | 200 文件流（`application/octet-stream`、`content-length`、`etag`、`cache-control: immutable`） | 400 `invalid_pack_name`；404 `pack_not_found` |
+
+关键契约：
+
+- **release**：原样读取 `client-data/release.json` 的 `{version, url}`，`version` 去掉 `v` 前缀，`url` 必须是绝对 `http(s)`（`server/src/client-data.ts:141-165`）。
+- **weather 是展示代理**：`city` 可选，最长 64；为空时请求上游根路径，由 wttr.in 按**服务端出口 IP** 定位，不读取宠物设置。服务端请求 `${QQPET_SYNC_WEATHER_UPSTREAM}/<city>?format=j1`，超时 `weatherTimeoutMs`，按 `city` 进程内缓存 `weatherCacheMs`（命中不请求上游、不持久化）（`server/src/client-data.ts:167-192`、`server/src/client-data.ts:337-376`）。
+- **天气完整 8 段由客户端过滤**：服务端返回 wttr.in 当天全部 8 个 3 小时时段，不做本地小时裁剪；客户端 `filterWeatherHours` 按自己的本地当前小时过滤（`src/shared/weather.ts:62-70`、`src/shared/weather.ts:78-84`）。
+- **calendar 纯计算**：`from` 缺省为服务端当前本地日期，`days` 1..31 默认 31；无网络、无缓存，调用共享 `computeCalendarDays`（`server/src/client-data.ts:194-212`）。
+- **packs 相对 URL**：`packs.json` 的每个 `url` 必须是裸文件名（拒绝 `/`、`\`、`..`、协议前缀），服务端改写为 `/v1/client/packs/<encodeURIComponent(name)>`，保证客户端只从本服务器下载；出现绝对 URL 视为非法并回 503 `packs_invalid`（`server/src/client-data.ts:300-335`、`server/src/index.ts:505-508`）。
+- **packs 文件**：文件名必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.qqpetpack$`，解析后必须留在 `client-data` 目录内；支持 `If-None-Match` 命中回 304（`server/src/index.ts:509-539`、`server/src/index.ts:555-569`、`server/src/client-data.ts:239-264`）。
+
+这些端点只输出公告文件、上游代理或纯计算得到的展示数据，不含任何宠物状态；服务端引擎的天气仍是 `seedHex + dayKey` 确定性兜底，与这些端点无关（见 [宠物运行时与存档](pet-runtime-and-save.md) §2）。
+
+## 13. 变更影响
 
 - **改协议版本**：必须同时改 `src/shared/sync/protocol.ts:12`、`parseClientMessage`/`parseServerMessage` 的版本判定、`server/src/session.ts:392-395` 的 `4001` 分支，以及客户端终态处理（`src/main/remote-repository.ts:1897-1907`）。旧客户端不会被兼容，属于破坏性变更。
 - **新增消息类型**：要同时进 `CLIENT_MESSAGE_TYPES`/`SERVER_MESSAGE_TYPES`（`src/shared/sync/protocol.ts:441-445`）、校验器、`src/main/remote-repository.ts:806-850` 的分发 switch，漏掉会命中 `unknown_message_type`。
 - **新增命令**：`CommandPayloadMap`、`ResultDataMap`、`COMMAND_ROLES` 三张表缺一不可（`src/shared/sync/protocol.ts:20-101`、`src/shared/sync/command-validation.ts:236-242`），并要同步服务端 `server/src/command-service.ts` 的分支与本地运行时 handler（`src/shared/pet-runtime/runtime.ts:189-262`）。
 - **改权威语义**：`epoch`/`restoreGeneration` 任何变化都会波及 `server/src/session.ts`、`src/main/remote-repository.ts`、`src/main/storage-controller.ts` 与 `scripts/tests/storage-c11.test.mjs`；这类改动属于重大变更，必须先过规格门禁。
-- **改限流/帧上限**：`server/src/config.ts:108-123` 是唯一来源，改完要跑 `npm --prefix server test` 与 `npm run test:e2e`，否则客户端会把新的关闭码当成未知错误。
+- **改限流/帧上限**：`server/src/config.ts:136-153` 是唯一来源，改完要跑 `npm --prefix server test` 与 `npm run test:e2e`，否则客户端会把新的关闭码当成未知错误。
 - **改投影出口**：只能在 `server/src/validation.ts` 与 `src/shared/sync/data-boundary.ts` 的名单里改，不要在 `hub.broadcastProjection` 里加特例。
+- **改客户端数据端点**：`server/src/index.ts` 的 `handleClientHttp`、`server/src/client-data.ts`，以及客户端 `src/shared/{upstream,update,weather,calendar}.ts` 需同步；这些端点必须保持公开只读，客户端展示数据不得回退到任何第三方域名。
 
 历史设计取径见冻结文档 [local-or-server pet data design](../reviews/legacy/2026-10-20-local-or-server-pet-data-design.md)（只读，勿改）。

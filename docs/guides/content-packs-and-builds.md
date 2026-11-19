@@ -13,29 +13,29 @@
 `src/main/content-pack.ts` 定义全部格式与校验：
 
 - `Manifest`（`content-pack.ts:18-26`）：`id`（`^[a-z0-9][a-z0-9-]{0,31}$`）、`version`、`minShell`（使用该包所需的最旧外壳版本）、可选 `base`、`files[]`（`path`、`size`、`sha256`）、可选 `deletes[]`。
-- `PackIndex`（`content-pack.ts:40-43`）：发布在 release 旁的 `packs.json`，`schema: 1`，`packs` 是 `PackIndexEntry` 数组（含 `name`、`url`、`size`、`sha256`）。
-- 路径规则的唯一实现是 `checkPath()`（`content-pack.ts:76-81`）：必须以 `pet/` 开头、长度 ≤ 512、不含 `\`、`:`、NUL、无空段/`.`/`..` 段。内容包只能写 `pet/` 下，不能越界到外壳或其他资源。
-- `parseManifest()`（`content-pack.ts:83-101`）是 manifest 的单一校验入口：`version`/`minShell` 必须匹配 `x.y.z[-+…]`；有 `base` 时 `version` 必须严格高于 `base`；文件路径按小写去重；`deletes` 只允许出现在增量包（有 `base` 时）。
-- zip 只接受 store 模式：`zipEntries()` 拒绝加密、非 store、符号链接、目录项（`content-pack.ts:180-191`）。`readPack()` 要求条目数恰好等于 `manifest.files.length + 1`（manifest 自身），逐项核对大小，并在提供回调时核对 SHA-256（`content-pack.ts:206-234`）。因此「装配进 zip 但没写进 manifest」的文件会被判为非法，而不是被忽略。
+- `PackIndex`（`content-pack.ts:40-43`）：内容包索引，`schema: 1`，`packs` 是 `PackIndexEntry` 数组（含 `id`、`version`、`base`、`minShell`、`name`、`url`、`size`、`sha256`）。客户端不再读 GitHub 上的索引，而是从已配置的 qqpet-server `/v1/client/packs.json` 读取，服务端会把每个 `url` 改写为自身的下载路由。
+- 路径规则的唯一实现是 `checkPath()`（`content-pack.ts:79-83`）：必须以 `pet/` 开头、长度 ≤ 512、不含 `\`、`:`、NUL、无空段/`.`/`..` 段。内容包只能写 `pet/` 下，不能越界到外壳或其他资源。
+- `parseManifest()`（`content-pack.ts:85-103`）是 manifest 的单一校验入口：`version`/`minShell` 必须匹配 `x.y.z[-+…]`；有 `base` 时 `version` 必须严格高于 `base`；文件路径按小写去重；`deletes` 只允许出现在增量包（有 `base` 时）。
+- zip 只接受 store 模式：`zipEntries()` 拒绝加密、非 store、符号链接、目录项（`content-pack.ts:165-197`）。`readPack()` 要求条目数恰好等于 `manifest.files.length + 1`（manifest 自身），逐项核对大小，并在提供回调时核对 SHA-256（`content-pack.ts:208-236`）。因此「装配进 zip 但没写进 manifest」的文件会被判为非法，而不是被忽略。
 
 ## 3. 安装、分层与查找
 
 外壳不会把包解成覆盖式目录，而是把每个包解到 `packs/<id>@<version>/` 并保留自己的 manifest：
 
-- `installPack()`（`content-pack.ts:301-323`）：先 `readPack()` 读头并做 `packBlocker()` 判定，再解压到 `packs/.tmp-<随机>`，成功后 `rename` 成最终目录；失败删除临时目录。安装是「先完整校验、再原子换名」，中途失败不会留下半包。
-- `packBlocker()`（`content-pack.ts:294-299`）给出拒绝原因：外壳太旧（`minShell > shell`）、内容已不低于包版本、增量包的 `base` 与当前内容版本不符。
-- `installedLayers()`（`content-pack.ts:251-278`）从内置内容出发向上串链：版本必须递增；全量包只要求比下层新，增量包必须正好坐在自己的 `base` 上；`minShell` 高于当前外壳的包被排除。结果按新→旧返回，外壳升级/降级都不会混用内容。
-- `contentVersion()`（`content-pack.ts:280`）取最上层版本，没有安装包时回落到内置版本。
-- `lookup()`（`content-pack.ts:329-337`）自上而下找文件；某层在 `deletes` 里列出该路径（大小写不敏感）时，对**所有更下层**都隐藏该文件。这是增量包能真正删除旧资源的原因。
-- `FIRST_PACK_SHELL = '0.6.8'` 是第一个读内容包的外壳版本；`defaultMinShell(base)` 取 `base` 与它之中的较新者（`content-pack.ts:283-291`）。
+- `installPack()`（`content-pack.ts:304-325`）：先 `readPack()` 读头并做 `packBlocker()` 判定，再解压到 `packs/.tmp-<随机>`，成功后 `rename` 成最终目录；失败删除临时目录。安装是「先完整校验、再原子换名」，中途失败不会留下半包。
+- `packBlocker()`（`content-pack.ts:296-301`）给出拒绝原因：外壳太旧（`minShell > shell`）、内容已不低于包版本、增量包的 `base` 与当前内容版本不符。
+- `installedLayers()`（`content-pack.ts:258-280`）从内置内容出发向上串链：版本必须递增；全量包只要求比下层新，增量包必须正好坐在自己的 `base` 上；`minShell` 高于当前外壳的包被排除。结果按新→旧返回，外壳升级/降级都不会混用内容。
+- `contentVersion()`（`content-pack.ts:282`）取最上层版本，没有安装包时回落到内置版本。
+- `lookup()`（`content-pack.ts:331-339`）自上而下找文件；某层在 `deletes` 里列出该路径（大小写不敏感）时，对**所有更下层**都隐藏该文件。这是增量包能真正删除旧资源的原因。
+- `FIRST_PACK_SHELL = '0.6.8'` 是第一个读内容包的外壳版本；`defaultMinShell(base)` 取 `base` 与它之中的较新者（`content-pack.ts:285`、`content-pack.ts:292-293`）。
 
 运行期入口在 `src/main/content.ts`：
 
 - `resourcesRoot`：打包后是 `process.resourcesPath`，开发时是 `<appPath>/resources`（`content.ts:11`）。
 - `packsDir` 固定在 `userData/packs`，且刻意延迟取（`content.ts:18-19`）——因为 `index.ts` 可能在模块加载后重定向 `userData`。
 - `layers()` 只读一次并缓存（`content.ts:20-22`）：安装包后会重启应用，所以运行期不需要热更新层列表。
-- 索引地址是 `releases/latest/download/packs.json`（`content.ts:50`）。`findPack()` 只挑「增量包且能直接应用」的最新一条（`content.ts:55-63`）；`findFullPack()` 只给首次运行的精简版挑全量包（`content.ts:66-71`）。
-- `downloadPack()` 只下载 `findPack`/`findFullPack` 记录过的条目，绝不接受页面传入的 URL；下载到临时文件后按 `packs.json` 的 sha256 校验，再走同一个 `installPack()`（`content.ts:73-87`）。
+- 索引来自已配置的 qqpet-server：`findPack(fetch, base)`/`findFullPack(fetch, base)` 请求 `${base}/v1/client/packs.json`（`packsIndexUrl`，`content-pack.ts:380-384`），不再读 GitHub `releases/latest/download/packs.json`。`findPack()` 只挑「增量包且能直接应用」的最新一条（`content.ts:55-64`）；`findFullPack()` 只给首次运行的精简版挑全量包（`content.ts:67-73`）。
+- `downloadPack(fetch, base, onProgress?)` 只下载 `findPack`/`findFullPack` 记录过的条目，绝不接受页面传入的 URL；相对 `url` 用 `packUrl`/`new URL(entry.url, base)` 与 base 拼接，base 非空时拒绝绝对或跨主机 URL；下载到临时文件后按 `packs.json` 的 sha256 校验，再走同一个 `installPack()`（`content.ts:80-90`、`content-pack.ts:419-463`）。
 
 精简版首次运行窗口由 `src/main/first-run.ts` 负责：`registerPackIpc()` 注册 `packInfo`/`importPack`/`resetPacks`/`findPack`/`findFullPack`/`downloadPack` 与 `relaunch`（`first-run.ts:13-23`）；`openFirstRun()` 打开 520×420 的不可缩放窗口加载 `firstrun.html`，关闭即退出（`first-run.ts:29-57`）。
 
@@ -54,14 +54,14 @@ node --experimental-strip-types scripts/pack-content.mjs \
 
 行为要点（`pack-content.mjs`）：
 
-- `--version` 必填，前导 `v` 会被去掉（`:24-25`）。`--out` 默认 `dist/packs`，`--url-prefix` 默认空串（`:20-21`）。
-- 无 `--base` 时只产出全量包 `QQPet-content-<version>.qqpetpack`，文件清单来自 `git ls-tree -r --name-only HEAD -- resources/pet`（`:60-62`）。未跟踪文件不会被收录，这是刻意的：包内容必须来自已提交的树。
-- 有 `--base` 时用 `git diff --name-status --no-renames <base> HEAD` 计算增删，产出 `QQPet-content-<base>-to-<version>.qqpetpack`，删除项写入 `deletes`（`:63-72`）。没有差异时不生成增量包。
-- `--full` 与 `--base` 可以同时给出：一轮里既出全量包也出增量包（`:62-72`）。
-- 稳定版不能以同号的 beta 为基线：若 `--base` 带 `-` 而 `version` 不带且主版本相同，会自动改用 `git describe --exclude=*-*` 找到上一个稳定标签（`:32-37`）。
-- 任何文件若以 Git LFS 指针开头（`version https://git-lfs`）立即报错并要求 `git lfs pull`（`:39-43`）。这条防止把 130 字节指针打进包。
-- 每个文件写 zip 前重新读取并计算 sha256；写完后立刻 `readPack(file)` 回读校验（`:45-58`）。因此「脚本退出 0」等价于「产物可被外壳读取」。
-- 最后写 `packs.json`，列出本轮所有包的 `name`/`url`/`size`/`sha256`/`minShell`/`base`（`:73-75`）。
+- `--version` 必填，前导 `v` 会被去掉（`:31-32`）。`--out` 默认 `dist/packs`，`--url-prefix` 默认空串（`:27-28`）。
+- 无 `--base` 时只产出全量包 `QQPet-content-<version>.qqpetpack`，文件清单来自 `git ls-tree -r --name-only HEAD -- resources/pet`（`:67-69`）。未跟踪文件不会被收录，这是刻意的：包内容必须来自已提交的树。
+- 有 `--base` 时用 `git diff --name-status --no-renames <base> HEAD` 计算增删，产出 `QQPet-content-<base>-to-<version>.qqpetpack`，删除项写入 `deletes`（`:70-79`）。没有差异时不生成增量包。
+- `--full` 与 `--base` 可以同时给出：一轮里既出全量包也出增量包（`:69-78`）。
+- 稳定版不能以同号的 beta 为基线：若 `--base` 带 `-` 而 `version` 不带且主版本相同，会自动改用 `git describe --exclude=*-*` 找到上一个稳定标签（`:41-44`）。
+- 任何文件若以 Git LFS 指针开头（`version https://git-lfs`）立即报错并要求 `git lfs pull`（`:46-49`）。这条防止把 130 字节指针打进包。
+- 每个文件写 zip 前重新读取并计算 sha256；写完后立刻 `readPack(file)` 回读校验（`:52-63`）。因此「脚本退出 0」等价于「产物可被外壳读取」。
+- 最后写两个索引（`:80-84`）：`packs.json` 列出本轮所有包，`url` = `--url-prefix` + 文件名（绝对 URL，供旧外壳与 GitHub Release）；`packs-server.json` 同内容，但 `url` = 裸文件名，复制为 qqpet-server 的 `client-data/packs.json` 后由服务端改写为本机下载路由。旧外壳仍读 GitHub Release 旁的绝对 `packs.json`，这条迁移通道保持不变。
 
 ## 5. 各平台构建
 
@@ -138,7 +138,7 @@ npm run check:ios-assets    # 只校验，不下载
 3. 增量包必须有 `base`，版本严格高于 `base`；`deletes` 只属于增量包，且对更下层生效。
 4. `minShell` 是硬门禁：外壳版本低于它时该包不可用，不是警告。
 5. 安装/卸载以整个版本目录为单位，使用临时目录 + rename，失败不留半包。
-6. 全量包与增量包的命名固定：`QQPet-content-<version>.qqpetpack`、`QQPet-content-<base>-to-<version>.qqpetpack`；`packs.json` 的 `schema` 固定为 `1`。
+6. 全量包与增量包的命名固定：`QQPet-content-<version>.qqpetpack`、`QQPet-content-<base>-to-<version>.qqpetpack`；`packs.json` 的 `schema` 固定为 `1`；`packs-server.json` 与 `packs.json` 同 schema/字段，仅把 `url` 换成裸文件名。
 7. 完整版与精简版安装包共用 `appId` 但内容不同；两者配置文件必须手工保持同步。
 8. 各平台 Web 产物目录固定为 `out/{android,harmony,ios,renderer}`；打包脚本以这些路径为输入，路径改名会直接断链。
 
@@ -167,7 +167,7 @@ node scripts/pack-harmony.mjs
 
 ## 9. 变更影响
 
-- 改 manifest 字段或 `packs.json` schema：已发布的外壳会读不懂新包。必须提升 `packs.json` 的 `schema` 并让新旧外壳各自选择，不能原地改语义。
+- 改 manifest 字段或 `packs.json` schema：已发布的外壳会读不懂新包。必须提升 `packs.json` 的 `schema` 并让新旧外壳各自选择，不能原地改语义；`packs-server.json` 与 qqpet-server 的 `client-data/packs.json` 必须同 schema，否则服务端回 503 `packs_invalid`。
 - 改 `pack-content.mjs` 的文件清单来源（例如改用工作区而非 `HEAD`）：未提交/未跟踪文件会进包，破坏「包内容可追溯到提交」。
 - 改 `minShell` 默认值或 `FIRST_PACK_SHELL`：决定旧外壳能否用新包，直接影响精简版首次运行与增量升级路径。
 - 改 `deletes` 语义或 `lookup` 的隐藏顺序：会出现「旧文件复活」或「新文件被误隐藏」，只能靠安装层测试发现。

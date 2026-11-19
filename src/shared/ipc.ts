@@ -211,12 +211,18 @@ export interface PackApi {
   importPack(): Promise<string | null>
   /** Removes every installed pack, back to the bundled content. */
   reset(): Promise<void>
-  /** Rejects while offline. */
+  /** Rejects while offline or without a configured upstream. */
   find(): Promise<PackOffer | null>
-  /** The newest full pack of the latest release, for a lite installer's first run; rejects with why there is none. */
-  findFull(mirror?: string): Promise<PackOffer>
-  /** Downloads and installs the pack find() or findFull() offered, through `mirror` (a URL prefix) if given; the new content version. */
-  download(mirror?: string): Promise<string>
+  /**
+   * The newest full pack of the latest release, read from the qqpet-server `serverUrl` given on
+   * the first-run page; rejects with why there is none.
+   */
+  findFull(serverUrl?: string): Promise<PackOffer>
+  /**
+   * Downloads and installs the pack find() or findFull() offered, from the qqpet-server address
+   * it was found on (the `serverUrl` passed to findFull(), or the paired one); the new content version.
+   */
+  download(serverUrl?: string): Promise<string>
   /** Download progress of the pack being installed. */
   onProgress(listener: (p: PackProgress) => void): void
   relaunch(): void
@@ -320,7 +326,7 @@ export interface QQPetApi {
   openGame(swf: string, windowId?: number): void
   /** Native game-page exit; ordinary browser/Electron pages can keep window.close(). */
   closeGame?(): void
-  /** Today and the next 30 days from the calendar API; empty while offline. */
+  /** Today and the next 30 days; computed locally when no upstream is configured, empty while the upstream fails. */
   calendar(): Promise<CalendarDay[]>
   /** Rejects with the server's error. */
   aiModels(c: Omit<AiConfig, 'model'>): Promise<string[]>
@@ -328,9 +334,9 @@ export interface QQPetApi {
   aiChat(c: AiConfig, messages: AiMessage[]): Promise<string>
   /** Keyless web search (DuckDuckGo); [] while offline or on failure. */
   webSearch(query: string): Promise<SearchResult[]>
-  /** An empty city locates by IP; rejects for an unknown city or while offline. */
+  /** An empty city locates by IP; rejects with `upstream_not_configured` without an upstream, or the server's error. */
   weather(city: string): Promise<Weather>
-  /** Rejects while offline. */
+  /** Rejects with `upstream_not_configured` until a qqpet-server address is configured. */
   latestRelease(): Promise<Release>
   packs?: PackApi
   quit(): void

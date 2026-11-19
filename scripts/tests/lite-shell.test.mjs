@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import {
-  MANIFEST, NO_CONTENT, bundledContent, contentVersion, downloadTo, fetchIndex, installPack, installedLayers, lookup, mirrored, pickFullPack, sha256, writeZip,
+  MANIFEST, NO_CONTENT, bundledContent, contentVersion, downloadTo, fetchIndex, installPack, installedLayers, lookup, packUrl, packsIndexUrl, pickFullPack, sha256, writeZip,
 } from '../../src/main/content-pack.ts'
-import { firstRunFlow } from '../../src/renderer/first-run-flow.ts'
+import { FIRST_RUN_UPSTREAM_KEY, firstRunFlow } from '../../src/renderer/first-run-flow.ts'
 
 // Lite installers (#28): no resources/pet in the program, content comes from a full pack on first run.
 const dir = () => mkdtempSync(join(tmpdir(), 'qqpet-lite-'))
@@ -20,7 +20,9 @@ function fullPack(version, files = { 'pet/a.swf': 'AAA' }, extra = {}) {
   return file
 }
 
-const entry = (version, extra = {}) => ({ id: 'core', version, minShell: '0.6.8', name: `QQPet-content-${version}.qqpetpack`, url: `https://github.com/o/r/releases/download/v${version}/QQPet-content-${version}.qqpetpack`, size: 10, sha256: 'a'.repeat(64), ...extra })
+// A qqpet-server rewrites packs.json to paths under its own /v1/client/packs/, so urls are relative.
+const entry = (version, extra = {}) => ({ id: 'core', version, minShell: '0.6.8', name: `QQPet-content-${version}.qqpetpack`, url: `/v1/client/packs/QQPet-content-${version}.qqpetpack`, size: 10, sha256: 'a'.repeat(64), ...extra })
+const UPSTREAM = 'https://pet.example.com'
 
 /** A fetch answering `routes` (url -> bytes or index object); bodies stream in `chunk`-byte pieces. */
 function fakeFetch(routes, { chunk = 4, status = 200, log = [] } = {}) {
@@ -73,13 +75,22 @@ test('the first run picks the newest full pack this program can take', () => {
   assert.match(pickFullPack({ schema: 1, packs: [entry('0.7.0', { base: '0.6.9' })] }, NO_CONTENT, '0.7.0'), /没有完整内容包/)
 })
 
-test('a mirror is a prefix in front of the GitHub URL', () => {
-  const u = 'https://github.com/o/r/releases/latest/download/packs.json'
-  assert.equal(mirrored(u), u)
-  assert.equal(mirrored(u, '  '), u)
-  assert.equal(mirrored(u, 'https://ghfast.top'), `https://ghfast.top/${u}`)
-  assert.equal(mirrored(u, 'https://ghfast.top///'), `https://ghfast.top/${u}`)
-  assert.throws(() => mirrored(u, 'ghfast.top'), /http/)
+test('the pack index and pack files live on the configured qqpet-server', () => {
+  assert.equal(packsIndexUrl(UPSTREAM), `${UPSTREAM}/v1/client/packs.json`)
+  assert.equal(packsIndexUrl(`${UPSTREAM}///`), `${UPSTREAM}/v1/client/packs.json`)
+  assert.throws(() => packsIndexUrl(''), /http/)
+  assert.throws(() => packsIndexUrl('pet.example.com'), /http/)
+  // Relative urls resolve against the server that served them; absolute ones need no base.
+  assert.equal(packUrl('/v1/client/packs/a.qqpetpack', `${UPSTREAM}/`), `${UPSTREAM}/v1/client/packs/a.qqpetpack`)
+  assert.equal(packUrl('a.qqpetpack', UPSTREAM), `${UPSTREAM}/a.qqpetpack`)
+  const absolute = 'https://cdn.example.com/a.qqpetpack'
+  assert.equal(packUrl(absolute), absolute)
+  // With a base, an absolute entry would leave the server that served packs.json.
+  assert.throws(() => packUrl(absolute, UPSTREAM), /不可用/)
+  assert.throws(() => packUrl('//cdn.example.com/a.qqpetpack', UPSTREAM), /不可用/)
+  // No base is never "download from somewhere else": a relative url is an incomplete configuration.
+  assert.throws(() => packUrl('/v1/client/packs/a.qqpetpack'), /上游服务器/)
+  assert.throws(() => packUrl('a.qqpetpack', 'pet.example.com'), /http/)
 })
 
 test('packs.json errors say what went wrong', async () => {
@@ -94,9 +105,9 @@ test('a download streams to disk with progress and is checked against packs.json
   const file = join(dir(), 'p.qqpetpack')
   const seen = []
   const log = []
-  await downloadTo(fakeFetch({ [`https://m.example/${e.url}`]: data }, { chunk: 100, log }), e, file, { mirror: 'https://m.example/', onProgress: (p) => seen.push(p) })
+  await downloadTo(fakeFetch({ [UPSTREAM + e.url]: data }, { chunk: 100, log }), e, file, { base: UPSTREAM, onProgress: (p) => seen.push(p) })
   assert.deepEqual(readFileSync(file), data)
-  assert.deepEqual(log, [`https://m.example/${e.url}`])
+  assert.deepEqual(log, [UPSTREAM + e.url])
   assert.deepEqual(seen.at(-1), { received: data.length, total: data.length })
   assert.ok(seen.every((p, i) => i === 0 || p.received >= seen[i - 1].received))
 })
@@ -104,23 +115,32 @@ test('a download streams to disk with progress and is checked against packs.json
 test('a bad download leaves no file behind and says why', async () => {
   const data = Buffer.from('payload')
   const file = join(dir(), 'p.qqpetpack')
+  const absolute = 'https://packs.example.com/p.qqpetpack'
   const cases = [
     [{ size: data.length, sha256: 'b'.repeat(64) }, data, /校验失败/],
     [{ size: data.length + 5, sha256: sha256(data) }, data, /不完整/],
     [{ size: 3, sha256: sha256(data) }, data, /比预期大/],
   ]
   for (const [extra, body, why] of cases) {
-    const e = entry('0.7.0', extra)
+    const e = entry('0.7.0', { ...extra, url: absolute })
     await assert.rejects(downloadTo(fakeFetch({ [e.url]: body }), e, file), why)
     assert.equal(existsSync(file), false)
   }
-  const e = entry('0.7.0', { size: data.length, sha256: sha256(data) })
+  const e = entry('0.7.0', { size: data.length, sha256: sha256(data), url: absolute })
   await assert.rejects(downloadTo(fakeFetch({}), e, file), /HTTP 404/)
   assert.equal(existsSync(file), false)
 })
 
+test('a relative pack url without an upstream base is refused before any request', async () => {
+  const file = join(dir(), 'p.qqpetpack')
+  const log = []
+  await assert.rejects(downloadTo(fakeFetch({}, { log }), entry('0.7.0'), file), /上游服务器/)
+  assert.deepEqual(log, [])
+  assert.equal(existsSync(file), false)
+})
+
 test('a stalled download is cut off instead of hanging', async () => {
-  const e = entry('0.7.0', { size: 100, sha256: 'a'.repeat(64) })
+  const e = entry('0.7.0', { size: 100, sha256: 'a'.repeat(64), url: 'https://packs.example.com/p.qqpetpack' })
   const file = join(dir(), 'p.qqpetpack')
   const stuck = async (_url, init) =>
     new Response(new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)); init.signal.addEventListener('abort', () => c.error(init.signal.reason)) } }))
@@ -151,11 +171,11 @@ test('first run: download shows progress, installs, then relaunches into the pet
   const { api, calls } = fakeApi()
   const states = []
   const flow = firstRunFlow(api, (s) => states.push(s), 0)
-  await flow.download('https://m.example/')
+  await flow.download('wss://pet.example.com/v1/sync')
   await new Promise((r) => setTimeout(r, 5))
   assert.deepEqual(states.map((s) => s.kind), ['idle', 'finding', 'downloading', 'downloading', 'installing', 'done'])
   assert.deepEqual(states[3], { kind: 'downloading', version: '0.7.0', received: 40, total: 100 })
-  assert.deepEqual(calls, [['findFull', 'https://m.example/'], ['download', 'https://m.example/'], ['relaunch']])
+  assert.deepEqual(calls, [['findFull', 'wss://pet.example.com/v1/sync'], ['download', 'wss://pet.example.com/v1/sync'], ['relaunch']])
 })
 
 test('first run: a failure shows why and the same button retries', async () => {
@@ -175,6 +195,10 @@ test('first run: a failure shows why and the same button retries', async () => {
   await new Promise((r) => setTimeout(r, 5))
   assert.equal(states.at(-1).kind, 'done')
   assert.deepEqual(calls.at(-1), ['relaunch'])
+})
+
+test('first run: the server address is kept under the key the pet adopts as settings.upstreamUrl', () => {
+  assert.equal(FIRST_RUN_UPSTREAM_KEY, 'qqpet.upstreamUrl')
 })
 
 test('first run: importing a local pack relaunches; cancelling the picker goes back; double clicks run once', async () => {

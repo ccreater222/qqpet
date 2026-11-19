@@ -150,6 +150,13 @@ export interface Settings {
   aiModel: string
   /** City for weather news; empty locates by IP. */
   weatherCity: string
+  /**
+   * qqpet-server address for updates, weather and the calendar (`https://pet.example.com` or
+   * `wss://pet.example.com/v1/sync`); empty means offline for those, with the calendar still
+   * computed locally. Device-local, never uploaded; server storage mode uses the paired
+   * `serverUrl` instead.
+   */
+  upstreamUrl: string
   /** Look for a new release once a day. On by default. */
   autoUpdate: boolean
   /** Unix seconds of the last automatic release check. */
