@@ -1,7 +1,7 @@
 import { createPetInput, type PetPointerInput } from './pet/input'
 import { clipAsk, IDLE, note } from './pet/ai'
 import { resumeTask } from './pet/jobs'
-import { machine, speak, startPet } from './pet/pet'
+import { machine, speak, startPet, startProjectionPet } from './pet/pet'
 import { applyEdge, info, onInfoChange, onStoreSyncStatus, petSize, save, setInfo, stage, update } from './pet/store'
 import { RuntimeReadinessBanner } from './pet/readiness'
 import type { DesktopCursor } from '../shared/ipc'
@@ -466,15 +466,19 @@ const begin = (): void => {
 }
 
 /** Projection mode owns all game rules; only the SWF pose/clock runs locally. */
-const beginProjection = (): void => {
+const beginProjectionWith = (first: boolean): void => {
   petEl.hidden = false
   // Show the authoritative dead/buried state before the first projection update.
   if (save.isBury) machine.play({ a: 'bury' })
   else if (info.health === 0) machine.play({ a: 'dying', s: () => machine.add({ a: 'die' }) })
+  startProjectionPet(first)
   machine.start()
 }
+const beginProjection = (): void => {
+  beginProjectionWith(false)
+}
 const adoptPet = (): void => adopt(begin)
-const adoptProjectionPet = (): void => adoptProjection(beginProjection)
+const adoptProjectionPet = (): void => adoptProjection(() => beginProjectionWith(true))
 const startAdoption = (): void => {
   if (projectionMode) adoptProjectionPet()
   else adoptPet()

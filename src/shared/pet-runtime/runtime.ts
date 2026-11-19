@@ -140,8 +140,21 @@ export const C4B_COMMAND_TYPES = [
   'admin.grantCheat', 'admin.grantRandomGoods',
 ] as const satisfies readonly CommandKey[]
 
-function toOutcome(state: EngineState, events: DomainEvent[], result: JsonValue | undefined, nowMs: number): RuntimeOutcome {
-  recomputePetComputed(state.save)
+function toOutcome(
+  state: EngineState,
+  events: DomainEvent[],
+  result: JsonValue | undefined,
+  nowMs: number,
+  levelBeforeHandler?: number,
+): RuntimeOutcome {
+  const levels = recomputePetComputed(state.save)
+  const previousLevel = levelBeforeHandler ?? levels.previousLevel
+  // Commands that change growth (inventory use, admin grant) must surface the
+  // same level cue as the passive tick. The tick already emits its own event,
+  // so only fill the gap when the batch did not include one.
+  if (levels.level > previousLevel && events.some(event => event.type === 'pet.levelChanged') === false) {
+    events.push({ type: 'pet.levelChanged', payload: { previousLevel, level: levels.level } })
+  }
   state.save.nowTimeLine = Math.floor(nowMs / 1000)
   assertEngineState(state)
   return { ok: true, state, events, ...(result === undefined ? {} : { result }) }
@@ -152,6 +165,7 @@ function executeHandler(
   ctx: RuntimeCommandContext,
   handler: (context: HandlerContext) => HandlerResult,
 ): RuntimeOutcome {
+  const levelBeforeHandler = state.save.petComputedlInfo.level
   const candidate = cloneEngine(state)
   const initialRngReference = candidate.rng
   const rng = createRuntimeRng(candidate.rng)
@@ -159,7 +173,7 @@ function executeHandler(
   // A handler may explicitly replace engine RNG (pet.reset). Only copy the
   // cursor back when the handler did not intentionally reset the engine state.
   if (candidate.rng === initialRngReference) candidate.rng = rng.state
-  return toOutcome(candidate, handlerResult.events, handlerResult.result, ctx.gameTimeMs)
+  return toOutcome(candidate, handlerResult.events, handlerResult.result, ctx.gameTimeMs, levelBeforeHandler)
 }
 
 function unsupportedCommand(commandType: string): never {

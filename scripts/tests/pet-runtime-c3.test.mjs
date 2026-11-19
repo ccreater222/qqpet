@@ -1680,3 +1680,12 @@ test('group C: crossing 06:00 rolls today\'s tasks exactly once', async () => {
   assert.deepEqual(nextTask.daily, task.daily)
   assert.equal(nextTask.dailyDay, task.dailyDay)
 })
+
+test('growth-changing commands emit the same level cue as passive ticks', () => {
+  const state = baseState()
+  const outcome = ok(state, 'admin.grantCheat', { stat: 'growth', amount: 40000 }, { actorRole: 'owner' })
+  const levels = outcome.events.filter(event => event.type === 'pet.levelChanged')
+  assert.equal(levels.length, 1, 'one command batch must emit one level cue')
+  assert.ok(levels[0].payload.level > levels[0].payload.previousLevel)
+  assert.equal(outcome.state.save.petComputedlInfo.level, levels[0].payload.level)
+})

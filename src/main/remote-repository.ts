@@ -427,11 +427,17 @@ export class RemoteRepository {
       this.setState('error')
       throw new Error(this.lastError)
     }
-    const waiter = new Promise<void>((resolve, reject) => { this.startWaiters.push({ resolve, reject }) })
-    if (this.connection === null && this.state !== 'catching_up') {
-      this.setState('connecting')
-      this.connect()
+    // A validated RemoteProjectionCacheV2 is the last accepted projection, not
+    // authority. Expose it read-only without waiting for the handshake so an
+    // unreachable server cannot block startup; the background dial keeps going.
+    // Commands still fail closed until a ready frame marks the connection online.
+    // An explicit pairing attempt always waits for its own handshake.
+    if (this.pair === undefined && this.restoredProjectionCache && this.projection !== null) {
+      this.beginConnect()
+      return this.getProjection()
     }
+    const waiter = new Promise<void>((resolve, reject) => { this.startWaiters.push({ resolve, reject }) })
+    this.beginConnect()
     await waiter
     return this.getProjection()
   }
@@ -657,6 +663,14 @@ export class RemoteRepository {
     } catch (error) {
       this.lastError = messageOf(error)
       return false
+    }
+  }
+
+  /** Start the dial/reconnect path without waiting for the ready handshake. */
+  private beginConnect(): void {
+    if (this.connection === null && this.state !== 'catching_up') {
+      this.setState('connecting')
+      this.connect()
     }
   }
 

@@ -49,7 +49,7 @@ class Element extends EventTarget {
   click() { this.dispatchEvent(new Event('click')) }
 }
 
-function faceFixture({ stage = 'Egg', sex = 'GG', touch = true, faceClick = 2, pose = 'normal', mood = 800 } = {}) {
+function faceFixture({ stage = 'Egg', sex = 'GG', touch = true, faceClick = 2, pose = 'normal', mood = 800, projection = false, dispatch = null } = {}) {
   const pet = new Element(), body = new Element()
   const document = Object.assign(new EventTarget(), {
     body,
@@ -59,7 +59,7 @@ function faceFixture({ stage = 'Egg', sex = 'GG', touch = true, faceClick = 2, p
     elementFromPoint: () => null,
   })
   const plays = [], counts = [], floats = [], alerts = []
-  const machine = { pose: { a: pose }, play: value => plays.push(value) }
+  const machine = { pose: { a: pose }, play: value => plays.push(value), add: value => plays.push(value) }
   let face
   const app = renderer(144, { x: 0, y: 0 }, null, stage, {
     ui: {
@@ -78,7 +78,10 @@ function faceFixture({ stage = 'Egg', sex = 'GG', touch = true, faceClick = 2, p
   const scope = {
     FACE, pokeMoodGain, document, machine, touch, info: app.info, save: app.save,
     stage: () => stage,
-    runtimeProjectionMode: false,
+    runtimeProjectionMode: projection,
+    uiCommands: { pokeFace: key => ({ type: 'pet.pokeFace', payload: { spotId: key } }) },
+    dispatchRuntimeCommand: dispatch ?? (() => Promise.resolve(null)),
+    commandResultData: result => (result && result.result ? result.result : null),
     mood: () => app.info.mood >= 800 ? 'happy' : app.info.mood >= 500 ? 'peaceful' : app.info.mood >= 200 ? 'upset' : 'sad',
     rand: (min, max) => min === 5 && max === 15 ? 10 : min,
     addCount: name => counts.push(name),
@@ -97,6 +100,7 @@ function faceFixture({ stage = 'Egg', sex = 'GG', touch = true, faceClick = 2, p
   return {
     app, pet, body, machine, plays, counts, floats, alerts,
     points: () => layer.children,
+    showFacePoints: () => face.showFacePoints(),
     native,
     tap(source = 'native') {
       if (source === 'native') { native('begin'); native('end') }
@@ -144,6 +148,89 @@ test('clicking a real point counts amusement, cheers the pet and selects its sta
     assert.deepEqual(f.counts, ['Amusing', 'Amusing'])
     assert.equal(f.alerts.length, 1, 'later pokes do not unlock the achievement again')
   }
+})
+
+test('projection mode plays the touch animation before the command settles', async () => {
+  let resolveCommand
+  const command = new Promise((resolve) => { resolveCommand = resolve })
+  const f = faceFixture({ stage: 'Adult', sex: 'GG', mood: 800, projection: true, dispatch: () => command })
+  f.tap()
+  const [key] = Object.entries(FACE.GG.Adult.happy)[0]
+  f.points()[0].click()
+  // The pet's response is presentation, not a server-owned state change: it
+  // must start before the command result and must not wait for the network.
+  assert.equal(f.plays.at(-1)?.a, 'faceActive')
+  assert.equal(f.floats.length, 0, 'the authoritative mood gain still waits for the result')
+  resolveCommand({ status: 'applied', result: { mood: 5, ddw: 0 } })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(f.plays.filter(play => play.a === 'faceActive').length, 1, 'the result must not replay the animation')
+  assert.deepEqual(f.floats, [5])
+  assert.match(f.plays[0].opt.url, new RegExp(`/interact/${key}\\d+\\.swf$`))
+})
+
+test('projection mode keeps touch feedback when the command is rejected', async () => {
+  const f = faceFixture({
+    stage: 'Adult', sex: 'GG', mood: 800, projection: true,
+    dispatch: () => Promise.resolve({
+      status: 'rejected',
+      error: { code: 'offline', message: 'the server connection is not ready for commands', refreshProjection: false },
+    }),
+  })
+  f.tap()
+  f.points()[0].click()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(f.plays.at(-1)?.a, 'faceActive')
+  assert.deepEqual(f.floats, [], 'a rejected command must not show an authoritative mood gain')
+})
+
+test('projection mode serializes rapid touch intents without retrying', async () => {
+  const commands = []
+  const f = faceFixture({
+    stage: 'Adult', sex: 'GG', mood: 800, projection: true,
+    dispatch: () => new Promise((resolve) => { commands.push(resolve) }),
+  })
+  f.tap()
+  f.points()[0].click()
+  f.showFacePoints()
+  f.points()[0].click()
+  assert.equal(f.plays.length, 2, 'both rapid clicks have their own local response')
+  assert.equal(commands.length, 1, 'the second user intent waits for the first data result')
+  commands[0]({ status: 'applied', result: { mood: 5, ddw: 0 } })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(commands.length, 2, 'the queued intent is sent after the first settles')
+  commands[1]({ status: 'applied', result: { mood: 6, ddw: 0 } })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(f.floats, [5, 6], 'each accepted click gets its own authoritative result')
+})
+
+test('legacy mood gain also keeps the band that rendered the face points', () => {
+  const f = faceFixture({ stage: 'Adult', sex: 'GG', mood: 199 })
+  f.tap()
+  const points = Object.entries(FACE.GG.Adult.sad)
+  const index = points.findIndex(([key]) => key === 'E')
+  assert.notEqual(index, -1)
+  f.points()[index].click()
+  assert.equal(f.app.info.mood, 269)
+  assert.equal(f.plays.at(-1)?.opt.url, 'pet/Action/GG/Adult/sad/interact/E1.swf')
+})
+
+test('projection mode keeps the mood band that rendered the face points', async () => {
+  let resolveCommand
+  const command = new Promise((resolve) => { resolveCommand = resolve })
+  // Mood 199 renders the sad band. The server raises it past 200; E exists in
+  // sad but not in upset, so recomputing the band after the command would pick
+  // a missing interact/<key><n>.swf and silently fall back to normal.
+  const f = faceFixture({ stage: 'Adult', sex: 'GG', mood: 199, projection: true, dispatch: () => command })
+  f.tap()
+  const points = Object.entries(FACE.GG.Adult.sad)
+  const index = points.findIndex(([key]) => key === 'E')
+  assert.notEqual(index, -1)
+  f.points()[index].click()
+  f.app.info.mood = 269
+  resolveCommand({ status: 'applied', result: { mood: 70, ddw: 1 } })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(f.plays.at(-1)?.a, 'faceActive')
+  assert.equal(f.plays.at(-1)?.opt.url, 'pet/Action/GG/Adult/sad/interact/E1.swf')
 })
 
 test('a new native press clears old points, and a drag or cancellation does not reopen them', () => {

@@ -572,6 +572,17 @@ async function makeRepository(server, overrides = {}) {
   return { repository, store, sleeps, mod }
 }
 
+/** Run one live session so the store holds a validated RemoteProjectionCacheV2. */
+async function seedProjectionCache(server) {
+  const first = await makeRepository(server)
+  await first.repository.start()
+  await first.repository.flush()
+  assert.ok(first.store.projectionCache, 'projection cache exists')
+  const cache = clone(first.store.projectionCache)
+  await first.repository.stop()
+  return { store: first.store, config: first.store.config, cache }
+}
+
 test('hello/welcome handshake applies a snapshot and exposes the server repository surface', async t => {
   const server = new FakeServer()
   const { repository, store } = await makeRepository(server)
@@ -1422,6 +1433,137 @@ test('accepted state is persisted as a validated v2 cache and restored before th
   assert.equal(restored.repository.getStatus().revision, server.revision)
   assert.equal(restored.repository.hasProjectionCache(), true)
   await restored.repository.stop()
+  await starting
+})
+
+test('a restored projection cache lets start resolve read-only before the server is ready', async t => {
+  const server = new FakeServer()
+  const { store, config, cache } = await seedProjectionCache(server)
+
+  // The server accepts the socket but never completes the welcome handshake.
+  const transport = new FakeTransport(() => {})
+  const restored = await makeRepository(server, { store, config, transport })
+  t.after(() => restored.repository.stop())
+  let settled = false
+  const starting = restored.repository.start().then(value => {
+    settled = true
+    return value
+  })
+  await until(
+    () => transport.connections.length === 1
+      && transport.connections[0].sent.some(frame => frame.t === 'hello'),
+    'cached background dial',
+  )
+  assert.equal(settled, true, 'a restored cache must resolve start before ready')
+  const projection = await starting
+  assert.deepEqual(projection.shared, cache.shared)
+  assert.equal(projection.revision, cache.revision)
+  assert.equal(projection.eventSeq, cache.eventSeq)
+  assert.deepEqual(projection.authority, cache.authority)
+  assert.equal(restored.repository.getStatus().connection !== 'online', true)
+  assert.equal(restored.repository.getStatus().readOnly, true)
+  assert.equal(restored.repository.hasProjectionCache(), true)
+  assert.deepEqual(await restored.repository.load(), restored.repository.getProjection().save)
+  assert.equal((await restored.repository.load()).petInfo.yb, cache.shared.petInfo.yb)
+
+  // A cached projection is display-only: offline commands are rejected before a
+  // command frame or a canonical write can happen.
+  const writesBefore = restored.store.cacheWrites.length
+  const rejected = await restored.repository.command({ type: 'pet.cheer', payload: {} }, { opId: 'op-cached-offline' })
+  assert.equal(rejected.status, 'rejected')
+  assert.equal(rejected.error.code, 'offline')
+  assert.equal(transport.connections[0].sent.some(frame => frame.t === 'command'), false)
+  assert.equal(restored.store.cacheWrites.length, writesBefore)
+  assert.deepEqual(restored.repository.getProjection().shared, cache.shared)
+
+  // The background dial is a real connection: the same repository goes online
+  // after the delayed handshake completes.
+  const connection = transport.connections[0]
+  connection.emit(welcomeFrame(OWNER_DEVICE_ID, 'snapshot'))
+  connection.emit(server.snapshotFrame())
+  connection.emit(readyFrame(server.revision, server.eventSeq, AUTHORITY))
+  await until(() => restored.repository.getStatus().state === 'online', 'cached-start background handshake')
+  assert.equal(restored.repository.getStatus().readOnly, false)
+})
+
+test('a cached read-only start keeps reconnecting in the background', async t => {
+  const server = new FakeServer()
+  const { store, config, cache } = await seedProjectionCache(server)
+  const transport = new FakeTransport(connection => {
+    // Simulate a server that is reachable but rejects every handshake for now.
+    connection.close(1006, 'server restarting')
+  })
+  const restored = await makeRepository(server, { store, config, transport })
+  t.after(() => restored.repository.stop())
+  let settled = false
+  const starting = restored.repository.start().then(value => {
+    settled = true
+    return value
+  })
+  await until(() => settled, 'cached start resolution')
+  const projection = await starting
+  assert.equal(projection.revision, cache.revision)
+  await until(() => transport.connections.length >= 2, 'background reconnect after a dropped handshake')
+  assert.ok(restored.sleeps.length >= 1, 'the reconnect delay was scheduled')
+  assert.equal(restored.repository.getStatus().connection !== 'online', true)
+  assert.equal(restored.repository.getStatus().readOnly, true)
+})
+
+test('start without a projection cache keeps waiting for ready', async t => {
+  const server = new FakeServer()
+  let connection = null
+  const transport = new FakeTransport((candidate, frame) => {
+    if (frame.t === 'hello') connection = candidate
+  })
+  const { repository } = await makeRepository(server, { transport })
+  t.after(() => repository.stop())
+  let settled = false
+  const starting = repository.start().then(value => {
+    settled = true
+    return value
+  })
+  await until(() => connection !== null, 'uncached hello')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(settled, false, 'without a cache start still waits for the ready handshake')
+  assert.equal(repository.getProjection(), null)
+  assert.equal(repository.getStatus().readOnly, true)
+
+  connection.emit(welcomeFrame(OWNER_DEVICE_ID, 'snapshot'))
+  connection.emit(server.snapshotFrame())
+  connection.emit(readyFrame(server.revision, server.eventSeq, AUTHORITY))
+  await starting
+  assert.equal(settled, true)
+  assert.equal(repository.getStatus().state, 'online')
+  assert.deepEqual(repository.getProjection().shared, server.shared)
+})
+
+test('an explicit pairing start does not take the cached read-only shortcut', async t => {
+  const server = new FakeServer()
+  const { store, config } = await seedProjectionCache(server)
+  // A pairing attempt may reuse an existing store; the stale token must not
+  // turn the explicit pairing exchange into an instant cache-only start.
+  let connection = null
+  const transport = new FakeTransport((candidate, frame) => {
+    if (frame.t === 'hello') connection = candidate
+  })
+  const pairing = await makeRepository(server, {
+    store,
+    config,
+    transport,
+    token: null,
+    pair: { code: PAIRING_CODE, deviceLabel: 'Desktop C10' },
+  })
+  t.after(() => pairing.repository.stop())
+  let settled = false
+  const starting = pairing.repository.start().then(value => {
+    settled = true
+    return value
+  })
+  await until(() => connection !== null, 'pairing hello')
+  assert.equal(connection.sent.find(frame => frame.t === 'hello').auth.kind, 'pairing')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(settled, false, 'pairing must complete before start resolves')
+  await pairing.repository.stop()
   await starting
 })
 

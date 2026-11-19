@@ -102,7 +102,7 @@ export function useItem(g: Good, free = false, text?: string): void {
         if (data === null) return
         if (wasDead) speak({ s: '[host],我复活啦~', now: true }, 'revival')
         else if (data.correct === false) speak({ s: '[host]，这个药好像不对症呢……', now: true }, 'cure')
-        else speak({ s: '[host],病治好啦~', now: true }, 'recover')
+        else speak({ s: '[host],病治好啦~', now: true }, 'cure')
       })
       return
     }
@@ -263,7 +263,7 @@ export function doctor(): void {
         close()
         void dispatchRuntimeCommand(uiCommands.treatDoctor()).then((result) => {
           if (commandSucceeded(result) === false) return
-          speak({ s: revival ? '[host],我复活啦~' : '[host],病治好啦~', now: true }, revival ? 'revival' : 'recover')
+          speak({ s: revival ? '[host],我复活啦~' : '[host],病治好啦~', now: true }, revival ? 'revival' : 'cure')
         })
       },
     })
