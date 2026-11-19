@@ -39,6 +39,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:docs
       - run: npm run check:docs
+      - run: npm run check:docs:range
       - run: npm run test:compat
       - run: npm run build
       - run: npm run build:android-web

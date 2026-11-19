@@ -269,6 +269,8 @@ test('pre-commit：docs/reviews 重命名（删除侧）同样被冻结检查拒
 
 test('LFS wrapper：旧 hook 存在时转发参数，不存在时 no-op → 0', (t) => {
   const repo = preparedRepo(t);
+  // pre-push 现在是文档门禁：默认基线空范围才算通过，之后才轮到 LFS 转发。
+  git(repo, ['update-ref', 'refs/remotes/origin/main', git(repo, ['rev-parse', 'HEAD'])]);
   for (const hookName of ['post-checkout', 'post-commit', 'post-merge', 'pre-push']) {
     const legacyHook = path.join(repo, '.git', 'hooks', hookName);
     const marker = path.join(repo, `.lfs-${hookName}.log`);

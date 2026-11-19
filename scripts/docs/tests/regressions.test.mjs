@@ -22,6 +22,7 @@ import {
   reportOf,
   runCli,
   write,
+  writeRuntime,
 } from './fixtures.mjs';
 
 function cleanEnv(overrides = {}) {
@@ -70,6 +71,9 @@ test('B1 LFS wrapper：core.hooksPath=.githooks 时仍转发旧 .git/hooks 并�
   const repo = makeRepo(t);
   copyImplementation(repo);
   git(repo, ['config', 'core.hooksPath', '.githooks']);
+  // pre-push 现在是文档门禁：先准备 runtime 与空的默认基线，让门禁通过后再验证转发。
+  writeRuntime(repo);
+  git(repo, ['update-ref', 'refs/remotes/origin/main', git(repo, ['rev-parse', 'HEAD'])]);
 
   for (const hookName of ['post-checkout', 'post-commit', 'post-merge', 'pre-push']) {
     const legacyHook = path.join(repo, '.git', 'hooks', hookName);

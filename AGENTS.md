@@ -51,6 +51,7 @@
 | `npm run test:docs` | docs 检查器自身的单元/契约测试 | 任何 `scripts/docs/**` 改动 |
 | `npm run check:docs` | 全量文档结构、H1/结论/行数、索引、链接、命名、代码注释引用、doc-map 死规则；I/O 错误显式失败 | 任何 `docs/**`、`AGENTS.md`、`CLAUDE.md`、doc-map 改动 |
 | `npm run check:docs:staged` | staged 代码是否同步了 `require` 文档、`warn` 提醒、index/worktree 一致性 | 提交前（hook 自动执行） |
+| `npm run check:docs:range` | 逐提交检查（默认从 doc-map `rangeBaseline` 初始化边界起，缺失回退 `origin/main..HEAD`/`main..HEAD`）：`require` 缺文档失败、`warn` 提醒、触碰冻结证据失败、merge 用第一父 diff；忽略 `DOCS_CHECK=off` | 推送前（`pre-push` 自动执行）与 CI |
 | `npm run build` | Electron 主进程/preload/渲染层构建 | 影响打包、入口、资源或构建配置 |
 | `npm run build:android-web` / `npm run build:harmony-web` / `npm run build:ios-web` | 对应平台 Web 产物 | 影响对应平台 |
 | `npm --prefix server run typecheck` | 服务端 TypeScript | 任何 `server/src/**`、`server/test/**` 改动 |
@@ -62,15 +63,17 @@
 | `npm run smoke:compose` / `npm run smoke:docker` / `npm run smoke:proxy` | Compose 失败关闭、镜像/备份恢复、TLS/WSS 代理 | 部署、镜像、代理、健康检查改动 |
 | `npm run gate:acceptance` | 发布阻断级完整验收，证据写 `.agent-reports/acceptance/` | 发布前或任务明确要求时 |
 
-CI 事实：`.github/workflows/ci.yml` 含 `root`（typecheck、test:docs、check:docs、compat、四个 Web 构建）、`server`（typecheck + test）、`e2e`、`docker-smoke`、`proxy-wss` 五个作业；`.github/workflows/build.yml` 负责 tag 发布产物。CI 绿灯不能替代本地针对性验证，CI 未覆盖的改动必须在交付说明中写明验证方式。
+CI 事实：`.github/workflows/ci.yml` 含 `root`（typecheck、test:docs、check:docs、check:docs:range、compat、四个 Web 构建）、`server`（typecheck + test）、`e2e`、`docker-smoke`、`proxy-wss` 五个作业；`.github/workflows/build.yml` 负责 tag 发布产物。CI 绿灯不能替代本地针对性验证，CI 未覆盖的改动必须在交付说明中写明验证方式。
 
 ### 5.1 文档门禁的退出码与跳过
 
-- `check:docs`、`check:docs:staged` 退出码：`0` 通过；`1` 校验失败（结构/索引/链接/命名/行数/doc-map/staged 缺文档）；`2` 工具或配置错误（非 git 仓库、缺 `docs/`、缺/损坏 `doc-map.json`、未知参数、Node 版本不足，或无法读取 tracked 源码 / docs 子树）。
+- `check:docs`、`check:docs:staged`、`check:docs:range` 退出码：`0` 通过；`1` 校验失败（结构/索引/链接/命名/行数/doc-map/staged 缺文档/range 内提交缺文档）；`2` 工具或配置错误（非 git 仓库、缺 `docs/`、缺/损坏 `doc-map.json`、未知参数、`--range` 基线不存在、Node 版本不足，或无法读取 tracked 源码 / docs 子树 / git 对象）。
 - `2` 表示检查器没有完成检查，不得当作通过，也不得用跳过开关掩盖；先修工具链或环境。
 - 仅当确认本次改动无需更新文档时，才允许 `DOCS_CHECK=off` 跳过**文档检查**；提交信息必须包含一行 `Docs-Check: off — <至少 8 个字符的理由>`，由 `commit-msg` 钩子强制校验。该开关不影响 `typecheck`、测试、构建、服务端门禁。
-- 不得用 `--no-verify` 绕过 hook；确需绕过时必须先获得人类批准，并在交付说明中记录跳过的检查、原因和补偿验证。
-- Hook 安装：`npm run hooks:install`。`pre-commit` 先拒绝任何 `docs/reviews/**` 变更，再跑全量文档检查与 staged 文档同步检查；`commit-msg` 校验跳过理由。未安装 hook 的 worktree 视为未完成环境准备。
+- 该开关只影响全量与 staged 检查：`check:docs:range` 始终执行，只在提交信息带合法 trailer 时豁免该提交的 `require` 缺文档；缺行或理由少于 8 个字符仍判 `1`。冻结证据（`docs/reviews/**`、`docs/superpowers/**`）不接受任何豁免。
+- `docs/doc-map.json` 顶层 `rangeBaseline` 是**一次性初始化边界**（完整 40 位 commit SHA），只用于让新门禁不反噬初始化历史；它不是免检开关——基线之后的每个提交仍逐提交检查。字段缺失回退 `origin/main`/`main`；字段存在但格式非法或不是仓库内提交 → `2`。
+- 本地 Git 无法从技术上阻止 `git commit --no-verify`，但绕过提交会在 `pre-push`（range 不通过即拒绝推送且不转发 LFS）与 CI root job 的 `check:docs:range` 被检出并阻断；不得用 `--no-verify` 绕过 hook，确需绕过时必须先获得人类批准，并在交付说明中记录跳过的检查、原因和补偿验证。
+- Hook 安装：`npm run hooks:install`。`pre-commit` 先拒绝任何 `docs/reviews/**` 变更，再跑全量文档检查与 staged 文档同步检查；`commit-msg` 校验跳过理由；`pre-push` 先解析 `.githooks/runtime`（缺失/不可执行/Node < 22 → 2），跑 range 检查通过后才转发旧 LFS pre-push。未安装 hook 的 worktree 视为未完成环境准备。
 
 ## 6. 文档规则摘要
 

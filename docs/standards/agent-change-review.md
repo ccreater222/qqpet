@@ -34,6 +34,7 @@
 | 兼容测试 | `npm run test:compat` | 全部通过，无 skip 掩盖 |
 | 文档检查 | `npm run check:docs` | 退出码 0；无未索引文档、断链、超行数、死规则 |
 | 文档同步 | `npm run check:docs:staged` | 退出码 0；`require` 规则均有文档更新 |
+| 提交范围文档同步 | `npm run check:docs:range` | 退出码 0；范围内每个提交的 `require` 域都同提交更新了文档（仅合法 `Docs-Check: off — <理由>` 可豁免） |
 | 构建 | `npm run build` | 成功生成主进程/preload/渲染层产物 |
 | 服务端 | `npm --prefix server run typecheck`、`npm --prefix server test` | 全过；协议/DB/调度改动必须 |
 | 服务端构建 | `npm --prefix server run build` | 成功；部署相关改动必须 |
@@ -52,7 +53,8 @@
 出现任一红旗即拒绝合并，直到修复或获得明确的人类例外批准：
 
 - 为了让测试通过而修改/删除断言、放宽校验、增加 skip、吞掉异常。
-- 用 `DOCS_CHECK=off`、`--no-verify`、删 hook、改 doc-map 来绕过文档门禁。
+- 用 `DOCS_CHECK=off`、`--no-verify`、删 hook、改 doc-map 来绕过文档门禁；`check:docs:range` 的失败不得靠“下个提交补”或改动基线绕过，缺文档必须回到对应提交修复或写合法 trailer。
+- 用 `DOCS_CHECK=off` 环境变量期望跳过 `check:docs:range`：range 不读该开关，只看提交信息里的 trailer。
 - 缺配置/凭据时自动降级、返回空实现、伪造数据或静默切换权威来源。
 - 在日志、错误信息、URL、文档、提交信息中出现真实 token、配对码、私钥、生产数据。
 - 修改 `docs/reviews/**` 或在其中新增报告；把新证据写进冻结目录。

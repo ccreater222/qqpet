@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <item name="doc" path="docs/guides/ghost-attr-xml.md" />
+  <string name="text">docs/guides/ghost-text-xml.md</string>
+</resources>

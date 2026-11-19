@@ -42,6 +42,20 @@ const SOURCE_EXTENSIONS = new Set([
   '.conf',
   '.toml',
   '.ini',
+  // native / 前端宿主语言：注释里引用文档同样必须命中
+  '.kt',
+  '.kts',
+  '.java',
+  '.m',
+  '.mm',
+  '.h',
+  '.swift',
+  '.ets',
+  '.xml',
+  '.plist',
+  '.html',
+  '.css',
+  '.gradle',
 ]);
 
 const SKIP_SOURCE_DIRS = new Set([
@@ -56,6 +70,12 @@ const SKIP_SOURCE_DIRS = new Set([
   'vendor',
   '__pycache__',
 ]);
+
+/**
+ * 测试夹具故意引用不存在的 docs 路径，真实仓库全量检查必须跳过，
+ * 否则夹具本身会变成误报来源。
+ */
+const SKIP_SOURCE_PREFIXES = ['scripts/docs/tests/fixtures/'];
 
 /** 统一为仓库相对的 POSIX 路径。 */
 export function normalizeRepoPath(input) {
@@ -176,6 +196,93 @@ export function computeStagedImpact(entries, rules) {
   }
 
   return { ok: failures.length === 0, failures, warnings, impacts };
+}
+
+/**
+ * 冻结证据前缀：任何提交改动这些路径都是违规，与 doc-map 是否命中无关。
+ * 它们是只读历史，不是“需要同步的 living 文档”。
+ */
+const FROZEN_EVIDENCE_PREFIXES = ['docs/reviews/', 'docs/superpowers/'];
+
+/**
+ * 提交信息里的显式跳过理由，格式必须与 commit-msg 钩子逐字一致：
+ * `Docs-Check: off — <至少 8 个字符的理由>`（行首、固定前缀、em dash）。
+ */
+export function hasValidDocsCheckWaiver(message) {
+  for (const line of String(message ?? '').split(/\r?\n/)) {
+    const match = line.match(/^Docs-Check: off — (.*)$/);
+    if (match && match[1].length >= 8) return true;
+  }
+  return false;
+}
+
+/** 列出一次提交中触碰冻结证据的路径。 */
+export function findFrozenEvidencePaths(entries) {
+  const paths = [];
+  for (const entry of entries ?? []) {
+    const normalized = normalizeRepoPath(entry.path);
+    if (FROZEN_EVIDENCE_PREFIXES.some((prefix) => normalized.startsWith(prefix))) {
+      paths.push(normalized);
+    }
+  }
+  return [...new Set(paths)].sort();
+}
+
+/**
+ * 逐提交评估文档同步（供 `--range` 使用）。
+ *
+ * commits 为 `[{commit, subject, message, entries}]`，entries 来自
+ * `git diff-tree --no-commit-id --name-status --no-renames -r -z`。
+ * 与 staged 检查共用同一套 doc-map 语义：
+ * - 删除文档不算“更新文档”，删除代码仍算契约变更；
+ * - `warn` 只提醒，不失败；
+ * - 仅当该提交信息带合法 `Docs-Check: off — <理由>` 时，才允许缺文档；
+ * - 触碰 `docs/reviews/**` 或 `docs/superpowers/**` 的提交一律失败，
+ *   不受 doc-map 与跳过 trailer 影响（冻结证据只读）。
+ */
+export function evaluateRangeCommits(commits, rules) {
+  const checked = [];
+  const failures = [];
+  const warnings = [];
+
+  for (const item of commits) {
+    checked.push({ commit: item.commit, subject: item.subject });
+
+    const frozenPaths = findFrozenEvidencePaths(item.entries);
+    if (frozenPaths.length > 0) {
+      failures.push({
+        commit: item.commit,
+        subject: item.subject,
+        code: 'frozen-evidence-modified',
+        paths: frozenPaths,
+      });
+    }
+
+    const waived = hasValidDocsCheckWaiver(item.message);
+    const impact = computeStagedImpact(item.entries ?? [], rules);
+
+    for (const failure of impact.failures) {
+      if (waived) continue;
+      failures.push({
+        commit: item.commit,
+        subject: item.subject,
+        rule: failure.rule,
+        codeFiles: failure.codeFiles,
+        missingDocs: failure.missingDocs,
+      });
+    }
+    for (const warning of impact.warnings) {
+      warnings.push({
+        commit: item.commit,
+        subject: item.subject,
+        rule: warning.rule,
+        codeFiles: warning.codeFiles,
+        missingDocs: warning.missingDocs,
+      });
+    }
+  }
+
+  return { ok: failures.length === 0, commits: checked, failures, warnings };
 }
 
 /* ------------------------------------------------------------------ *
@@ -624,10 +731,14 @@ function maskNonNewline(text) {
 }
 
 /**
- * 只保留 JS/TS 注释文本；字符串、模板、代码等替换为等长空白，行号不变。
- * 这是零依赖的轻量词法扫描，目标是把字符串里的 docs 路径排除掉。
+ * 只保留 C 系注释文本；代码、字符串、模板字符串等替换为等长空白，行号不变。
+ * 覆盖 .ts/.js、.kt/.kts、.java、.m/.mm/.h、.swift、.ets、.gradle：
+ * - 行注释 `//` 与块注释 `/* ... *\/`；
+ * - 单/双引号、反引号字符串内的 `//` 与路径不算注释；
+ * - Kotlin/Swift 三引号原始字符串 `"""..."""` 整体视为字符串，
+ *   避免其中顶格书写的 `// docs/...` 被误判成注释。
  */
-function maskJavaScriptNonComments(source) {
+function maskCStyleComments(source) {
   let output = '';
   let index = 0;
   while (index < source.length) {
@@ -650,7 +761,74 @@ function maskJavaScriptNonComments(source) {
       continue;
     }
 
+    if (char === '"' && source.startsWith('"""', index)) {
+      const end = source.indexOf('"""', index + 3);
+      const stop = end < 0 ? source.length : end + 3;
+      output += maskNonNewline(source.slice(index, stop));
+      index = stop;
+      continue;
+    }
+
     if (char === '"' || char === "'" || char === '`') {
+      const quote = char;
+      let cursor = index + 1;
+      while (cursor < source.length) {
+        if (source[cursor] === '\\') {
+          cursor += 2;
+          continue;
+        }
+        if (source[cursor] === quote) {
+          cursor += 1;
+          break;
+        }
+        cursor += 1;
+      }
+      output += maskNonNewline(source.slice(index, cursor));
+      index = cursor;
+      continue;
+    }
+
+    output += char === '\n' ? '\n' : ' ';
+    index += 1;
+  }
+  return output;
+}
+
+/** XML/.plist/.html：只保留 `<!-- -->` 注释，属性值、文本节点与 CDATA 一律屏蔽。 */
+function maskMarkupComments(source) {
+  let output = '';
+  let index = 0;
+  while (index < source.length) {
+    const open = source.indexOf('<!--', index);
+    if (open < 0) {
+      output += maskNonNewline(source.slice(index));
+      break;
+    }
+    output += maskNonNewline(source.slice(index, open));
+    const end = source.indexOf('-->', open + 4);
+    const stop = end < 0 ? source.length : end + 3;
+    output += source.slice(open, stop);
+    index = stop;
+  }
+  return output;
+}
+
+/** CSS：只保留块注释，声明值与字符串里的 `docs/` 路径不算注释。 */
+function maskCssComments(source) {
+  let output = '';
+  let index = 0;
+  while (index < source.length) {
+    const char = source[index];
+
+    if (char === '/' && source[index + 1] === '*') {
+      const end = source.indexOf('*/', index + 2);
+      const stop = end < 0 ? source.length : end + 2;
+      output += source.slice(index, stop);
+      index = stop;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
       const quote = char;
       let cursor = index + 1;
       while (cursor < source.length) {
@@ -713,6 +891,18 @@ function maskSqlComments(source) {
 }
 
 const TYPESCRIPT_LIKE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.mjs', '.cjs']);
+const C_FAMILY_EXTENSIONS = new Set([
+  '.kt',
+  '.kts',
+  '.java',
+  '.m',
+  '.mm',
+  '.h',
+  '.swift',
+  '.ets',
+  '.gradle',
+]);
+const MARKUP_EXTENSIONS = new Set(['.xml', '.plist', '.html']);
 const HASH_COMMENT_EXTENSIONS = new Set([
   '.py',
   '.sh',
@@ -727,7 +917,11 @@ const HASH_COMMENT_EXTENSIONS = new Set([
 
 function commentTextForSourceFile(fileName, content) {
   const extension = path.extname(fileName).toLowerCase();
-  if (TYPESCRIPT_LIKE_EXTENSIONS.has(extension)) return maskJavaScriptNonComments(content);
+  if (TYPESCRIPT_LIKE_EXTENSIONS.has(extension) || C_FAMILY_EXTENSIONS.has(extension)) {
+    return maskCStyleComments(content);
+  }
+  if (MARKUP_EXTENSIONS.has(extension)) return maskMarkupComments(content);
+  if (extension === '.css') return maskCssComments(content);
   if (extension === '.sql') return maskSqlComments(content);
   if (HASH_COMMENT_EXTENSIONS.has(extension) || path.basename(fileName) === 'Dockerfile') {
     return maskHashComments(content);
@@ -751,6 +945,7 @@ export function collectSourceTextFiles(root, trackedFiles) {
     if (relativePath.startsWith('docs/')) continue;
     const parts = relativePath.split('/');
     if (parts.some((part) => SKIP_SOURCE_DIRS.has(part))) continue;
+    if (SKIP_SOURCE_PREFIXES.some((prefix) => relativePath.startsWith(prefix))) continue;
     if (!isScannableSourceFile(path.posix.basename(relativePath))) continue;
 
     const absolutePath = path.join(root, ...relativePath.split('/'));
@@ -831,7 +1026,21 @@ export function parseDocMap(raw) {
     };
   });
 
-  return { version: parsed.version, rules };
+  /**
+   * rangeBaseline：一次性初始化边界。存在且有效时，range 只检查该提交之后的提交，
+   * 避免把初始化历史（例如冻结证据迁移）反噬到新门禁；基线之后仍逐提交检查。
+   * 必须是完整 40 位 commit SHA；格式非法视为 doc-map 配置错误（CLI 退出 2）。
+   */
+  let rangeBaseline;
+  if (parsed.rangeBaseline !== undefined) {
+    const raw = parsed.rangeBaseline;
+    if (typeof raw !== 'string' || !/^[0-9a-f]{40}$/i.test(raw.trim())) {
+      throw new Error('doc-map.json 的 rangeBaseline 必须是 40 位十六进制 commit SHA');
+    }
+    rangeBaseline = raw.trim();
+  }
+
+  return { version: parsed.version, rangeBaseline, rules };
 }
 
 /** doc-map 的每个目标都必须是已存在的 living 文档，且每条规则不能是死 glob。 */

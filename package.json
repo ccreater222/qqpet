@@ -15,6 +15,7 @@
     "test:docs": "node --test scripts/docs/tests/*.test.mjs",
     "check:docs": "node scripts/docs/check-docs.mjs",
     "check:docs:staged": "node scripts/docs/check-docs.mjs --staged",
+    "check:docs:range": "node scripts/docs/check-docs.mjs --range",
     "hooks:install": "node scripts/docs/install-hooks.mjs",
     "test:e2e": "node scripts/e2e/renderer-e2e.mjs",
     "smoke:compose": "node scripts/compose-smoke.mjs",

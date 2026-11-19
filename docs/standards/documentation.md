@@ -97,6 +97,7 @@
   - `mode`：`require` 表示代码改动必须同时更新文档，`warn` 只输出提醒。
   - `reason`：说明这个代码域为什么属于契约面，禁止空字符串。
 - 每条 `include` 必须能匹配 `git ls-files` 的 tracked 文件，否则视为死规则并失败；新增代码域时增加规则，删除代码域时删除或改写规则。
+- doc-map 顶层可选 `rangeBaseline`：一次性初始化边界，值为完整 40 位 commit SHA。`check:docs:range` 默认只检查该提交之后的提交；字段缺失时回退 `origin/main..HEAD`/`main..HEAD`，字段存在但不是仓库内提交或格式非法 → `2`。它是初始化边界，不是免检开关：基线之后仍逐提交检查，冻结证据 backstop 不受影响。
 - 同一代码文件可以命中多条规则；每条 `require` 规则都要求至少更新一个目标文档。改动确实不需要文档时，按 §10 的跳过流程处理。
 
 ## 8. 一次性记录与冻结证据
@@ -122,19 +123,22 @@
 | `npm run test:docs` | 检查器自身测试；`node --test scripts/docs/tests/*.test.mjs` |
 | `npm run check:docs` | 全量检查：目录、命名、结构、H1/结论/行数、索引、链接、代码注释中的文档引用、doc-map；I/O 错误显式失败 |
 | `npm run check:docs:staged` | 只针对 staged 变更：`require` 缺文档失败、`warn` 提醒、index/worktree 分歧失败 |
-| `npm run hooks:install` | 安装 `.githooks` 下的 `pre-commit` / `commit-msg`；LFS 旧 hook 通过 `.githooks/post-*` 与 `pre-push` 转发 |
+| `npm run check:docs:range` | 逐提交检查一个提交范围（默认 `origin/main..HEAD`，回退 `main..HEAD`）：某个提交命中 `require` 但同提交未更新文档 → 失败；`warn` → 提醒；触碰 `docs/reviews/**` 或 `docs/superpowers/**` → 失败 |
+| `npm run hooks:install` | 安装 `.githooks` 下的 `pre-commit` / `commit-msg`；`pre-push` 先跑 range 门禁；LFS 旧 hook 通过 `.githooks/post-*` 与 `pre-push` 转发 |
 
 全量检查读取工作区；doc-map 死规则以 `git ls-files` 的 tracked 文件为准，未跟踪文件不参与；staged 检查读取 `git diff --cached`（`ACMRD`，不做 rename 折叠）。
+
+range 检查用 `git rev-list --reverse --parents` 枚举提交（含 merge commit），普通提交用 `git diff-tree --no-commit-id --name-status --no-renames -r -z <commit>`、merge 提交用第一父做同样的 diff，避免“冲突解决时夹带改动”成为盲区。对每个提交独立套用 doc-map：删除文档不算更新，删除代码仍算变更，warn 域只提醒。任何提交触碰 `docs/reviews/**` 或 `docs/superpowers/**` 一律失败（`frozen-evidence-modified`），与 doc-map 是否命中、是否有跳过 trailer 无关——冻结证据不参与“同步文档”的豁免。基线优先级：显式 `--range <base>..<head>` > doc-map `rangeBaseline`（一次性初始化边界）> `origin/main..HEAD` > `main..HEAD`；`rangeBaseline` 存在但无效或三种来源都不可用时以 `2` 失败。`--range` 与 `--staged` 同用 → `2`；空范围 → `0`。
 
 ### 10.2 退出码
 
 | 退出码 | 含义 | 处理 |
 |---|---|---|
 | `0` | 通过，或按 §10.3 显式跳过 | 可继续 |
-| `1` | 校验失败：结构/索引/链接/命名/行数/doc-map/staged 缺文档 | 修文档或修代码映射，不得忽略 |
-| `2` | 工具或配置错误：非 git 仓库、缺 `docs/`、缺/损坏 `doc-map.json`、未知参数、Node 版本不足，或无法读取 tracked 源码 / docs 子树（EACCES、EPERM 等） | 先修环境，不得当作通过 |
+| `1` | 校验失败：结构/索引/链接/命名/行数/doc-map/staged 缺文档/range 内提交缺文档 | 修文档或修代码映射，不得忽略 |
+| `2` | 工具或配置错误：非 git 仓库、缺 `docs/`、缺/损坏 `doc-map.json`、未知参数、`--range` 基线不存在或 `rangeBaseline` 无效、Node 版本不足，或无法读取 tracked 源码 / docs 子树 / git 对象（EACCES、EPERM 等） | 先修环境，不得当作通过 |
 
-`--json` 输出用于自动化：全量/失败包含 `mode`、`ok`、`issues`；staged 包含 `failures`、`warnings`、`impacts`；工具错误包含 `error`；跳过包含 `skipped` 与 `reason`。
+`--json` 输出用于自动化：全量/失败包含 `mode`、`ok`、`issues`；staged 包含 `failures`、`warnings`、`impacts`；range 包含 `{ mode: "range", ok, range, commits, failures, warnings }`，其中 `commits` 是 `{commit, subject}` 列表，doc-map 失败项带 `rule`、`codeFiles`、`missingDocs`，冻结证据失败项带 `code: "frozen-evidence-modified"` 与 `paths`；工具错误包含 `error`；跳过包含 `skipped` 与 `reason`。
 
 ### 10.3 跳过开关
 
@@ -146,10 +150,13 @@
   ```
 
 - `commit-msg` 钩子强制校验该行；`pre-commit` 仍会先拒绝 `docs/reviews/**` 变更。跳过开关不影响 `typecheck`、测试、构建、服务端门禁与 e2e。
+- 该开关只影响全量与 staged 检查；`check:docs:range` 始终执行，不会因为环境变量而跳过。带合法 trailer 的提交在 range 检查中才被豁免缺失文档；缺行或理由少于 8 个字符仍判失败。
+- 本地 Git 没有机制从技术上阻止 `git commit --no-verify`：它绕过的是 hook，而不是文档同步义务。防线是 `.githooks/pre-push`（range 不通过直接拒绝推送，也不转发 LFS）与 CI root job 的 `check:docs:range`（检查落地后的提交历史）；两者以 `2` 表示门禁没跑成，以 `1` 表示确有提交缺文档。
 - 不得用 `--no-verify`、删除 hook、改检查器规则或放宽 doc-map 来绕过失败；这些都属于审查红旗，需要在交付说明中说明并获得批准。
 
 ## 11. 违规处理
 
 - 检查失败先判断是文档缺失、链接失效、命名违规还是代码注释引用了不存在的文档；按根因修复，不删除检查项。
+- `check:docs:range` 失败时先看报告里的提交哈希与 `codeFiles`：回到该提交补文档（或在确实无需文档的提交信息里写合法 trailer），不得通过移动基线、改 doc-map 或放宽规则消掉失败。
 - 文档确实要废弃时，同提交删除文件、更新 `docs/README.md`、更新 `docs/doc-map.json` 与所有入链。
 - 规则本身需要调整时，先改 `docs/standards/documentation.md` 与 `AGENTS.md`，再改检查器和测试；不得只改实现让旧测试变绿。

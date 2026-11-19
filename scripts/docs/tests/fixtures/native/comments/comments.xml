@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 资源契约见 docs/guides/ghost-xml.md -->
+<resources>
+  <item name="root" value="docs/guides/ghost-xml-attr.md" />
+  <string name="text">docs/guides/ghost-xml-text.md</string>
+</resources>

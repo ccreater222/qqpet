@@ -6,15 +6,16 @@
 
 代码位置写作 `path:line`。省略前缀的约定：`acceptance-gate.mjs`、`validate-evidence.mjs` 在 `scripts/`；`acceptance-evidence.mjs` 在 `scripts/lib/`；`ci.yml`、`build.yml` 在 `.github/workflows/`；`package.json` 指仓库根。
 
-根 `package.json` 的脚本即事实源（`package.json:10-33`），服务端脚本在 `server/package.json:13-23`。
+根 `package.json` 的脚本即事实源（`package.json:10-34`），服务端脚本在 `server/package.json:13-23`。
 
 | 命令 | 实际执行 | 何时必须 | 退出码 |
 | --- | --- | --- | --- |
 | `npm run typecheck` | 四套 `tsc --noEmit`：node、web、harmony、e2e（`package.json:14`） | 任何 TypeScript 改动 | 0/非 0 |
-| `npm run test:compat` | `node --experimental-strip-types --test --test-concurrency=1 scripts/tests/*.test.mjs`（`package.json:30`） | `src/shared/**`、`src/main/**`、移动桥、脚本改动 | 0/1 |
+| `npm run test:compat` | `node --experimental-strip-types --test --test-concurrency=1 scripts/tests/*.test.mjs`（`package.json:31`） | `src/shared/**`、`src/main/**`、移动桥、脚本改动 | 0/1 |
 | `npm run test:docs` | docs 检查器自身的单元/契约测试（`scripts/docs/tests/*.test.mjs`） | 任何 `scripts/docs/**` 改动 | 0/1 |
 | `npm run check:docs` | 全量文档结构、H1/结论/行数、索引、链接、命名、代码注释引用、doc-map 死规则；I/O 错误显式失败 | 任何 `docs/**`、`AGENTS.md`、`CLAUDE.md`、doc-map 改动 | 0/1/2 |
 | `npm run check:docs:staged` | staged 代码是否同步了 `require` 文档、`warn` 提醒、index/worktree 一致性 | 提交前（`pre-commit` 自动执行） | 0/1/2 |
+| `npm run check:docs:range` | 逐提交检查（默认从 doc-map `rangeBaseline` 初始化边界起，缺失回退 `origin/main..HEAD`/`main..HEAD`；可显式传 `<base>..<head>`）的 `require`/`warn`，并用第一父 diff 覆盖 merge commit；触碰冻结证据直接失败；忽略 `DOCS_CHECK=off` | 推送前（`pre-push` 自动执行）、CI root job | 0/1/2 |
 | `npm run build` | `electron-vite build`（主进程/preload/渲染层） | 影响打包、入口、资源、构建配置 | 0/非 0 |
 | `npm run build:android-web` / `build:harmony-web` / `build:ios-web` | 三个平台 Web 产物到 `out/{android,harmony,ios}` | 影响对应平台 | 0/非 0 |
 | `npm --prefix server run typecheck` | `tsc -p tsconfig.json`（`noEmit`，含 `src/**`、`test/**`、`../src/shared/**`） | 任何 `server/src/**`、`server/test/**` 改动 | 0/非 0 |
@@ -41,17 +42,23 @@ node --experimental-strip-types --test scripts/tests/sync-protocol.test.mjs
 
 ### 2.1 文档检查器：0 / 1 / 2
 
-`check:docs` 与 `check:docs:staged` 的退出码是三态的，含义不可互换（`AGENTS.md` §5.1）：
+`check:docs`、`check:docs:staged` 与 `check:docs:range` 的退出码是三态的，含义不可互换（`AGENTS.md` §5.1）：
 
 | 退出码 | 含义 | 处理方式 |
 | --- | --- | --- |
 | `0` | 全部检查通过 | 可继续 |
-| `1` | 校验失败：结构、索引、链接、命名、行数、doc-map 规则、staged 缺文档 | 修文档/代码，不得跳过 |
-| `2` | 工具或配置错误：非 git 仓库、缺 `docs/`、缺或损坏 `doc-map.json`、未知参数、Node 版本不足，或无法读取 tracked 源码 / docs 子树（EACCES、EPERM 等） | 修环境或工具；**这不代表检查通过** |
+| `1` | 校验失败：结构、索引、链接、命名、行数、doc-map 规则、staged 缺文档、range 内某个提交缺文档 | 修文档/代码，不得跳过 |
+| `2` | 工具或配置错误：非 git 仓库、缺 `docs/`、缺或损坏 `doc-map.json`、未知参数、`--range` 基线不存在、Node 版本不足，或无法读取 tracked 源码 / docs 子树 / git 对象（EACCES、EPERM 等） | 修环境或工具；**这不代表检查通过** |
 
 `2` 的存在意义是把「检查没完成」和「检查发现有错」分开。把 `2` 当成 `0` 或直接跳过，等于让文档门禁失效。
 
-跳过开关只有一个：`DOCS_CHECK=off`，且仅跳过**文档检查**；提交信息必须包含一行 `Docs-Check: off — <至少 8 个字符的理由>`，由 `commit-msg` 钩子强制校验。它不影响 `typecheck`、测试、构建、服务端门禁。不得用 `--no-verify` 绕过 hook。
+`check:docs:range` 逐提交比对 doc-map：`require` 命中代码但同一提交没有更新映射文档 → `1`；`warn` 只打印提醒 → `0`；删除文档不算更新，删除代码仍算变更；空范围 → `0`；`--range` 与 `--staged` 同用 → `2`。它包含 merge commit，并用第一父 diff 评估冲突解决时引入的改动；任何提交触碰 `docs/reviews/**` 或 `docs/superpowers/**` → `1`（`frozen-evidence-modified`），即使 doc-map 未命中或提交信息带跳过 trailer。
+
+基线优先级：显式 `--range <base>..<head>` > doc-map 顶层 `rangeBaseline`（一次性初始化边界，完整 40 位 SHA）> `origin/main..HEAD` > `main..HEAD`。`rangeBaseline` 只是初始化边界，不是免检开关：基线之后仍逐提交检查；字段存在但不是仓库内提交或格式非法 → `2`，三种来源都不可用 → `2`。
+
+跳过开关只有一个：`DOCS_CHECK=off`，且只跳过全量与 staged 两种**文档检查**；提交信息必须包含一行 `Docs-Check: off — <至少 8 个字符的理由>`，由 `commit-msg` 钩子强制校验。它不影响 `typecheck`、测试、构建、服务端门禁，也不会让 `check:docs:range` 放行——range 只接受提交信息里带合法 trailer 的豁免。
+
+本地 Git 无法从技术上阻止 `git commit --no-verify`；防绕过依赖 `.githooks/pre-push`（range 不通过即拒绝推送，且不转发 LFS）与 CI root job 的 `check:docs:range`。不得用 `--no-verify` 绕过 hook。
 
 ### 2.2 验收门禁：0 / 1
 
@@ -121,7 +128,8 @@ node --experimental-strip-types --test scripts/tests/sync-protocol.test.mjs
 ## 6. Hook 与 staged 一致性
 
 - `npm run hooks:install` 把 `core.hooksPath` 指向仓库内的 `.githooks`；安装器在已有自定义 hook、非仓库目录、Node 版本不足时显式失败，不覆盖用户配置。
-- LFS 旧 hook 通过 `.githooks/post-checkout`、`post-commit`、`post-merge`、`pre-push` 转发到 `$(git rev-parse --git-common-dir)/hooks/<hook>`；旧 hook 不存在或不可执行时 no-op，不能因为切换 hooksPath 而禁用 LFS。
+- LFS 旧 hook 通过 `.githooks/post-checkout`、`post-commit`、`post-merge` 转发到 `$(git rev-parse --git-common-dir)/hooks/<hook>`；旧 hook 不存在或不可执行时 no-op，不能因为切换 hooksPath 而禁用 LFS。
+- `pre-push` 是防绕过门禁：先解析 `.githooks/runtime`（缺失、不可执行或 Node < 22 → `2`），再跑 `check-docs.mjs --range`；range 非 `0` 直接退出且**不转发**旧 LFS hook；range 通过后才转发旧 `pre-push`（同一 common-dir 定位），参数与退出码原样透传。
 - `pre-commit` 的顺序是：先拒绝任何 `docs/reviews/**` 的 staged 变更（冻结区不可改），再跑全量 `check:docs`，最后跑 `check:docs:staged` 校验本次 staged 代码是否同步了文档。
 - `commit-msg` 只在提交信息含跳过声明时校验 `Docs-Check: off — <理由>`。
 - `check:docs:staged` 的判定基于 index 与工作区的对比：`require` 规则命中的代码有 staged 变更而目标文档没有同批更新 → 1；`warn` 规则只提示 → 0；删除文档不算更新；index 与 worktree 对同一路径的分歧 → 1。完整规则见 `docs/standards/documentation.md` 与 `docs/doc-map.json`。
@@ -130,11 +138,13 @@ node --experimental-strip-types --test scripts/tests/sync-protocol.test.mjs
 
 | CI 作业（`.github/workflows/ci.yml`） | 覆盖 |
 | --- | --- |
-| `root`（`:18-47`） | `typecheck`、`test:docs`、`check:docs`、`test:compat`、`build`、三个平台 Web 构建 |
-| `server`（`:46-61`） | `npm --prefix server run typecheck`、`npm --prefix server test` |
-| `e2e`（`:64-101`） | `xvfb-run -a npm run test:e2e`，随后 `validate-evidence.mjs e2e …` |
-| `docker-smoke`（`:104-145`） | `smoke:compose`、`smoke:docker`、`validate:evidence -- docker …` |
-| `proxy-wss`（`:148-171`） | `smoke:proxy`、`validate:evidence -- proxy …` |
+| `root`（`:18-48`） | `typecheck`、`test:docs`、`check:docs`、`check:docs:range`、`test:compat`、`build`、三个平台 Web 构建 |
+| `server`（`:49-64`） | `npm --prefix server run typecheck`、`npm --prefix server test` |
+| `e2e`（`:65-104`） | `xvfb-run -a npm run test:e2e`，随后 `validate-evidence.mjs e2e …` |
+| `docker-smoke`（`:105-148`） | `smoke:compose`、`smoke:docker`、`validate:evidence -- docker …` |
+| `proxy-wss`（`:149-175`） | `smoke:proxy`、`validate:evidence -- proxy …` |
+
+`root` 作业以 `fetch-depth: 0` 检出并直接运行 `npm run check:docs:range`：基线由 `docs/doc-map.json` 的 `rangeBaseline`（初始化边界）决定，因此 fork PR 也不会把上游无关历史算进来；基线缺失时回退 `origin/main`/`main`，三者都不可用时以 `2` 失败而不是放行。基线之后的所有提交仍逐提交检查。
 
 `build.yml` 的 `acceptance` 作业直接 `uses: ./.github/workflows/ci.yml`（`build.yml:9-13`），发布产物依赖同一套验收，不存在"发布专用的宽松检查"。
 
@@ -161,6 +171,9 @@ npm run check:docs
 
 # 提交前 staged 同步检查
 npm run check:docs:staged
+
+# 逐提交检查 origin/main..HEAD（pre-push 与 CI 同款；可用 --range <base>..<head> 覆盖）
+npm run check:docs:range
 
 # 代码与产物门禁
 npm run typecheck
