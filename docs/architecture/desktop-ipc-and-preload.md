@@ -75,7 +75,7 @@
 - **订阅器一律「替换」而不是「追加」**：`replaceListener` 先 `removeAllListeners` 再 `on`（`src/preload/renderer-api.ts:46-53`）。preload 生命周期长于页面刷新，追加会跨页面泄漏监听器；`src/preload/index.ts:105` 有同样的注释性约定，`storage`/`packs`/`voice`/`lan` 等订阅器全部照此实现。
 - **平台专有字段用条件展开**：`setHitShape` 仅在 linux 暴露（`src/preload/index.ts:85`），`popupTrayMenu`/`onTrayMenuAction` 仅在 darwin 暴露（`src/preload/index.ts:90-93`）。渲染层据此以 `=== undefined` 判断「该宿主没有这个能力」。
 
-`capabilities` 的语义是「只在明确为 `false` 时表示不支持」，未声明即视为可用（渲染层判据见 `src/renderer/ui/setup.ts:104-117`）。移动桥恰好相反地显式写 `serverMode: false`：Android（`src/android/bridge.ts:302-307`）、iOS（`src/ios/bridge.ts:73-83`）。桌面 preload 不声明 `localRepositoryV2`，因为渲染层优先用 `runtimeInfo()` 的真实返回值，只有该调用失败时才回落到 `capabilities.localRepositoryV2`（`src/renderer/bootstrap.ts:8-17`）。
+`capabilities` 的语义是「只在明确为 `false` 时表示不支持」，未声明即视为可用（渲染层判据见 `src/renderer/ui/setup.ts:104-117`）。移动桥不再一律写 `serverMode: false`：**Android 例外**——原生能力齐备时 `capabilities.serverMode = true` 且新增 `serverModeClientOnly = true`，表示「只能作为服务器宠物客户端，不能上传本机宠物或做权威交接」（`src/android/bridge.ts:364-370`、`src/shared/ipc.ts:285` 的 `QQPetApi.capabilities.serverModeClientOnly`）；原生能力缺失时两者都回到 `false` 并给出原因，本机模式不受影响。iOS/HarmonyOS 仍显式 `serverMode: false`（`src/ios/bridge.ts:73-83`）。桌面 preload 不声明 `localRepositoryV2`，因为渲染层优先用 `runtimeInfo()` 的真实返回值，只有该调用失败时才回落到 `capabilities.localRepositoryV2`（`src/renderer/bootstrap.ts:8-17`）。
 
 ## 4. sender 信任模型
 
@@ -110,6 +110,8 @@
 - 冻结后本地运行时的投影/状态/命令结果不再推给渲染进程（`setSendEnabled`，`src/main/renderer-runtime.ts:161-167`）。
 
 `capabilities.serverMode` 是「宿主是否编进了 server 模式」，`runtimeInfo().serverMode` 是「此刻权威是否在服务器」，两者不能互相替代。
+
+Android 走的是同一组语义、不同实现：`src/mobile/server-mode.ts` 的 `createMobileServerRuntime` 包装 `MobileLocalRepositoryBridge`（本机权威）与 `RemoteRepository`（服务器权威），以 `activeMode` 路由 `load/command/localSettings/onProjection/onResync/onCommandResult/onSyncStatus/getProjection/getStatus/requestResync/flush`。server 激活时本机运行时 `suspend()`（停调度、不写盘），切回本机 `resume()`；**本机宠物只暂停，不归档、不上传**。因此移动端没有 `DesktopStorageController`、没有 `storage:*` IPC 通道，也不存在 `pet:remote-*` 管理面；`window.qqpet.storage` 由移动宿主的 `StorageApi` 子集直接实现，UI 分支见 `src/renderer/ui/storage.ts:259-299`（动作处理 `:301-365`）。配对、token、投影缓存的持久化与失败关闭见 `docs/architecture/native-bridge.md` §4.1。
 
 ## 6. 渲染进程边界
 
@@ -183,6 +185,6 @@ npm run test:e2e
 - **修改 `SavePatch` 拆分规则**：只改 `DEVICE_LOCAL_*`/`PRESENTATION_ONLY_*` 白名单（`src/shared/sync/data-boundary.ts:51-81`），禁止在 `classifySavePatch` 里加特例，否则「规范字段不可被渲染进程改写」这条不变量会失守。
 - **给 `RendererProjection` 加字段**：`src/shared/renderer-api.ts:14-30` 与 `src/main/renderer-runtime.ts:310-322` 都要动，并检查移动桥是否也需要同名字段（`src/android/bridge.ts`、`src/ios/bridge.ts`）。
 - **改变启动权威判定**：`desktopStartupAuthority` 是唯一入口，测试与 E2E 都依赖它（`scripts/tests/renderer-c7-startup.test.mjs`）；改动需同时更新 `src/main/index.ts:116-123` 的错误文案与退出路径。
-- **移动端**：任何依赖 `window.qqpet.storage`/`remote`/`packs` 的新代码都必须在移动桥下保持可缺席，桌面 preload 的 `capabilities` 与移动桥的显式 `false` 是两套契约，不要合并。
+- **移动端**：任何依赖 `window.qqpet.storage`/`remote`/`packs` 的新代码都必须在移动桥下保持可缺席。桌面 preload 的 `capabilities` 与移动桥是两套契约：iOS/HarmonyOS 显式 `serverMode: false`，Android 在原生能力齐备时 `serverMode/serverModeClientOnly = true` 但只实现客户端子集（无上传、无交接、无备份），不要按桌面的 `StorageApi` 全量假设。
 
 历史验收证据见 [C12 final gate](../reviews/c12-final-gate/2026-11-18-c12-final-gate.md)；IPC 与运行时的历史设计取径见冻结文档 [local-or-server pet data design](../reviews/legacy/2026-10-20-local-or-server-pet-data-design.md)（只读，勿改）。

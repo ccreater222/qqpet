@@ -10,7 +10,8 @@ import { normalizeUpstreamUrl } from '../shared/upstream'
 import { nextBounds } from '../mobile/bounds'
 import { cover } from '../mobile/overlay'
 import type { Fetch, Point, QQPetApi, TrayClick, TrayState } from '../shared/ipc'
-import { legacyRendererStatus } from '../shared/renderer-api'
+import { legacyRendererStatus, type RendererProjection } from '../shared/renderer-api'
+import type { OrderedEvent } from '../shared/pet-runtime/events'
 import type { SaveData } from '../shared/save'
 import { applyPatch, buried, petOf, startSave } from '../shared/save-logic'
 import { TRAY_STATES, trayTip } from '../shared/tray'
@@ -24,6 +25,8 @@ import {
   type MobileLocalRepositoryBridge,
 } from '../mobile/local-repository-bridge'
 import { forwardGamePlayed, forwardOpenGame } from '../mobile/game-played'
+import { createMobileServerRuntime, type MobileServerNative, type MobileServerRuntime } from '../mobile/server-mode'
+import { APP_VERSION } from '../shared/version'
 
 /** The `QQPetNative` JavaScript interface of PetService. Async calls answer through `__qqpet.resolve(id, value, error)`. */
 interface Native {
@@ -38,6 +41,13 @@ interface Native {
   /** Separate legacy save.json read with missing/error discrimination. */
   readLegacySave?(): string
   writeAtomic?(name: string, text: string): boolean
+  /** Removes one allowlisted state file; absent on shells without the server-mode update. */
+  removeStateFile?(name: string): boolean
+  /** Keystore-wrapped device token; the plaintext never reaches a file or a log. */
+  saveRemoteToken?(token: string): boolean
+  /** Encoded `{"status":"ok","text":string|null}` or `{"status":"error","error":string}`. */
+  loadRemoteToken?(): string
+  clearRemoteToken?(): boolean
   /** Resolves to `{"status": n, "body": "…"}` JSON. */
   http(id: number, method: string, url: string, headers: string, body: string | null): void
   /** Resolves to "true" once written, null when cancelled. */
@@ -122,6 +132,53 @@ if (LOCAL_RUNTIME_V2_FLAG) {
       })
     } catch (error) {
       localRuntimeFailure = error instanceof Error ? error.message : String(error)
+    }
+  }
+}
+
+/**
+ * Android server mode needs the native atomic-state methods plus the Keystore
+ * token methods. A shell that lacks any of them keeps the local-only bridge
+ * unchanged and reports an explicit capability reason instead of faking it.
+ */
+const nativeServerIo: MobileServerNative = {
+  read: (name) => native.read(name),
+  readStateFile: (name) => {
+    const read = native.readStateFile?.bind(native)
+    if (typeof read !== 'function') throw new Error('native_server_mode_capability_missing: readStateFile')
+    return read(name)
+  },
+  writeAtomic: (name, text) => {
+    const write = native.writeAtomic?.bind(native)
+    if (typeof write !== 'function') throw new Error('native_server_mode_capability_missing: writeAtomic')
+    return write(name, text)
+  },
+  ...(typeof native.removeStateFile === 'function' ? { removeStateFile: native.removeStateFile.bind(native) } : {}),
+  ...(typeof native.saveRemoteToken === 'function' ? { saveRemoteToken: native.saveRemoteToken.bind(native) } : {}),
+  ...(typeof native.loadRemoteToken === 'function' ? { loadRemoteToken: native.loadRemoteToken.bind(native) } : {}),
+  ...(typeof native.clearRemoteToken === 'function' ? { clearRemoteToken: native.clearRemoteToken.bind(native) } : {}),
+}
+let serverRuntime: MobileServerRuntime | null = null
+let serverRuntimeFailure: string | undefined
+if (localRuntime !== null) {
+  if (
+    typeof native.readStateFile !== 'function'
+    || typeof native.writeAtomic !== 'function'
+    || typeof native.removeStateFile !== 'function'
+    || typeof native.saveRemoteToken !== 'function'
+    || typeof native.loadRemoteToken !== 'function'
+    || typeof native.clearRemoteToken !== 'function'
+  ) {
+    serverRuntimeFailure = 'native_server_mode_capability_missing'
+  } else {
+    try {
+      serverRuntime = createMobileServerRuntime({
+        local: localRuntime,
+        native: nativeServerIo,
+        appVersion: APP_VERSION,
+      })
+    } catch (error) {
+      serverRuntimeFailure = error instanceof Error ? error.message : String(error)
     }
   }
 }
@@ -306,14 +363,15 @@ listeners.outside.push(() => {
 const api: QQPetApi = {
   capabilities: {
     rotatableScreen: native.rotatableScreen?.() ?? false,
-    serverMode: false,
+    serverMode: serverRuntime !== null,
+    serverModeClientOnly: serverRuntime !== null,
     localRepositoryV2: localRuntime !== null,
     ...(localRuntimeFailure === undefined ? {} : { localRepositoryV2Reason: localRuntimeFailure }),
   },
   runtimeInfo: async () => ({
     localRepositoryV2: localRuntime !== null,
-    serverMode: false,
-    ...(localRuntimeFailure === undefined ? {} : { reason: localRuntimeFailure }),
+    serverMode: serverRuntime?.runtimeInfo().serverMode ?? false,
+    ...(localRuntimeFailure === undefined && serverRuntimeFailure === undefined ? {} : { reason: localRuntimeFailure ?? serverRuntimeFailure }),
   }),
   async command() {
     throw new Error('local runtime v2 is not active')
@@ -444,7 +502,78 @@ window.qqpet = api
   else Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
 }
 
-if (localRuntime !== null) {
+if (serverRuntime !== null) {
+  const runtime = serverRuntime
+  const localSave = api.save
+  const localExportSave = api.exportSave
+  const localImportSave = api.importSave
+  const localResetPet = api.resetPet
+  let rendererProjectionListener: ((projection: RendererProjection, events: OrderedEvent[]) => void) | null = null
+  let rendererResyncListener: ((projection: RendererProjection, events: OrderedEvent[]) => void) | null = null
+
+  api.runtimeInfo = async () => runtime.runtimeInfo()
+  api.storage = runtime.storage
+  api.load = () => runtime.load()
+  api.command = (command, options) => runtime.command(command, options)
+  api.setAdvanceWhileEmpty = async (enabled) => { await runtime.setAdvanceWhileEmpty(enabled) }
+  api.localSettings = {
+    load: () => runtime.localSettings.load(),
+    update: patch => runtime.localSettings.update(patch),
+  }
+  api.onProjection = listener => { rendererProjectionListener = listener }
+  api.onResync = listener => { rendererResyncListener = listener }
+  api.requestResync = async () => { runtime.requestResync() }
+  api.onCommandResult = listener => runtime.onCommandResult(listener)
+  api.onSyncStatus = listener => runtime.onSyncStatus(listener)
+  api.getProjection = () => runtime.getProjection()
+  api.getStatus = () => runtime.getStatus()
+  api.flush = async () => { await runtime.flush() }
+  api.save = (patch) => {
+    if (runtime.isServerActive()) throw new Error('canonical_mutation_blocked: server mode never accepts a save patch')
+    localSave(patch)
+  }
+  api.exportSave = async () => {
+    if (runtime.isServerActive() === false) return localExportSave()
+    const report = await runtime.storage.exportBundle()
+    return (await call((id) => native.exportSave(id, report.fileName, report.json))) !== null
+  }
+  api.importSave = async () => {
+    if (runtime.isServerActive()) throw new Error('unsupported: server mode does not import a local save on Android（服务器模式不支持导入本机存档）')
+    return localImportSave()
+  }
+  api.resetPet = (sex) => {
+    if (runtime.isServerActive() === false) {
+      localResetPet(sex)
+      return
+    }
+    void runtime.command({ type: 'pet.reset', payload: {} }).then(
+      (result) => {
+        if (result.status === 'applied' || result.status === 'duplicate') relaunch()
+        else console.error('pet.reset rejected:', result)
+      },
+      (error) => console.error('pet.reset failed:', error),
+    )
+  }
+  api.quit = () => {
+    void runtime.stop().catch(() => undefined).finally(() => native.quit())
+  }
+  api.onPresence = (listener) => {
+    listeners.presence.push((away) => {
+      void runtime.handlePresence(away)
+      listener(away)
+    })
+  }
+  runtime.onProjection((projection, events) => {
+    save = projection.save
+    showTray()
+    rendererProjectionListener?.(projection, events)
+  })
+  runtime.onResync((projection, events) => {
+    save = projection.save
+    showTray()
+    rendererResyncListener?.(projection, events)
+  })
+} else if (localRuntime !== null) {
   const runtime = localRuntime
   api.runtimeInfo = async () => runtime.runtimeInfo()
   api.command = runtime.command.bind(runtime)
@@ -467,11 +596,20 @@ if (localRuntime !== null) {
 }
 if (LOCAL_RUNTIME_V2_FLAG) {
   addEventListener('pagehide', () => {
-    if (leaving || localRuntime === null) return
-    void localRuntime.suspend()
+    if (leaving) return
+    if (serverRuntime !== null) {
+      void serverRuntime.handlePresence(true)
+      return
+    }
+    if (localRuntime !== null) void localRuntime.suspend()
   })
   document.addEventListener('visibilitychange', () => {
-    if (leaving || localRuntime === null) return
+    if (leaving) return
+    if (serverRuntime !== null) {
+      void serverRuntime.handlePresence(document.visibilityState === 'hidden')
+      return
+    }
+    if (localRuntime === null) return
     if (document.visibilityState === 'hidden') void localRuntime.suspend()
     else void localRuntime.resume()
   })

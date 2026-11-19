@@ -22,6 +22,9 @@ import android.graphics.drawable.Icon
 import android.graphics.PixelFormat
 import android.net.Uri
 import android.os.Build
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -42,10 +45,22 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.security.KeyStore
 import java.util.concurrent.Executors
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
+
+/** Server mode device token: AES/GCM ciphertext only, never reachable through the page file API. */
+private const val REMOTE_TOKEN_FILE = "remote-token.bin"
+private const val REMOTE_TOKEN_KEY_ALIAS = "qqpet-remote-token-v1"
+private const val REMOTE_TOKEN_KEYSTORE = "AndroidKeyStore"
+private const val REMOTE_TOKEN_TRANSFORMATION = "AES/GCM/NoPadding"
+private const val REMOTE_TOKEN_VERSION = 1
 
 /**
  * Hosts the pet page in an overlay window. The WebView keeps the screen's size
@@ -388,9 +403,14 @@ class PetService : Service() {
             tmp.renameTo(File(filesDir, name))
         }
 
-        /** Exact v2 state writes only; save.json and arbitrary app-private paths are rejected. */
+        /**
+         * Exact state writes only; save.json and arbitrary app-private paths are rejected.
+         * The server-mode files are page-owned, secret-free state; remote-token.bin is
+         * deliberately absent so the page can only reach it through the Keystore methods.
+         */
         private fun allowedStateName(name: String): Boolean {
             if (name == "save.v2.json" || name == "save.v2.json.bak" || name == "save.json.bak") return true
+            if (name == "storage-config.json" || name == "sync-config.json" || name == "remote-projection-cache.json") return true
             val prefix = "save.v2.json.corrupt-"
             if (name.startsWith(prefix) == false) return false
             val suffix = name.substring(prefix.length)
@@ -431,10 +451,30 @@ class PetService : Service() {
         @JavascriptInterface
         fun writeAtomic(name: String, text: String): Boolean {
             val target = stateFile(name) ?: return false
+            return writeBytesAtomic(target, text.toByteArray(Charsets.UTF_8))
+        }
+
+        /**
+         * Removes one allowlisted state file. The page can already replace these files through
+         * writeAtomic, so removal grants no new authority; a missing file is success.
+         */
+        @JavascriptInterface
+        fun removeStateFile(name: String): Boolean {
+            val target = stateFile(name) ?: return false
+            if (target.exists() == false) return true
+            return try {
+                target.delete()
+            } catch (_e: Exception) {
+                false
+            }
+        }
+
+        /** fsync the whole payload, then swap it in with ATOMIC_MOVE; false means fail closed. */
+        private fun writeBytesAtomic(target: File, bytes: ByteArray): Boolean {
             val tmp = File(filesDir, "." + target.name + "." + System.nanoTime() + ".tmp")
             return try {
                 FileOutputStream(tmp).use { output ->
-                    output.write(text.toByteArray(Charsets.UTF_8))
+                    output.write(bytes)
                     output.fd.sync()
                 }
                 Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
@@ -444,6 +484,88 @@ class PetService : Service() {
                 false
             }
         }
+
+        /** remote-token.bin is not in the state allowlist: only these three methods touch it. */
+        private fun tokenFile(): File = File(filesDir, REMOTE_TOKEN_FILE)
+
+        /** Loads the app's AES key, creating it on first use; the key material never leaves the Keystore. */
+        private fun tokenKey(): SecretKey {
+            val store = KeyStore.getInstance(REMOTE_TOKEN_KEYSTORE).apply { load(null) }
+            val existing = store.getEntry(REMOTE_TOKEN_KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
+            if (existing != null) return existing.secretKey
+            val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, REMOTE_TOKEN_KEYSTORE)
+            generator.init(
+                KeyGenParameterSpec.Builder(
+                    REMOTE_TOKEN_KEY_ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(256)
+                    .setRandomizedEncryptionRequired(true)
+                    .build(),
+            )
+            return generator.generateKey()
+        }
+
+        /**
+         * Encrypts the device token with AES/GCM and writes it atomically. The file layout is
+         * version(1) | ivLength(1) | iv | ciphertext, Base64 encoded. False means fail closed:
+         * no plaintext fallback exists.
+         */
+        @JavascriptInterface
+        fun saveRemoteToken(token: String): Boolean {
+            if (token.isEmpty()) return false
+            return try {
+                val cipher = Cipher.getInstance(REMOTE_TOKEN_TRANSFORMATION)
+                cipher.init(Cipher.ENCRYPT_MODE, tokenKey())
+                val iv = cipher.iv
+                val sealed = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+                val payload = ByteArray(2 + iv.size + sealed.size)
+                payload[0] = REMOTE_TOKEN_VERSION.toByte()
+                payload[1] = iv.size.toByte()
+                System.arraycopy(iv, 0, payload, 2, iv.size)
+                System.arraycopy(sealed, 0, payload, 2 + iv.size, sealed.size)
+                writeBytesAtomic(tokenFile(), Base64.encodeToString(payload, Base64.NO_WRAP).toByteArray(Charsets.UTF_8))
+            } catch (_e: Exception) {
+                false
+            }
+        }
+
+        /** Missing is ok+null; a decryption failure is an error the page must not overwrite blindly. */
+        @JavascriptInterface
+        fun loadRemoteToken(): String {
+            val file = tokenFile()
+            if (file.exists() == false) return okRead(null)
+            if (file.isFile == false) return errorRead("Remote token path is not a regular file")
+            return try {
+                val payload = Base64.decode(file.readText(), Base64.DEFAULT)
+                if (payload.size < 3 || payload[0].toInt() != REMOTE_TOKEN_VERSION) {
+                    return errorRead("Remote token payload is invalid")
+                }
+                val ivSize = payload[1].toInt()
+                if (ivSize <= 0 || payload.size <= 2 + ivSize) return errorRead("Remote token payload is truncated")
+                val cipher = Cipher.getInstance(REMOTE_TOKEN_TRANSFORMATION)
+                cipher.init(Cipher.DECRYPT_MODE, tokenKey(), GCMParameterSpec(128, payload.copyOfRange(2, 2 + ivSize)))
+                okRead(String(cipher.doFinal(payload.copyOfRange(2 + ivSize, payload.size)), Charsets.UTF_8))
+            } catch (_e: Exception) {
+                errorRead("Remote token could not be decrypted")
+            }
+        }
+
+        /** Drops the ciphertext and the Keystore key; true once the token file is gone. */
+        @JavascriptInterface
+        fun clearRemoteToken(): Boolean {
+            val file = tokenFile()
+            if (file.exists() && file.delete() == false) return false
+            try {
+                KeyStore.getInstance(REMOTE_TOKEN_KEYSTORE).apply { load(null) }.deleteEntry(REMOTE_TOKEN_KEY_ALIAS)
+            } catch (_e: Exception) {
+                // The token is already gone; a leftover key encrypts nothing.
+            }
+            return true
+        }
+
         @JavascriptInterface
         fun http(id: Int, method: String, url: String, headers: String, body: String?) = this@PetService.http(id, method, url, headers, body)
 

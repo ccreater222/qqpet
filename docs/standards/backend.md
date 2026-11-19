@@ -8,7 +8,7 @@
 - 服务端是 ESM，构建产物入口为 `server/dist/server/src/index.js`；`npm --prefix server test` 先构建再跑 `server/test/*.test.ts` 编译产物。
 - 服务端构建直接导入仓库根的 `src/shared/**`，因此 Docker 必须从仓库根构建（`server/README.md`），不能只把 `server/` 当独立上下文。
 - 一个部署只服务一个宠物家族：一个 SQLite 数据库、一个服务进程。不支持多租户、水平扩展、多写、Postgres/Redis 或客户端模拟兜底。
-- 移动端不提供 server mode：`src/main/renderer-runtime-flags.ts:61` 对 Android/iOS 返回 `mobile_server_mode_forbidden`；服务端能力仅桌面使用。
+- 移动端 server mode 分平台：**Android 客户端可以作为 server-mode 客户端**（player/owner 由服务端设备角色决定），复用 `src/shared/remote/repository.ts` 的协议状态机；本机宠物在服务器模式期间 `suspend`，不归档、不上传，切回本机恢复。iOS/HarmonyOS 仍禁止。桌面宿主侧的平台门禁 `desktopServerModeCapability` 对 android/ios 仍返回 `mobile_server_mode_forbidden`（`src/main/renderer-runtime-flags.ts:61-72`），它只服务于 Electron 的 `DesktopStorageController`（`src/main/storage-controller.ts:473`），不是移动宿主的开关——Android 的开关是 `capabilities.serverMode`/`serverModeClientOnly`（`src/android/bridge.ts:364-370`）。
 
 ## 2. 目录与职责
 
@@ -17,6 +17,8 @@
 | `src/shared/pet-runtime/**` | 宠物规则引擎、tick、RNG、会话、覆盖度 | 改动会同时影响本地与服务端权威结果 |
 | `src/shared/sync/**` | 协议类型、命令校验、数据边界、portable 导入 | 协议版本/字段变更属重大变更 |
 | `src/shared/local-repository/**` | 本地 v2 权威宿主与存储适配 | 桌面默认权威；回滚标志见 `src/main/renderer-runtime-flags.ts:8` |
+| `src/shared/remote/**` | 桌面与 Android 共用的协议状态机、URL 策略、WebSocket 适配 | 唯一实现；`src/main/remote-*.ts` 只是 `export *` shim |
+| `src/mobile/server-mode.ts`、`src/mobile/remote-token-store.ts` | Android server-mode 宿主与 Keystore token store | 只实现客户端子集；本机宠物只 suspend，不上传/不归档 |
 | `src/main/storage-controller.ts` | 本地/服务端权威切换、配对、导入导出、备份 | 必须保持单一写入者，禁止双写 |
 | `src/main/save.ts`、`src/main/atomic-write.ts` | 旧版本地存档与原子写 | 旧写手不得与 v2 权威共存 |
 | `server/src/index.ts` | 服务装配、HTTP/WS、启动/关闭 | 健康检查与失败关闭入口 |
@@ -37,6 +39,7 @@
 - **权威 fencing**：authority 由 `authorityId`、`epoch`、`restoreGeneration` 标识；恢复/回滚必须推进 generation 并更换 authority UUID。数据库与外部 restore-generation 文件必须一致，否则启动失败关闭（`server/src/cli.ts:323`）。
 - **数据边界**：`src/shared/sync/data-boundary.ts:70` 定义永不上传的设备本地键（`aiKey`、`searchKey`、`webhookToken` 等）；服务端不得向客户端返回存档 JSON、配对码、设备 token、会话答案、答案键或其它设备 token（`server/README.md` 的 health/protocol 契约）。
 - **认证边界**：配对码与设备 token 只在首帧 `hello` 传输；服务端只存哈希，明文只返回一次；吊销在每条命令前复核（`server/src/auth.ts`）。
+- **移动单写者**：Android server mode 激活时本机运行时 `suspend`（停调度、不写盘），local active 时 remote 不接收命令；同一时刻只有一个 activeMode。token 只以 Keystore AEAD 密文落盘，`remote-token.bin` 不在页面可写文件白名单（见 `docs/architecture/native-bridge.md` §4.1）。
 - **健康检查分级**：`/healthz` 只证明 HTTP 可响应；`/readyz` 要求 DB、scheduler、canonical state、authority 就绪；公开 `/health` 与 `/readyz` 只返回聚合字段，详细诊断需 owner token。
 
 ## 4. 协议约束
