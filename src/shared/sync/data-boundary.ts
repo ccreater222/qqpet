@@ -355,6 +355,102 @@ export function filterNeverUpload<T>(value: T): T {
   return filter(value, 0) as T
 }
 
+const PET_COMPUTEDL_INFO_KEYS = [
+  'level', 'upGrowth', 'nextGrowth', 'hungerMax', 'cleanMax', 'healthMax', 'moodMax',
+] as const
+const STUDY_INFO_KEYS = [
+  'chinese', 'mathematics', 'politics', 'music', 'art', 'manner', 'pe', 'labouring', 'wushu',
+] as const
+const ACTIVE_OPTION_KEYS = ['work', 'study', 'trip', 'ill', 'die'] as const
+const SELF_GOOD_DATAS_KEYS = [
+  'food', 'clean', 'medicine', 'background', 'toy', 'nums', 'service', 'work', 'study', 'trip',
+] as const
+const SELF_GOOD_USE_OPTION_KEYS = ['background', 'food', 'clean', 'toy'] as const
+const GAME_SAVE_DATAS_NUMBER_KEYS = [
+  'fishing_harvestfish', 'travel_china_num', 'ddw', 'yyds',
+] as const
+
+/**
+ * Canonical groups may be absent from an older save because the import/migration boundary fills
+ * them (`normalizeSharedSaveDefaults`). A present non-null group, however, must already have the
+ * shape the runtime indexes into: garbage there used to slip through and surface as `busy` or
+ * `internal` on the first command/tick instead of a schema error at the boundary.
+ */
+function optionalCanonicalGroup(value: unknown, path: string): Record<string, unknown> | null {
+  if (value === undefined || value === null) return null
+  requireRecord(value, path)
+  return value
+}
+
+function assertSharedCanonicalGroups(value: Record<string, unknown>): void {
+  const computed = optionalCanonicalGroup(value.petComputedlInfo, '$.shared.petComputedlInfo')
+  if (computed !== null) {
+    for (const key of PET_COMPUTEDL_INFO_KEYS) {
+      if (computed[key] !== undefined) requireFiniteNumber(computed[key], '$.shared.petComputedlInfo.' + key)
+    }
+  }
+
+  const study = optionalCanonicalGroup(value.studyInfo, '$.shared.studyInfo')
+  if (study !== null) {
+    for (const subject of STUDY_INFO_KEYS) {
+      if (study[subject] !== undefined) requireFiniteNumber(study[subject], '$.shared.studyInfo.' + subject)
+    }
+  }
+
+  const active = optionalCanonicalGroup(value.activeOption, '$.shared.activeOption')
+  if (active !== null) {
+    for (const kind of ACTIVE_OPTION_KEYS) {
+      // The runtime never reads `die` and old saves may carry any value there; only the kinds
+      // that actually drive `isBusy`/activity commands are held to the string-or-null contract.
+      if (kind === 'die') continue
+      const entry = active[kind]
+      if (entry !== undefined && entry !== null && typeof entry !== 'string') {
+        failSchema('invalid_schema', '$.shared.activeOption.' + kind, 'expected a string or null')
+      }
+    }
+  }
+
+  const goods = optionalCanonicalGroup(value.selfGoodDatas, '$.shared.selfGoodDatas')
+  if (goods !== null) {
+    for (const group of SELF_GOOD_DATAS_KEYS) {
+      const entries = goods[group]
+      if (entries === undefined || entries === null) continue
+      if (Array.isArray(entries) === false || (entries as unknown[]).some(entry => typeof entry !== 'string')) {
+        failSchema('invalid_schema', '$.shared.selfGoodDatas.' + group, 'expected a string list')
+      }
+    }
+  }
+
+  const timed = optionalCanonicalGroup(value.selfGoodUseOption, '$.shared.selfGoodUseOption')
+  if (timed !== null) {
+    for (const type of SELF_GOOD_USE_OPTION_KEYS) {
+      const entry = timed[type]
+      if (entry === undefined || entry === null) continue
+      const path = '$.shared.selfGoodUseOption.' + type
+      requireRecord(entry, path)
+      if (typeof entry.id !== 'string') failSchema('invalid_schema', path + '.id', 'expected a string')
+      requireFiniteNumber(entry.left, path + '.left')
+    }
+  }
+
+  const game = optionalCanonicalGroup(value.gameSaveDatas, '$.shared.gameSaveDatas')
+  if (game !== null) {
+    if (game.travel_china !== undefined && Array.isArray(game.travel_china) === false) {
+      failSchema('invalid_schema', '$.shared.gameSaveDatas.travel_china', 'expected a list')
+    }
+    for (const key of GAME_SAVE_DATAS_NUMBER_KEYS) {
+      if (game[key] !== undefined) requireFiniteNumber(game[key], '$.shared.gameSaveDatas.' + key)
+    }
+  }
+
+  if (value.illustrated !== undefined && value.illustrated !== null) {
+    const illustrated = value.illustrated
+    if (Array.isArray(illustrated) === false || (illustrated as unknown[]).some(entry => typeof entry !== 'string')) {
+      failSchema('invalid_schema', '$.shared.illustrated', 'expected a string list')
+    }
+  }
+}
+
 export function assertSharedSaveData(value: unknown): asserts value is SharedSaveData {
   try {
     assertJsonSafe(value)
@@ -377,6 +473,7 @@ export function assertSharedSaveData(value: unknown): asserts value is SharedSav
     if (typeof blob !== 'string') failSchema('invalid_schema', '$.shared.saveJsonData.' + key, 'expected a JSON string')
     assertCanonicalSaveJsonBlob(key, blob, '$.shared.saveJsonData.' + key)
   }
+  assertSharedCanonicalGroups(value)
 }
 
 export function isSharedSaveData(value: unknown): value is SharedSaveData {
