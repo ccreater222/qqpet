@@ -1,0 +1,86 @@
+#!/bin/sh
+# qqpet-docs-hook: managed
+# 推送前门禁：先解析运行时并跑逐提交文档检查（--range），通过后再转发旧
+# LFS pre-push。docs 检查失败时直接退出，不执行任何旧 hook。
+set -u
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "docs check failed: current directory is not a git repository." >&2
+  exit 2
+}
+cd "$REPO_ROOT" || exit 2
+
+# 1. runtime 必须存在、可执行且 Node >= 22。
+RUNTIME_FILE="$REPO_ROOT/.githooks/runtime"
+if [ ! -f "$RUNTIME_FILE" ]; then
+  echo "docs check failed: .githooks/runtime is missing." >&2
+  echo "Run npm run hooks:install, then push again." >&2
+  exit 2
+fi
+
+RUNTIME=$(cat "$RUNTIME_FILE")
+if [ -z "$RUNTIME" ] || [ ! -x "$RUNTIME" ]; then
+  echo "docs check failed: .githooks/runtime is not an executable Node." >&2
+  echo "Run npm run hooks:install, then push again." >&2
+  exit 2
+fi
+
+NODE_VERSION=$("$RUNTIME" --version 2>/dev/null) || {
+  echo "docs check failed: cannot read Node version from .githooks/runtime." >&2
+  exit 2
+}
+NODE_MAJOR=${NODE_VERSION#v}
+NODE_MAJOR=${NODE_MAJOR%%.*}
+case "$NODE_MAJOR" in
+  ''|*[!0-9]*)
+    echo "docs check failed: unsupported Node version '$NODE_VERSION'." >&2
+    exit 2
+    ;;
+esac
+if [ "$NODE_MAJOR" -lt 22 ]; then
+  echo "docs check failed: Node.js 22+ is required, current version is $NODE_VERSION." >&2
+  exit 2
+fi
+
+# 2. 逐提交文档检查。range 模式无视 DOCS_CHECK=off，--no-verify 无法静默绕过。
+"$RUNTIME" "$REPO_ROOT/scripts/docs/check-docs.mjs" --range
+DOCS_STATUS=$?
+if [ "$DOCS_STATUS" -ne 0 ]; then
+  exit "$DOCS_STATUS"
+fi
+
+# 3. 转发旧 LFS pre-push。用 common dir 定位旧默认 hooks 目录，
+#    避免 --git-path hooks 跟随 core.hooksPath 指回自己。
+COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
+case "$COMMON_DIR" in
+  /*) ;;
+  *) COMMON_DIR="$REPO_ROOT/$COMMON_DIR" ;;
+esac
+
+LEGACY="$COMMON_DIR/hooks/pre-push"
+
+canonical_path() {
+  target=$1
+  if command -v realpath >/dev/null 2>&1; then
+    if resolved=$(realpath "$target" 2>/dev/null); then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+  dir=$(dirname "$target")
+  base=$(basename "$target")
+  if resolved_dir=$(cd "$dir" 2>/dev/null && pwd -P); then
+    printf '%s/%s\n' "$resolved_dir" "$base"
+  else
+    printf '%s\n' "$target"
+  fi
+}
+
+if [ -x "$LEGACY" ]; then
+  SELF=$(canonical_path "$0")
+  LEGACY_REAL=$(canonical_path "$LEGACY")
+  if [ "$LEGACY_REAL" != "$SELF" ]; then
+    exec "$LEGACY" "$@"
+  fi
+fi
+exit 0

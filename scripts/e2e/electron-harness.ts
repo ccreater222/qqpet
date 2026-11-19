@@ -6,7 +6,7 @@
  * directory, and exercises the production RemoteRepository and WebSocket
  * transport against a real standalone server. It has no BrowserWindow and no
  * renderer, so it proves the main-process repository/process boundary but not
- * renderer/GUI integration. See docs/superpowers/acceptance/ for the exact
+ * renderer/GUI integration. See docs/reviews/c12-final-gate/ for the exact
  * claim boundary.
  */
 import { app } from 'electron'

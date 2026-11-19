@@ -889,12 +889,12 @@ test('the gate summary records the real report evidence and report digests', () 
 test('git status parsing includes untracked paths and both sides of renames', () => {
   const entries = parseGitStatusPorcelain(
     '?? src/new-source.ts\0'
-    + ' M docs/superpowers/acceptance/artifacts/c12-e2e/report.json\0'
+    + ' M .agent-reports/acceptance/artifacts/c12-e2e/report.json\0'
     + 'R  src/new-name.ts\0src/old-name.ts\0',
   )
   assert.deepEqual(entries, [
     { status: '??', path: 'src/new-source.ts' },
-    { status: ' M', path: 'docs/superpowers/acceptance/artifacts/c12-e2e/report.json' },
+    { status: ' M', path: '.agent-reports/acceptance/artifacts/c12-e2e/report.json' },
     { status: 'R ', path: 'src/new-name.ts', previousPath: 'src/old-name.ts' },
   ])
 })
@@ -907,21 +907,21 @@ test('only explicit acceptance artifacts and generated temp paths are allowed ga
     disallowedPaths: [],
   })
   const generated = evaluateWorkingTree([
-    { status: ' M', path: 'docs/superpowers/acceptance/artifacts/c12-docker/docker-smoke-report.json' },
-    'docs/superpowers/acceptance/2026-10-23-c12-final-gate.md',
+    { status: ' M', path: '.agent-reports/acceptance/artifacts/c12-docker/docker-smoke-report.json' },
+    '.agent-reports/acceptance/2026-10-23-c12-final-gate.md',
     'out/docker-smoke-123/credential',
   ])
   assert.equal(generated.clean, true)
   const disallowed = evaluateWorkingTree([
     'src/main.ts',
-    'docs/superpowers/acceptance/operator-notes.md',
+    '.agent-reports/acceptance/operator-notes.md',
     'server/docker-compose.yml',
     'scripts/replacement.mjs',
   ])
   assert.equal(disallowed.clean, false)
   assert.deepEqual(disallowed.disallowedPaths, [
     'src/main.ts',
-    'docs/superpowers/acceptance/operator-notes.md',
+    '.agent-reports/acceptance/operator-notes.md',
     'server/docker-compose.yml',
     'scripts/replacement.mjs',
   ])
@@ -960,8 +960,8 @@ test('the pure acceptance decision fails closed for every command/evidence condi
   assert.equal(cleanGate.ok, true)
   assert.equal(cleanGate.workingTreeClean, true)
   const generatedTree = gateInput({
-    workingTreeBefore: [{ status: ' M', path: 'docs/superpowers/acceptance/2026-10-23-c12-final-gate.md' }],
-    workingTreeAfter: [{ status: '??', path: 'docs/superpowers/acceptance/artifacts/c12-e2e/report.json' }],
+    workingTreeBefore: [{ status: ' M', path: '.agent-reports/acceptance/2026-10-23-c12-final-gate.md' }],
+    workingTreeAfter: [{ status: '??', path: '.agent-reports/acceptance/artifacts/c12-e2e/report.json' }],
   })
   const generatedResult = evaluateAcceptanceGate(generatedTree)
   assert.equal(generatedResult.ok, true)
@@ -983,7 +983,7 @@ test('the pure acceptance decision fails closed for every command/evidence condi
       gate.workingTreeAfter = [{ status: '??', path: 'scripts/replacement.mjs' }]
     }, /after the acceptance gate contains non-generated changes: scripts\/replacement.mjs/],
     ['unexpected acceptance note is not generated evidence', gate => {
-      gate.workingTreeBefore = ['docs/superpowers/acceptance/operator-notes.md']
+      gate.workingTreeBefore = ['.agent-reports/acceptance/operator-notes.md']
     }, /operator-notes\.md/],
     ['before status capture missing', gate => {
       delete gate.workingTreeBefore

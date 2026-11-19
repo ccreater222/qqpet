@@ -1,0 +1,42 @@
+#!/bin/sh
+# qqpet-docs-hook: managed
+# Git LFS legacy hook forwarder. Resolve the real common git dir instead of
+# --git-path hooks, which follows core.hooksPath and can point back to us.
+set -u
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$REPO_ROOT" || exit 0
+
+COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
+case "$COMMON_DIR" in
+  /*) ;;
+  *) COMMON_DIR="$REPO_ROOT/$COMMON_DIR" ;;
+esac
+
+LEGACY="$COMMON_DIR/hooks/post-checkout"
+
+canonical_path() {
+  target=$1
+  if command -v realpath >/dev/null 2>&1; then
+    if resolved=$(realpath "$target" 2>/dev/null); then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+  dir=$(dirname "$target")
+  base=$(basename "$target")
+  if resolved_dir=$(cd "$dir" 2>/dev/null && pwd -P); then
+    printf '%s/%s\n' "$resolved_dir" "$base"
+  else
+    printf '%s\n' "$target"
+  fi
+}
+
+if [ -x "$LEGACY" ]; then
+  SELF=$(canonical_path "$0")
+  LEGACY_REAL=$(canonical_path "$LEGACY")
+  if [ "$LEGACY_REAL" != "$SELF" ]; then
+    exec "$LEGACY" "$@"
+  fi
+fi
+exit 0

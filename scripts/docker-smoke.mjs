@@ -21,7 +21,7 @@ const DOCKER = process.env.DOCKER ?? 'docker'
 const STARTED_AT_MS = Date.now()
 const STARTED_AT = new Date(STARTED_AT_MS).toISOString()
 const REPORT_PATH = process.env.QQPET_DOCKER_SMOKE_REPORT
-  ?? join(ROOT, 'docs/superpowers/acceptance/artifacts/c12-docker/docker-smoke-report.json')
+  ?? join(ROOT, '.agent-reports/acceptance/artifacts/c12-docker/docker-smoke-report.json')
 const CODE_REVISION = process.env.QQPET_CODE_REVISION?.trim() || gitRevision()
 const IMAGE = process.env.QQPET_SMOKE_IMAGE?.trim()
   || 'qqpet-server:smoke-' + process.pid + '-' + STARTED_AT_MS

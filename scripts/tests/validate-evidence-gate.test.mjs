@@ -24,7 +24,7 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url))
 const VALIDATOR_SOURCE = resolve(HERE, '../validate-evidence.mjs')
 const LIBRARY_SOURCE = resolve(HERE, '../lib/acceptance-evidence.mjs')
-const ARTIFACT_ROOT = 'docs/superpowers/acceptance/artifacts'
+const ARTIFACT_ROOT = '.agent-reports/acceptance/artifacts'
 const REPORT_PATHS = {
   e2e: ARTIFACT_ROOT + '/c12-e2e/c12-e2e-report.json',
   docker: ARTIFACT_ROOT + '/c12-docker/docker-smoke-report.json',

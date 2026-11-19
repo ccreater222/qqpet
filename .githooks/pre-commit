@@ -1,0 +1,65 @@
+#!/bin/sh
+# qqpet-docs-hook: managed
+# 提交前门禁：先冻结 docs/reviews，再跑全量检查与 staged 文档同步检查。
+set -u
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "docs check failed: current directory is not a git repository." >&2
+  exit 2
+}
+cd "$REPO_ROOT" || exit 2
+
+# 1. 冻结证据：任何 staged 变更都拒绝，且先于 runtime / DOCS_CHECK 判断。
+if git diff --cached --name-only --no-renames -- docs/reviews | grep -q .; then
+  echo "docs/reviews is frozen history: refusing to stage modifications." >&2
+  echo "New evidence belongs in .agent-reports/acceptance/, scratch reports in tmp/reports/." >&2
+  exit 1
+fi
+
+# 2. 显式跳过：只跳过文档检查，不跳过 typecheck/test/build。
+docs_check=$(printf '%s' "${DOCS_CHECK:-}" | tr '[:upper:]' '[:lower:]')
+if [ "$docs_check" = "off" ]; then
+  echo "warning: DOCS_CHECK=off，已跳过文档检查；commit message 必须包含 Docs-Check: off — <至少 8 个字符的理由>。" >&2
+  exit 0
+fi
+
+# 3. runtime 必须存在、可执行且 Node >= 22。
+RUNTIME_FILE="$REPO_ROOT/.githooks/runtime"
+if [ ! -f "$RUNTIME_FILE" ]; then
+  echo "docs check failed: .githooks/runtime is missing." >&2
+  echo "Run npm run hooks:install, then commit again." >&2
+  exit 2
+fi
+
+RUNTIME=$(cat "$RUNTIME_FILE")
+if [ -z "$RUNTIME" ] || [ ! -x "$RUNTIME" ]; then
+  echo "docs check failed: .githooks/runtime is not an executable Node." >&2
+  echo "Run npm run hooks:install, then commit again." >&2
+  exit 2
+fi
+
+NODE_VERSION=$("$RUNTIME" --version 2>/dev/null) || {
+  echo "docs check failed: cannot read Node version from .githooks/runtime." >&2
+  exit 2
+}
+NODE_MAJOR=${NODE_VERSION#v}
+NODE_MAJOR=${NODE_MAJOR%%.*}
+case "$NODE_MAJOR" in
+  ''|*[!0-9]*)
+    echo "docs check failed: unsupported Node version '$NODE_VERSION'." >&2
+    exit 2
+    ;;
+esac
+if [ "$NODE_MAJOR" -lt 22 ]; then
+  echo "docs check failed: Node.js 22+ is required, current version is $NODE_VERSION." >&2
+  exit 2
+fi
+
+# 4. 先全量检查工作区，再检查 staged 代码是否同步了文档。
+"$RUNTIME" "$REPO_ROOT/scripts/docs/check-docs.mjs"
+FULL_STATUS=$?
+if [ "$FULL_STATUS" -ne 0 ]; then
+  exit "$FULL_STATUS"
+fi
+
+exec "$RUNTIME" "$REPO_ROOT/scripts/docs/check-docs.mjs" --staged

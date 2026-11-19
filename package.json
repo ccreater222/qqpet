@@ -12,6 +12,11 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.harmony.json && tsc --noEmit -p tsconfig.e2e.json",
+    "test:docs": "node --test scripts/docs/tests/*.test.mjs",
+    "check:docs": "node scripts/docs/check-docs.mjs",
+    "check:docs:staged": "node scripts/docs/check-docs.mjs --staged",
+    "check:docs:range": "node scripts/docs/check-docs.mjs --range",
+    "hooks:install": "node scripts/docs/install-hooks.mjs",
     "test:e2e": "node scripts/e2e/renderer-e2e.mjs",
     "smoke:compose": "node scripts/compose-smoke.mjs",
     "smoke:docker": "node scripts/docker-smoke.mjs",
@@ -23,13 +28,14 @@
     "check:ios-assets": "node scripts/prepare-ios-assets.mjs --check",
     "build:ios-web": "vite build -c vite.ios.config.ts",
     "ios": "npm run typecheck && npm run build:ios-web && bash ios/build.sh",
-    "test:compat": "node --experimental-strip-types --test scripts/tests/*.test.mjs",
+    "test:compat": "node --experimental-strip-types --test --test-concurrency=1 scripts/tests/*.test.mjs",
     "dist": "npm run typecheck && electron-vite build && electron-builder --publish never",
     "build:android-web": "vite build -c vite.android.config.ts",
     "android": "npm run typecheck && npm run build:android-web && cd android && ./gradlew assembleDebug",
     "build:harmony-web": "vite build -c vite.harmony.config.ts",
     "harmony": "npm run typecheck && npm run build:harmony-web && node scripts/pack-harmony.mjs && cd harmony && ./hvigorw assembleHap -p product=default -p buildMode=debug",
-    "test:e2e:main-process": "node scripts/e2e/run-e2e.mjs"
+    "test:e2e:main-process": "node scripts/e2e/run-e2e.mjs",
+    "prepare": "node scripts/docs/install-hooks.mjs"
   },
   "devDependencies": {
     "@babel/parser": "^7.29.9",

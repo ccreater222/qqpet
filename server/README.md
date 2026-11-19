@@ -634,7 +634,7 @@ shutdown path runs.
 - Renderer/GUI is not exercised by the server test suite. The C12 E2E runner uses
   two real Electron main processes and the production RemoteRepository, without
   a BrowserWindow, and documents that boundary in
-  `docs/superpowers/acceptance/`.
+  `docs/reviews/c12-final-gate/`.
 - `QQPET_ADMIN_SOCKET` is reserved configuration in this release. The live
   operator `ctl revoke-device` path currently uses a loopback WebSocket with an
   owner device token.
