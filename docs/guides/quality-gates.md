@@ -54,7 +54,7 @@ node --experimental-strip-types --test scripts/tests/sync-protocol.test.mjs
 
 `check:docs:range` 逐提交比对 doc-map：`require` 命中代码但同一提交没有更新映射文档 → `1`；`warn` 只打印提醒 → `0`；删除文档不算更新，删除代码仍算变更；空范围 → `0`；`--range` 与 `--staged` 同用 → `2`。它包含 merge commit，并用第一父 diff 评估冲突解决时引入的改动；任何提交触碰 `docs/reviews/**` 或 `docs/superpowers/**` → `1`（`frozen-evidence-modified`），即使 doc-map 未命中或提交信息带跳过 trailer。
 
-基线优先级：显式 `--range <base>..<head>` > doc-map 顶层 `rangeBaseline`（一次性初始化边界，完整 40 位 SHA）> `origin/main..HEAD` > `main..HEAD`。`rangeBaseline` 只是初始化边界，不是免检开关：基线之后仍逐提交检查；字段存在但不是仓库内提交或格式非法 → `2`，三种来源都不可用 → `2`。
+基线优先级：显式 `--range <base>..<head>` > doc-map 顶层 `rangeBaseline`（一次性初始化边界，完整 40 位 SHA）> `origin/main..HEAD` > `main..HEAD`。`rangeBaseline` 只是初始化边界，不是免检开关：基线之后仍逐提交检查；字段存在但不是仓库内提交或格式非法 → `2`，三种来源都不可用 → `2`。当前值指向文档体系首次合入 `main` 的 merge commit `b23109a2bd468a8d30c08ed066b8ffb96469915a`。
 
 跳过开关只有一个：`DOCS_CHECK=off`，且只跳过全量与 staged 两种**文档检查**；提交信息必须包含一行 `Docs-Check: off — <至少 8 个字符的理由>`，由 `commit-msg` 钩子强制校验。它不影响 `typecheck`、测试、构建、服务端门禁，也不会让 `check:docs:range` 放行——range 只接受提交信息里带合法 trailer 的豁免。
 
