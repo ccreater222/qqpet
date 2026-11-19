@@ -1,7 +1,8 @@
 import type { CalendarDay } from '../../shared/ipc'
-import { parseGood, type Good } from './data/goods'
+import type { Good } from './data/goods'
 import { give } from './items'
 import { loot } from './loot'
+import { previewTaskGoods } from './task-preview'
 import { rand } from './rand'
 import { info, runtimeProjectionMode, save, update } from './store'
 import { uiCommands } from './command-map'
@@ -118,7 +119,7 @@ interface Progress {
   dailyDay: number
 }
 
-const rewards = (t: Task): Good[] => [...(t.reroll ? loot(t.reroll) : []), ...(t.good ?? []).map(parseGood)]
+const rewards = (t: Task): Good[] => previewTaskGoods(t, { projectionMode: runtimeProjectionMode, loot })
 
 function load(): Progress {
   const p: Partial<Progress> = JSON.parse(save.saveJsonData.task || '{}')

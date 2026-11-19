@@ -444,14 +444,17 @@ test('Group C work/study/travel dispatch semantic commands and leave the legacy 
 })
 
 test('Group C task.claim dispatches in runtime mode and only returns projected reward goods', async () => {
-  const calls = { dispatch: [], give: [], update: [] }
+  const calls = { dispatch: [], give: [], update: [], loot: 0 }
   const reward = { id: '100010001', type: 'food', name: 'food', num: 1, url: 'good.svg' }
   const scope = {
     runtimeProjectionMode: true,
     save: { saveJsonData: { task: '{"doNums":{"Amusing":5}}' }, gameSaveDatas: {}, selfGoodDatas: {}, selfGoodUseOption: {}, petComputedlInfo: {} },
     info: { yb: 0 },
-    parseGood: () => reward,
-    loot: () => [reward],
+    parseGood: code => ({ ...reward, id: code }),
+    loot: () => {
+      calls.loot++
+      return [reward]
+    },
     rand: () => 0,
     update: (key, value) => calls.update.push([key, value]),
     give: (...args) => calls.give.push(args),
@@ -465,12 +468,20 @@ test('Group C task.claim dispatches in runtime mode and only returns projected r
     commandSucceeded: (result) => result !== null && result.status === 'applied',
     commandResultGoods: (result) => (result === null || result.result === undefined ? [] : result.result.goods),
   }
+  // tasks.ts now resolves reroll previews through the real preview helper; give its
+  // VM scope the goods parser instead of reimplementing the projection rule here.
+  const preview = loadConvertedModule('../../src/renderer/pet/task-preview.ts', { parseGood: scope.parseGood }, 'previewTaskGoods')
+  scope.previewTaskGoods = preview.previewTaskGoods
   const tasks = loadConvertedModule('../../src/renderer/pet/tasks.ts', scope, 'claim, claimRuntime, count, tasks')
   const claimed = tasks.claim('ddw', 0)
   assert.deepEqual(calls.dispatch, [{ type: 'task.claim', payload: { tab: 'ddw', index: 0 } }])
   assert.deepEqual(calls.give, [], 'runtime claim must not grant goods locally')
   assert.deepEqual(calls.update, [], 'runtime claim must not write task progress locally')
-  assert.equal(Array.isArray(claimed), true)
+  assert.deepEqual([...claimed].map(good => good.id), ['_102010001*1'], 'projection preview keeps only fixed rewards')
+  const previews = tasks.tasks('ddw')
+  assert.deepEqual([...previews[0].good].map(good => good.id), ['_102010001*1'])
+  assert.equal(previews[4].good.length, 0, 'a reroll-only entry shows no locally guessed icons in projection mode')
+  assert.equal(calls.loot, 0, 'projection mode must not draw reroll goods locally')
   const runtimeGoods = await tasks.claimRuntime('ddw', 0)
   assert.deepEqual(runtimeGoods, [reward])
   assert.deepEqual(calls.give, [])
