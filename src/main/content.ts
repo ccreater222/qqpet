@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { app, dialog, type BrowserWindow } from 'electron'
 import type { Fetch, PackOffer, PackProgress } from '../shared/ipc'
 import { APP_VERSION } from '../shared/version'
-import { NO_CONTENT, bundledContent, compareVersion, contentVersion, downloadTo, fetchIndex, installPack, installedLayers, lookup, mirrored, packBlocker, pickFullPack, type Layer, type PackIndex, type PackIndexEntry } from './content-pack'
+import { NO_CONTENT, bundledContent, compareVersion, contentVersion, downloadTo, fetchIndex, installPack, installedLayers, lookup, packBlocker, packsIndexUrl, pickFullPack, type Layer, type PackIndex, type PackIndexEntry } from './content-pack'
 import { petsocPath } from './nocase'
 
 // resources/{pet,icons} live next to the app in production (extraResources).
@@ -47,39 +47,42 @@ export function resetPacks(): void {
   rmSync(packsDir(), { recursive: true, force: true })
 }
 
-export const INDEX = 'https://github.com/AnkioTomas/qqpet/releases/latest/download/packs.json'
-
+/** The pack offered last, and the upstream base its index came from: its relative files resolve against that, never a later renderer argument. */
 let offered: PackIndexEntry | null = null
+let packsBase = ''
 
 /** The incremental pack of the latest release that applies right on the installed content, if any. */
-export async function findPack(fetch: Fetch, url = INDEX): Promise<PackOffer | null> {
-  const index: PackIndex = await fetchIndex(fetch, url)
+export async function findPack(fetch: Fetch, base: string): Promise<PackOffer | null> {
+  const index: PackIndex = await fetchIndex(fetch, packsIndexUrl(base))
   const content = installedContent()
   const fit = (index.packs ?? [])
     .filter((p) => p.base !== undefined && !packBlocker(p, content, shell))
     .sort((a, b) => compareVersion(b.version, a.version))[0]
   offered = fit ?? null
+  packsBase = fit ? base : ''
   return fit ? { version: fit.version, base: fit.base!, size: fit.size } : null
 }
 
-/** The newest full pack of the latest release for a lite installer's first run (#28); rejects with why there is none. */
-export async function findFullPack(fetch: Fetch, mirror = ''): Promise<PackOffer> {
-  const fit = pickFullPack(await fetchIndex(fetch, mirrored(INDEX, mirror)), installedContent(), shell)
+/** The newest full pack the upstream `base` publishes for a lite installer's first run (#28); rejects with why there is none. */
+export async function findFullPack(fetch: Fetch, base: string): Promise<PackOffer> {
+  const fit = pickFullPack(await fetchIndex(fetch, packsIndexUrl(base)), installedContent(), shell)
   if (typeof fit === 'string') throw new Error(fit)
   offered = fit
+  packsBase = base
   return { version: fit.version, size: fit.size }
 }
 
 /**
  * Downloads the pack findPack or findFullPack offered (never a URL from the page), streaming it to a temporary file
- * checked against the sha256 in packs.json, then installs it like an import.
+ * checked against the sha256 in packs.json, then installs it like an import. `base` overrides the upstream recorded
+ * at find time; both are already normalized HTTP origins.
  */
-export async function downloadPack(fetch: Fetch, mirror = '', onProgress?: (p: PackProgress) => void): Promise<string> {
+export async function downloadPack(fetch: Fetch, base = '', onProgress?: (p: PackProgress) => void): Promise<string> {
   const offer: PackIndexEntry | null = offered
   if (!offer) throw new Error('没有可用的内容更新')
   const file = join(tmpdir(), `qqpet-${process.pid}-${offer.version}.qqpetpack`)
   try {
-    await downloadTo(fetch, offer, file, { mirror, onProgress })
+    await downloadTo(fetch, offer, file, { base: base || packsBase, onProgress })
     return install(file)
   } finally {
     rmSync(file, { force: true })

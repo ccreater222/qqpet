@@ -34,6 +34,7 @@ import {
   REMOTE_PROJECTION_CACHE_FORMAT,
   REMOTE_PROJECTION_CACHE_SCHEMA_VERSION,
   validateRemoteProjectionCacheV2,
+  backfillRemoteProjectionCacheDefaults,
   type PortablePetBundleV1,
   type RemoteProjectionCacheV2,
 } from '../shared/sync/portable'
@@ -931,6 +932,7 @@ export class RemoteRepository {
       await this.discardProjectionCacheFile()
       return
     }
+    backfillRemoteProjectionCacheDefaults(raw)
     if (
       validateRemoteProjectionCacheV2(raw) === false
       || raw.authority.state === 'reset'

@@ -1,8 +1,7 @@
 import './firstrun.css'
-import { firstRunFlow, mb, type FirstRunState } from './first-run-flow'
+import { FIRST_RUN_UPSTREAM_KEY, firstRunFlow, mb, type FirstRunState } from './first-run-flow'
 
-// The lite installer's first run (#28): no pet content yet, so this page fetches or imports it.
-const MIRROR_KEY = 'qqpet.packMirror'
+// The lite installer's first run (#28): no pet content yet, so this page downloads it from a qqpet-server or imports it.
 const api = window.qqpet.packs!
 const app = document.getElementById('app')!
 
@@ -12,7 +11,7 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLEl
   return e
 }
 
-const mirror = el('input', { placeholder: '例如 https://ghfast.top/ ，留空直接从 GitHub 下载', value: localStorage.getItem(MIRROR_KEY) ?? '' })
+const serverUrl = el('input', { placeholder: '例如 https://pet.example.com 或 wss://pet.example.com/v1/sync', value: localStorage.getItem(FIRST_RUN_UPSTREAM_KEY) ?? '' })
 const status = el('div')
 const downloadBtn = el('button', { className: 'primary', textContent: '下载宠物内容' })
 const importBtn = el('button', { textContent: '导入本地内容包…' })
@@ -20,16 +19,16 @@ const importBtn = el('button', { textContent: '导入本地内容包…' })
 const flow = firstRunFlow(api, render)
 
 downloadBtn.onclick = () => {
-  localStorage.setItem(MIRROR_KEY, mirror.value.trim())
-  void flow.download(mirror.value)
+  localStorage.setItem(FIRST_RUN_UPSTREAM_KEY, serverUrl.value.trim())
+  void flow.download(serverUrl.value)
 }
 importBtn.onclick = () => void flow.importPack()
 
 app.append(
   el('h1', {}, '欢迎使用 QQ宠物（精简版）'),
-  el('p', {}, '精简版安装包不带宠物素材。第一次使用需要下载完整内容包（约 360 MB），或导入已经下载好的 .qqpetpack 文件。完成后会自动启动宠物。'),
-  el('p', { className: 'muted' }, '内容包在 GitHub 发布页（QQPet-content-版本号.qqpetpack）。下载慢可以填写 GitHub 加速镜像；文件会按发布页公布的校验值检查。'),
-  el('div', { className: 'row' }, el('span', {}, '下载镜像'), mirror),
+  el('p', {}, '精简版安装包不带宠物素材。第一次使用需要从 qqpet-server 下载完整内容包（约 360 MB），或导入已经下载好的 .qqpetpack 文件。完成后会自动启动宠物。'),
+  el('p', { className: 'muted' }, '内容包由 qqpet-server 的 /v1/client/packs.json 提供；文件会按清单公布的校验值检查。还没有服务器？可以先把 .qqpetpack 下载到本地再导入。'),
+  el('div', { className: 'row' }, el('span', {}, 'qqpet-server'), serverUrl),
   status,
   el('div', { className: 'spacer' }),
   el('div', { className: 'row' }, downloadBtn, importBtn),
@@ -37,7 +36,7 @@ app.append(
 
 function render(s: FirstRunState): void {
   const busy = s.kind === 'finding' || s.kind === 'downloading' || s.kind === 'installing' || s.kind === 'done'
-  downloadBtn.disabled = importBtn.disabled = mirror.disabled = busy
+  downloadBtn.disabled = importBtn.disabled = serverUrl.disabled = busy
   downloadBtn.textContent = s.kind === 'error' ? '重试下载' : '下载宠物内容'
   switch (s.kind) {
     case 'idle':
@@ -54,6 +53,6 @@ function render(s: FirstRunState): void {
     case 'done':
       return status.replaceChildren(el('p', {}, `v${s.version} 内容已安装，正在启动宠物~`))
     case 'error':
-      return status.replaceChildren(el('p', { className: 'error' }, `失败：${s.message}`), el('p', { className: 'muted' }, '可以检查网络、换一个镜像后重试，或者手动下载内容包再导入。'))
+      return status.replaceChildren(el('p', { className: 'error' }, `失败：${s.message}`), el('p', { className: 'muted' }, '可以检查网络和服务器地址后重试，或者先把内容包下载到本地再导入。'))
   }
 }

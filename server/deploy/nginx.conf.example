@@ -78,6 +78,21 @@ server {
         access_log off;
     }
 
+    # Public read-only client data: release manifest, weather/calendar proxy and
+    # content packs. Packs are large files streamed with content-length/ETag, so
+    # disable buffering and allow a slow download to finish; do not cache them
+    # in Nginx (the server already sends immutable cache-control).
+    location ^~ /v1/client/ {
+        proxy_pass http://qqpet_sync;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
     location / {
         return 404;
     }

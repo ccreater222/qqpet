@@ -9,6 +9,7 @@ import {
   failSchema,
   isEnum,
   isNonEmptyString,
+  isRecord,
   isNonNegativeIntegerArray,
   isNumberArray,
   isStringArray,
@@ -62,8 +63,23 @@ export const DEVICE_LOCAL_SETTINGS_KEYS = [
   'windowDirection', 'clip', 'watchApp', 'roam', 'lan', 'webhook', 'webhookPort',
   'webhookToken', 'voice', 'memory', 'polish', 'search', 'searchBackend', 'searchKey',
   'petBar', 'chatCheat', 'cheatTab', 'aiUrl', 'aiKey', 'aiModel', 'weatherCity',
-  'autoUpdate', 'updateCheckedAt', 'petDisplayId',
+  'upstreamUrl', 'autoUpdate', 'updateCheckedAt', 'petDisplayId',
 ] as const satisfies readonly (keyof DeviceLocalSettings)[]
+
+/**
+ * In-place upgrade for device overlays written before a device-local setting existed.
+ * Only fields an old document could not have are filled; validation stays strict.
+ */
+export function backfillDeviceLocalSettingsDefaults(value: unknown): string[] {
+  if (isRecord(value) === false || isRecord(value.settings) === false) return []
+  const settings = value.settings
+  const filled: string[] = []
+  if (typeof settings.upstreamUrl !== 'string') {
+    settings.upstreamUrl = ''
+    filled.push('settings.upstreamUrl')
+  }
+  return filled
+}
 
 export const SESSION_ANSWER_KEY_FIELDS = ['answerIndex', 'answerKey', 'answerKeys'] as const
 
@@ -111,7 +127,7 @@ const DEVICE_LOCAL_BOOLEAN_KEYS = [
   'webhook', 'voice', 'memory', 'polish', 'search', 'petBar', 'chatCheat', 'cheatTab', 'autoUpdate',
 ] as const
 const DEVICE_LOCAL_NUMBER_KEYS = ['opacity', 'music', 'zoom', 'webhookPort', 'updateCheckedAt'] as const
-const DEVICE_LOCAL_STRING_KEYS = ['webhookToken', 'searchKey', 'aiUrl', 'aiKey', 'aiModel', 'weatherCity'] as const
+const DEVICE_LOCAL_STRING_KEYS = ['webhookToken', 'searchKey', 'aiUrl', 'aiKey', 'aiModel', 'weatherCity', 'upstreamUrl'] as const
 
 const PET_INFO_NUMBER_KEYS = [
   'growth', 'hunger', 'clean', 'health', 'mood', 'birthDay', 'intel', 'charm', 'strong',

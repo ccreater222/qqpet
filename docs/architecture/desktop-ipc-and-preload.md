@@ -18,42 +18,52 @@
 
 | 域 | 通道（节选） | 方向 | 注册/使用位置 |
 | --- | --- | --- | --- |
-| 宠物存档（旧路径） | `pet:load`、`pet:save`、`pet:reset`、`pet:export`、`pet:import` | R→M `invoke`/`send` | `src/main/index.ts:331-424` |
+| 宠物存档（旧路径） | `pet:load`、`pet:save`、`pet:reset`、`pet:export`、`pet:import` | R→M `invoke`/`send` | `src/main/index.ts:356-447` |
 | 运行时 v2 | `pet:runtime-info`、`pet:command`、`pet:set-advance-while-empty`、`pet:local-settings-load`、`pet:local-settings-update`、`pet:flush`、`pet:get-projection`、`pet:get-status` | R→M `invoke` | `src/main/renderer-runtime.ts:403-458` |
 | 投影推送 | `pet:projection`、`pet:resync`、`pet:sync-status`、`pet:command-result`、`pet:request-resync` | M→R + R→M(`request-resync`) | `src/main/renderer-runtime.ts:348-375`、`src/main/renderer-runtime.ts:453-458` |
 | 桌面 server 模式（C10 兼容） | `pet:remote-status`、`pet:remote-pair`、`pet:remote-revoke` | R→M `invoke` | `src/main/storage-ipc.ts:91-116` |
-| 存储/管理（C11） | `storage:status`…`storage:create-backup`、`storage:import-dialog` | R→M `invoke` | `src/main/storage-ipc.ts:57-88`、`src/main/index.ts:425-436` |
+| 存储/管理（C11） | `storage:status`…`storage:create-backup`、`storage:import-dialog` | R→M `invoke` | `src/main/storage-ipc.ts:57-88`、`src/main/index.ts:450-459` |
 | 存储事件 | `storage:status-event`、`storage:devices-event` | M→R | `src/preload/index.ts:37-44` |
-| 内容包 | `pack:info`、`pack:import`、`pack:reset`、`pack:find`、`pack:download`、`pack:find-full`、`pack:progress` | R→M / M→R | `src/main/first-run.ts`（`registerPackIpc`，由 `src/main/index.ts:55` 调用） |
-| 系统/窗口 | `win:set-click-through`、`win:set-hit-shape`、`win:set-always-on-top`、`win:set-focusable`、`win:set-dragging`、`win:cursor` | R→M / M→R | `src/main/index.ts:459-484` |
-| 应用 | `app:calendar`、`app:weather`、`app:relaunch`、`app:quit`、`app:copy-text`、`app:open-url`、`app:presence`、`app:front`、`app:latest-release` | 双向 | `src/main/index.ts:437-458`、`src/main/index.ts:486-516` |
-| 托盘 | `tray:click`、`tray:hover-leave`、`tray:menu`、`tray:menu-action`、`tray:set-state` | 双向 | `src/main/index.ts:262-320`、`src/main/index.ts:484` |
-| 局域网/Webhook | `lan:online`、`lan:offline`、`lan:message`、`lan:send`、`lan:peers`、`webhook:message`、`webhook:state` | 双向 | `src/main/index.ts:171-183`、`src/main/index.ts:248-261` |
-| 记忆/语音 | `mem:*`、`voice:*` | 双向 | `src/main/index.ts:185-238` |
+| 内容包 | `pack:info`、`pack:import`、`pack:reset`、`pack:find`、`pack:download`、`pack:find-full`、`pack:progress` | R→M / M→R | `src/main/first-run.ts`（`registerPackIpc`，由 `src/main/index.ts:79` 调用） |
+| 系统/窗口 | `win:set-click-through`、`win:set-hit-shape`、`win:set-always-on-top`、`win:set-focusable`、`win:set-dragging`、`win:cursor` | R→M / M→R | `src/main/index.ts:486-507` |
+| 应用 | `app:calendar`、`app:weather`、`app:relaunch`、`app:quit`、`app:copy-text`、`app:open-url`、`app:presence`、`app:front`、`app:latest-release` | 双向 | `src/main/index.ts:462-484`、`src/main/index.ts:512-542` |
+| 托盘 | `tray:click`、`tray:hover-leave`、`tray:menu`、`tray:menu-action`、`tray:set-state` | 双向 | `src/main/index.ts:287-345`、`src/main/index.ts:510` |
+| 局域网/Webhook | `lan:online`、`lan:offline`、`lan:message`、`lan:send`、`lan:peers`、`webhook:message`、`webhook:state` | 双向 | `src/main/index.ts:196-208`、`src/main/index.ts:273-286` |
+| 记忆/语音 | `mem:*`、`voice:*` | 双向 | `src/main/index.ts:210-255` |
 
 ### 推送节律（主进程主动发送）
 
 | 推送 | 周期/触发 | 去重方式 | 位置 |
 | --- | --- | --- | --- |
 | `win:cursor` | 33ms；`settings.hidden` 时 250ms | 与上次点做 JSON 比较，比较时把 `sequence` 归零 | `src/main/window.ts:82-93`（常量 `src/main/window.ts:11-12`） |
-| `clipboard:text` | 500ms 轮询 | 与上次文本比较，且需 `settings.clip` 为真 | `src/main/index.ts:322-329` |
-| `app:presence` | 5s 轮询 + `powerMonitor` 锁屏/挂起事件 | 布尔状态变化才发 | `src/main/index.ts:486-497` |
-| `app:front` | 15s | 与上次应用名比较；`watchApp` 关闭时停表 | `src/main/index.ts:499-516` |
+| `clipboard:text` | 500ms 轮询 | 与上次文本比较，且需 `settings.clip` 为真 | `src/main/index.ts:349-354` |
+| `app:presence` | 5s 轮询 + `powerMonitor` 锁屏/挂起事件 | 布尔状态变化才发 | `src/main/index.ts:514-523` |
+| `app:front` | 15s | 与上次应用名比较；`watchApp` 关闭时停表 | `src/main/index.ts:525-542` |
 | `pet:projection` / `pet:resync` | 事件驱动（命令提交、追赶分片） | 游标分类，`stale` 直接丢弃 | `src/main/renderer-runtime.ts:348-368` |
 | `pet:sync-status` | 仓库状态变化 | 整体重发当前状态 | `src/main/renderer-runtime.ts:370-375` |
 
 ### 进程生命周期
 
-- 单实例锁在注册协议之前获取；Wayland 下若检测到 `ozone-platform=wayland` 且有 `DISPLAY`，进程先以 `--ozone-platform=x11` 重启自己再抢锁（`src/main/index.ts:43-49`）。
-- 退出顺序是确定性的：先 `before-quit` 里停托盘/局域网/Webhook，再 `preventDefault()` 等 `storage.stop()`（或 `rendererRuntime.stop()`）完成才真正 `app.quit()`（`src/main/index.ts:299-314`）。
-- 窗口关闭会移除 `win:set-dragging` 处理器并清掉光标定时器（`src/main/window.ts:94-97`）；`window-all-closed` 直接退出应用（`src/main/index.ts:519`）。
-- 设置变化只通过 `onView` 单点分发：缩放、HD、`watchApp`、`lan`、`webhook`、`voice` 各自有副作用分支，且用 `appliedSettings` 做差分（`src/main/index.ts:277-297`）。新增设置项必须在这里挂副作用，否则只有 UI 变化、主进程行为不变。
+- 单实例锁在注册协议之前获取；Wayland 下若检测到 `ozone-platform=wayland` 且有 `DISPLAY`，进程先以 `--ozone-platform=x11` 重启自己再抢锁（`src/main/index.ts:50`）。
+- 退出顺序是确定性的：先 `before-quit` 里停托盘/局域网/Webhook，再 `preventDefault()` 等 `storage.stop()`（或 `rendererRuntime.stop()`）完成才真正 `app.quit()`（`src/main/index.ts:325-339`）。
+- 窗口关闭会移除 `win:set-dragging` 处理器并清掉光标定时器（`src/main/window.ts:94-97`）；`window-all-closed` 直接退出应用（`src/main/index.ts:545`）。
+- 设置变化只通过 `onView` 单点分发：缩放、HD、`watchApp`、`lan`、`webhook`、`voice` 各自有副作用分支，且用 `appliedSettings` 做差分（`src/main/index.ts:302-321`）。新增设置项必须在这里挂副作用，否则只有 UI 变化、主进程行为不变。
+
+### 客户端数据与内容包通道
+
+`app:calendar`、`app:weather`、`app:latest-release` 与 `packs` 都经 `clientUpstreamBase()` 选上游（`src/main/index.ts:64-70`）：server 存储模式取 `httpBaseFromServerUrl(storage.status().serverUrl)`，否则取设备本地 `normalizeUpstreamUrl(getSave().settings.upstreamUrl)`；两者都没有即离线（返回 `null`），不做任何第三方回退。
+
+- `app:calendar`：离线可用。有上游时发一次 `GET /v1/client/calendar?from=…&days=31`；无上游时用共享纯函数 `computeCalendarDays` 本地计算，不抛错（`src/main/index.ts:463`、`src/shared/calendar.ts:30-60`）。
+- `app:weather`：必须有上游；无上游时抛 `upstream_not_configured`，宠物不播报天气。有上游时 `GET /v1/client/weather?city=…`，服务端回完整 8 段、客户端按本地小时过滤（`src/main/index.ts:468`、`src/shared/weather.ts:78-84`）。
+- `app:latest-release`：必须有上游；无上游时抛 `upstream_not_configured`，手动检查提示「未配置上游服务器」、自动检查静默跳过。有上游时 `GET /v1/client/release`（`src/main/index.ts:469`、`src/shared/update.ts:15-25`）。
+- `packs` API：`findFull(serverUrl?)` 与 `download(serverUrl?)` 接收首启页输入的 qqpet-server 地址；索引来自 `/v1/client/packs.json`，包文件从同一服务器下载，相对 `url` 由 `packUrl` 在 base 非空时解析，绝对/跨主机 URL 一律拒绝（`src/preload/index.ts:68-80`、`src/shared/ipc.ts:207-229`、`src/main/content-pack.ts:358-384`）。
+- `settings.upstreamUrl` 是**设备本地设置**，默认空串、永不上传（`src/shared/save.ts:159`、`src/shared/sync/data-boundary.ts:60-66`、`src/shared/sync/data-boundary.ts:114`）；server 存储模式忽略它，改用 `storage.status().serverUrl`。
 
 ## 3. preload 暴露面
 
 单文件组装，最后一步才注入全局：`contextBridge.exposeInMainWorld('qqpet', api)`（`src/preload/index.ts:156`）。
 
-`api`（类型见 `QQPetApi`，`src/shared/ipc.ts:266-403`）由四块拼成：
+`api`（类型见 `QQPetApi`，`src/shared/ipc.ts:272-409`）由四块拼成：
 
 1. `capabilities`：桌面恒定 `{ serverMode: true }`（`src/preload/index.ts:48`）。
 2. `load`/`save`/`resetPet`/`exportSave`/`importSave` 等旧存档 API（`src/preload/index.ts:49-60`）。
@@ -76,22 +86,22 @@
 | `requireTrustedSender` | `sender === window.webContents` | `src/main/renderer-runtime.ts:403-408`，由 `DesktopRendererRuntime.acceptsSender` 实现（`src/main/renderer-runtime.ts:128-130`） |
 | `assertTrustedStorageIpcSender` | 同上 + 主框架 + 同源 | `src/main/storage-ipc.ts:23-30` |
 | `DesktopStorageController.acceptsSenderFrame` | 逐项：`frame.parent == null`、`frame === webContents.mainFrame`、`frame !== sender.mainFrame` 时拒绝、`frame.url` 的 origin 必须等于 `sender.getURL()` 的 origin | `src/main/storage-controller.ts:370-398` |
-| 单点内联比较 | `event.sender !== win.webContents` 直接 `return` | 托盘菜单 `src/main/index.ts:315-320`、Linux 输入区 `src/main/index.ts:461-465` |
+| 单点内联比较 | `event.sender !== win.webContents` 直接 `return` | 托盘菜单 `src/main/index.ts:340-345`、Linux 输入区 `src/main/index.ts:486-491` |
 | 单点内联比较（抛错） | `event.sender !== win.webContents` 抛 `Unknown drag sender` | 拖拽 `src/main/window.ts:76-81` |
 
 注意两点实现细节，改代码时容易踩：
 
-- `assertTrustedRenderer`（`src/main/index.ts:116-120`）**只在 `storage !== null` 时生效**。当前 `startupAuthority === 'runtime'` 分支同时构造 `DesktopRendererRuntime` 与 `DesktopStorageController`（`src/main/index.ts:68-92`），所以运行时路径始终有校验；一旦有人只构造 runtime 不构造 storage，`pet:load`/`pet:save`/`pet:reset`/`pet:export`/`pet:import` 的校验会静默失效（编译器不会报错）。
-- 存档导入对话框走 `storage:import-dialog` 而不是 `pet:import`，因此它额外做参数校验 `validateStorageImportDialogOptions` 后才读文件（`src/main/index.ts:425-436`）。
-- 运行时 v2 下局域网探访被直接拒绝：`pet:lan:send`（`IPC.lanSend`）在 `rendererRuntime !== null` 时抛 `unauthorized: LAN visits are unavailable in runtime v2`（`src/main/index.ts:171-182`）；`pet:lan:peers` 返回空数组（`src/main/index.ts:183`）。语音同理，主进程在运行时模式下不启动热键与 ASR（`shouldStartVoice`，`src/main/voice-startup.ts:6-8`）。
+- `assertTrustedRenderer`（`src/main/index.ts:141-145`）**只在 `storage !== null` 时生效**。当前 `startupAuthority === 'runtime'` 分支同时构造 `DesktopRendererRuntime` 与 `DesktopStorageController`（`src/main/index.ts:91-115`），所以运行时路径始终有校验；一旦有人只构造 runtime 不构造 storage，`pet:load`/`pet:save`/`pet:reset`/`pet:export`/`pet:import` 的校验会静默失效（编译器不会报错）。
+- 存档导入对话框走 `storage:import-dialog` 而不是 `pet:import`，因此它额外做参数校验 `validateStorageImportDialogOptions` 后才读文件（`src/main/index.ts:450-459`）。
+- 运行时 v2 下局域网探访被直接拒绝：`pet:lan:send`（`IPC.lanSend`）在 `rendererRuntime !== null` 时抛 `unauthorized: LAN visits are unavailable in runtime v2`（`src/main/index.ts:196-207`）；`pet:lan:peers` 返回空数组（`src/main/index.ts:208`）。语音同理，主进程在运行时模式下不启动热键与 ASR（`shouldStartVoice`，`src/main/voice-startup.ts:6-8`）。
 
 ## 5. 启动路径与 serverMode/capabilities
 
 启动前必须选出**唯一写入者**，选择逻辑是纯函数：`desktopStartupAuthority(v2DocumentExists, env)` 返回 `'runtime' | 'legacy' | 'blocked'`（`src/main/renderer-runtime-flags.ts:39-45`）。
 
 - 默认 `'runtime'`；`QQPET_LOCAL_REPOSITORY_V2=0` 或 `QQPET_LOCAL_V2_ROLLBACK=1` 会关闭 v2（`src/main/renderer-runtime-flags.ts:11-23`）。
-- 若关闭 v2 但 `save.v2.json` 已存在 → `'blocked'`：弹错误框并 `app.quit()`，绝不双写（`src/main/index.ts:93-100`）。
-- `'runtime'` 下先同步读设备浮层做「临时视图」，让窗口位置/缩放/X-HD 从第一帧就正确，再异步启动权威（`src/main/index.ts:68-78`、`src/main/index.ts:106-115`）。
+- 若关闭 v2 但 `save.v2.json` 已存在 → `'blocked'`：弹错误框并 `app.quit()`，绝不双写（`src/main/index.ts:116-123`）。
+- `'runtime'` 下先同步读设备浮层做「临时视图」，让窗口位置/缩放/X-HD 从第一帧就正确，再异步启动权威（`src/main/index.ts:96-97`、`src/main/index.ts:102-115`）。
 
 权威可能是本机或已配对的服务器，由 `DesktopStorageController` 决定，`info()` 据此返回 `serverMode: activeMode === 'server'`（`src/main/storage-controller.ts:358-360`）：
 
@@ -128,7 +138,7 @@
 2. 控制器为 `null` 时存储面整体不可用，抛 `storage_unavailable: local runtime v2 is not active`（`src/main/storage-ipc.ts:14-16`），而不是返回空状态。
 3. preload 不暴露 `ipcRenderer` 本身，只暴露具名方法；渲染进程无法自造通道。
 4. 同名通道可双向使用，但只有主进程注册的 `handle/on` 才是入口；渲染进程无法调用未注册的通道。
-5. 主进程启动期只允许一个存档写入者（`desktopStartupAuthority`），冲突时进程退出（`src/main/index.ts:93-100`）。
+5. 主进程启动期只允许一个存档写入者（`desktopStartupAuthority`），冲突时进程退出（`src/main/index.ts:116-123`）。
 6. server 模式下本地运行时被冻结：不推投影、不接命令、不写盘（`src/main/storage-controller.ts:447-449`）。
 7. 命令执行失败不会让渲染进程「乐观前进」：`CommandResult` 携带 `status/revision/eventSeq/error`，投影缺口由 `requestResync` 补齐（`src/shared/renderer-api.ts:258-305`、`src/preload/renderer-api.ts:79-84`）。
 8. 平台专有能力缺席时以「字段 undefined」表达，而不是抛错或返回假值（`src/preload/index.ts:85-93`）。
@@ -138,12 +148,12 @@
 | 现象 | 直接原因 | 定位 |
 | --- | --- | --- |
 | 所有面板空白、控制台报 `unauthorized: unknown renderer` | sender 不是宠物窗口主框架，或子框架发起的调用 | `src/main/storage-ipc.ts:23-30`；`acceptsSenderFrame` 的 `parent`/origin 分支（`src/main/storage-controller.ts:370-398`） |
-| 启动即弹「本地数据版本冲突」并退出 | 回滚开关与已存在的 `save.v2.json` 同时成立 | `src/main/index.ts:93-100`；判据 `src/main/renderer-runtime-flags.ts:32-45` |
+| 启动即弹「本地数据版本冲突」并退出 | 回滚开关与已存在的 `save.v2.json` 同时成立 | `src/main/index.ts:116-123`；判据 `src/main/renderer-runtime-flags.ts:32-45` |
 | 界面停在只读、命令返回 `authority_not_active` | 权威未 `active` 或处于 `handoff_pending` | `src/main/renderer-runtime.ts:411-416`（legacy stub）、本地仓库拒绝分支 `src/shared/local-repository/host.ts:1334-1343` |
 | 状态卡住但无报错 | 投影被判 `stale` 丢弃 | `src/main/renderer-runtime.ts:361-364` |
 | 页面反复丢订阅 | preload 用了 `on` 而非「替换」 | `src/preload/renderer-api.ts:46-53` |
-| 局域网/语音「开了没反应」 | 运行时 v2 下这些能力被主动屏蔽 | `src/main/index.ts:171-182`、`src/main/voice-startup.ts:6-8` |
-| 点击穿透后画面无响应（Linux） | 未设置输入区，或 `setHitShape` 被 sender 校验拒绝 | `src/main/index.ts:459-465` |
+| 局域网/语音「开了没反应」 | 运行时 v2 下这些能力被主动屏蔽 | `src/main/index.ts:196-207`、`src/main/voice-startup.ts:6-8` |
+| 点击穿透后画面无响应（Linux） | 未设置输入区，或 `setHitShape` 被 sender 校验拒绝 | `src/main/index.ts:486-491` |
 
 ## 9. 验证命令
 
@@ -172,7 +182,7 @@ npm run test:e2e
 - **新增管理面通道**：一律放进 `installStorageIpc`，复用 `trustedController`，不要自写 `ipcMain.handle`——否则会绕过主框架/同源校验。
 - **修改 `SavePatch` 拆分规则**：只改 `DEVICE_LOCAL_*`/`PRESENTATION_ONLY_*` 白名单（`src/shared/sync/data-boundary.ts:51-81`），禁止在 `classifySavePatch` 里加特例，否则「规范字段不可被渲染进程改写」这条不变量会失守。
 - **给 `RendererProjection` 加字段**：`src/shared/renderer-api.ts:14-30` 与 `src/main/renderer-runtime.ts:310-322` 都要动，并检查移动桥是否也需要同名字段（`src/android/bridge.ts`、`src/ios/bridge.ts`）。
-- **改变启动权威判定**：`desktopStartupAuthority` 是唯一入口，测试与 E2E 都依赖它（`scripts/tests/renderer-c7-startup.test.mjs`）；改动需同时更新 `src/main/index.ts:93-100` 的错误文案与退出路径。
+- **改变启动权威判定**：`desktopStartupAuthority` 是唯一入口，测试与 E2E 都依赖它（`scripts/tests/renderer-c7-startup.test.mjs`）；改动需同时更新 `src/main/index.ts:116-123` 的错误文案与退出路径。
 - **移动端**：任何依赖 `window.qqpet.storage`/`remote`/`packs` 的新代码都必须在移动桥下保持可缺席，桌面 preload 的 `capabilities` 与移动桥的显式 `false` 是两套契约，不要合并。
 
 历史验收证据见 [C12 final gate](../reviews/c12-final-gate/2026-11-18-c12-final-gate.md)；IPC 与运行时的历史设计取径见冻结文档 [local-or-server pet data design](../reviews/legacy/2026-10-20-local-or-server-pet-data-design.md)（只读，勿改）。

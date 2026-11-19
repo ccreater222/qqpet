@@ -228,6 +228,7 @@ sudo -u qqpet-sync /usr/bin/node /opt/qqpet-sync/dist/server/src/index.js backup
 
 - 定时备份：`qqpet-sync-backup.timer` 每天 03:15，`Persistent=true`（错过会在开机后补跑一次），随机延迟最多 600 秒（`server/deploy/qqpet-sync-backup.timer:4-7`）。
 - 备份实现是 SQLite 在线备份 API（`server/src/db.ts:1524-1526`），不是文件复制；用 `cp` 复制运行中的库可能拿到不一致快照或丢 WAL。
+- `client-data/`（`release.json`、`packs.json`、`*.qqpetpack`）与数据库同卷，但**不属于 SQLite 在线备份**：`backup`/`restore` 只处理 `qqpet.sqlite`，这些发布文件需单独备份，恢复后放回 `/var/lib/qqpet-sync/client-data/`（缺文件时 `/v1/client/release`、`/v1/client/packs.json` 回 404 `release_unavailable`/`packs_unavailable`）。
 - 建议保留：至少 7 份日备、4 份周备、3 份月备；每次恢复/迁移前的现场副本保留到变更被确认。
 - 至少一份备份放到不同主机/存储；备份内含哈希后的设备凭据与会话数据，按敏感数据保护。
 - 定期演练恢复：用临时目录与临时端口演练完整流程（init → 备份 → 命令 → restore → 起服 → `/readyz`），不要把生产库当练习对象。

@@ -1,9 +1,14 @@
 import { APP_VERSION } from '../../shared/version'
+import { UPSTREAM_NOT_CONFIGURED, normalizeUpstreamUrl } from '../../shared/upstream'
 import type { Release } from '../../shared/ipc'
 import { save, update } from '../pet/store'
+import { FIRST_RUN_UPSTREAM_KEY } from '../first-run-flow'
 import { windowView } from './window-view'
 
 const DAY = 86400
+
+/** The message of a rejected invoke, without Electron's channel prefix. */
+const messageOf = (e: unknown): string => String((e as Error)?.message ?? e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
 
 /** x.y.z compared numerically; pre-release and build metadata are ignored. */
 function newer(a: string, b: string): boolean {
@@ -18,8 +23,14 @@ export async function checkUpdate(manual: boolean): Promise<void> {
   let r: Release
   try {
     r = await window.qqpet.latestRelease()
-  } catch {
-    if (manual) windowView({ title: '检查更新', msg: '检查更新失败，请检查网络后重试~' })
+  } catch (e) {
+    // Without an upstream the automatic check has nothing to ask: skip it quietly and try again later.
+    if (!manual) return
+    windowView(
+      upstreamMissing(e)
+        ? { title: '检查更新', msg: '未配置上游服务器，无法检查更新。可以在「关于」里填写 qqpet-server 地址后重试~' }
+        : { title: '检查更新', msg: '检查更新失败，请检查网络后重试~' },
+    )
     return
   }
   update('settings', { updateCheckedAt: Math.floor(Date.now() / 1000) })
@@ -62,7 +73,10 @@ async function installOffer(): Promise<void> {
 }
 
 /** Electron prefixes a rejected invoke with the channel name. */
-export const ipcError = (e: unknown): string => (e as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
+export const ipcError = (e: unknown): string => messageOf(e)
+
+/** True when the failure is "no qqpet-server configured", not a network or data error: the fix is a setting. */
+export const upstreamMissing = (e: unknown): boolean => messageOf(e).includes(UPSTREAM_NOT_CONFIGURED)
 
 export function packReady(version: string): void {
   windowView({
@@ -72,8 +86,31 @@ export function packReady(version: string): void {
   })
 }
 
+/**
+ * The qqpet-server the pet takes weather, the calendar and update checks from; empty means offline (the calendar still
+ * computes locally). Device-local: never uploaded, and server storage mode uses the paired server instead.
+ */
+export function setUpstreamUrl(v: string): void {
+  const value = v.trim()
+  update('settings', { upstreamUrl: value })
+  if (value && normalizeUpstreamUrl(value) === null) {
+    windowView({ title: '上游服务器', msg: '这个地址用不了：需要 https:// 或 wss:// 地址（例如 https://pet.example.com 或 wss://pet.example.com/v1/sync），公网服务器要用 https。天气、更新和内容包在填对之前都不可用。' })
+  }
+}
+
+/**
+ * The lite first-run window (#28) has no save yet and keeps the server address in localStorage; the pet takes it over
+ * as the device-local setting, so weather, updates and content packs keep working after the restart.
+ */
+function adoptFirstRunUpstream(): void {
+  if (save.settings.upstreamUrl) return
+  const address = localStorage.getItem(FIRST_RUN_UPSTREAM_KEY)?.trim() ?? ''
+  if (address) update('settings', { upstreamUrl: address })
+}
+
 /** Hourly look at the clock, so a machine that slept or was offline still checks once a day. */
 export function startAutoUpdate(): void {
+  adoptFirstRunUpstream()
   const due = (): void => {
     if (save.settings.autoUpdate && Date.now() / 1000 - save.settings.updateCheckedAt >= DAY) void checkUpdate(false)
   }

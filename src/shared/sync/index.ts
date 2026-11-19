@@ -30,6 +30,7 @@ export {
   migratePortablePetBundle,
   migrateLegacySaveDataToPortableBundle,
   migrateLegacyLocalPetDocumentV2,
+  backfillRemoteProjectionCacheDefaults,
   serializePortablePetBundle,
   deserializePortablePetBundle,
   assertLocalPetDocumentV2,

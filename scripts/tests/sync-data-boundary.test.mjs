@@ -29,6 +29,7 @@ const {
   assertPortablePetBundle,
   assertRemoteProjectionCacheV2,
   assertSharedSaveData,
+  composeSaveWithOverlay,
   deserializePortablePetBundle,
   filterIslandCanonicalState,
   filterNeverUpload,
@@ -36,6 +37,7 @@ const {
   LEGACY_PORTABLE_BUNDLE_FORMAT,
   LEGACY_PORTABLE_BUNDLE_SCHEMA_VERSION,
   migrateLegacyLocalPetDocumentV2,
+  backfillRemoteProjectionCacheDefaults,
   migrateLegacySaveDataToPortableBundle,
   migratePortablePetBundle,
   projectExamSession,
@@ -62,7 +64,7 @@ const {
   SEED,
   createSyncFixtures,
 } = await import('./sync-fixtures.mjs')
-const { INITIAL_DIAMOND_COUNT } = await import('../../src/shared/save-logic.ts')
+const { INITIAL_DIAMOND_COUNT, startSave } = await import('../../src/shared/save-logic.ts')
 const { normalizeLocalRepositoryDocument } = await import('../../src/shared/local-repository/host.ts')
 
 const fixtures = createSyncFixtures()
@@ -171,6 +173,16 @@ test('shared save filtering removes device fields, local settings and local-only
   }
   assert.equal(validateSharedSaveData(withInvalidBlob), false)
 
+  // The upstream address is device-local: a canonical shared save carrying it is rejected, so no
+  // projection or bundle can ever upload it.
+  assert.equal(Object.prototype.hasOwnProperty.call(fixtures.shared.settings, 'upstreamUrl'), false)
+  const withUpstream = {
+    ...fixtures.shared,
+    settings: { ...fixtures.shared.settings, upstreamUrl: 'https://pet.example.com' },
+  }
+  assert.equal(validateSharedSaveData(withUpstream), false)
+  expectSchemaCode(() => assertSharedSaveData(withUpstream), 'forbidden_field')
+
   const withAnswerKey = {
     ...fixtures.shared,
     activeOption: { ...fixtures.shared.activeOption, answerIndex: 1 },
@@ -195,6 +207,22 @@ test('device overlay retains canonical local identity and secrets locally', () =
     settings: { ...fixtures.device.settings, aiKey: 42 },
   }), false)
   assert.equal(JSON.stringify(fixtures.shared).includes('sk-test-secret'), false)
+
+  // settings.upstreamUrl: device-local, string-typed, and visible to the renderer through the overlay.
+  assert.equal(DEVICE_LOCAL_SETTINGS_KEYS.includes('upstreamUrl'), true)
+  assert.equal(typeof fixtures.device.settings.upstreamUrl, 'string')
+  assert.equal(fixtures.device.settings.upstreamUrl, '')
+  const deviceWithUpstream = {
+    ...fixtures.device,
+    settings: { ...fixtures.device.settings, upstreamUrl: 'https://pet.example.com' },
+  }
+  assert.equal(validateDeviceLocalOverlay(deviceWithUpstream), true)
+  assert.equal(validateDeviceLocalOverlay({
+    ...deviceWithUpstream,
+    settings: { ...deviceWithUpstream.settings, upstreamUrl: 42 },
+  }), false)
+  assert.equal(composeSaveWithOverlay(fixtures.shared, deviceWithUpstream).settings.upstreamUrl, 'https://pet.example.com')
+  assert.equal(composeSaveWithOverlay(fixtures.shared, fixtures.device).settings.upstreamUrl, '')
   assert.equal(JSON.stringify(fixtures.bundle).includes('sk-test-secret'), false)
   assert.equal(JSON.stringify(fixtures.bundle).includes('search-test-secret'), false)
   assert.equal(JSON.stringify(fixtures.bundle).includes('webhook-test-secret'), false)
@@ -208,6 +236,22 @@ test('device overlay retains canonical local identity and secrets locally', () =
   assert.deepEqual(filtered, { safe: { keep: 1 }, list: [{ keep: true }] })
   assert.equal(secretTree.safe.aiKey, 'a')
   assert.equal(secretTree.list[0].token, 'x')
+
+  // A new save starts with no upstream; a stored one keeps its address, and a non-string is repaired.
+  assert.equal(startSave(null).settings.upstreamUrl, '')
+  const storedSave = JSON.parse(JSON.stringify(fixtures.save))
+  storedSave.settings.upstreamUrl = 'wss://pet.example.com/v1/sync'
+  assert.equal(startSave(storedSave).settings.upstreamUrl, 'wss://pet.example.com/v1/sync')
+  storedSave.settings.upstreamUrl = 42
+  const warnings = []
+  const warn = console.warn
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    assert.equal(startSave(storedSave).settings.upstreamUrl, '')
+  } finally {
+    console.warn = warn
+  }
+  assert.equal(warnings.some((message) => String(message).includes('settings.upstreamUrl')), true)
 })
 
 test('engine, portable bundle and local document validate and round-trip canonically', () => {
@@ -328,6 +372,12 @@ test('engine, portable bundle and local document validate and round-trip canonic
   expectSchemaCode(() => assertLocalPetDocumentV2({ ...fixtures.localDocument, bundle: conflictingOriginBundle }), 'identity_mismatch')
   assert.equal(validateRemoteProjectionCacheV2(fixtures.remoteCache), true)
   assertRemoteProjectionCacheV2(fixtures.remoteCache)
+  const oldRemoteCache = JSON.parse(JSON.stringify(fixtures.remoteCache))
+  delete oldRemoteCache.device.settings.upstreamUrl
+  assert.equal(validateRemoteProjectionCacheV2(oldRemoteCache), false)
+  backfillRemoteProjectionCacheDefaults(oldRemoteCache)
+  assert.equal(oldRemoteCache.device.settings.upstreamUrl, '')
+  assert.equal(validateRemoteProjectionCacheV2(oldRemoteCache), true)
   assertGameSessionPayload(fixtures.examSession.payload)
   assertGameSessionPayload(fixtures.quizSession.payload)
   expectSchemaCode(() => assertGameSessionPayload({
@@ -719,6 +769,15 @@ test('pre-#75 saves, bundles and local documents backfill petInfo.diamond on mig
   const normalized = normalizeLocalRepositoryDocument(plainDocument).document
   assert.equal(normalized.bundle.shared.petInfo.diamond, INITIAL_DIAMOND_COUNT)
   assert.equal(validateLocalPetDocumentV2(normalized), true)
+
+  // A pre-upstream device overlay has no settings.upstreamUrl; loading must fill the new
+  // device-local default instead of rejecting the document as corrupt.
+  const oldSettingsDocument = JSON.parse(JSON.stringify(fixtures.localDocument))
+  delete oldSettingsDocument.device.settings.upstreamUrl
+  assert.equal(validateLocalPetDocumentV2(oldSettingsDocument), false)
+  const normalizedSettings = normalizeLocalRepositoryDocument(oldSettingsDocument).document
+  assert.equal(normalizedSettings.device.settings.upstreamUrl, '')
+  assert.equal(validateLocalPetDocumentV2(normalizedSettings), true)
 
   const corrupt = JSON.parse(JSON.stringify(legacy))
   corrupt.petInfo.diamond = 'lots'

@@ -71,6 +71,23 @@ test('Nginx example proxies every documented health and WebSocket route with upg
   assert.match(nginx, /location \/ \{\s+return 404;/)
 })
 
+test('Nginx example proxies public client data routes for release, weather, calendar and packs', async () => {
+  const nginx = await read('server/deploy/nginx.conf.example')
+  const marker = 'location ^~ /v1/client/ {'
+  const start = nginx.indexOf(marker)
+  assert.ok(start >= 0, 'missing Nginx location ^~ /v1/client/')
+  const end = nginx.indexOf('\n    }', start)
+  assert.ok(end > start, 'unterminated Nginx /v1/client/ location')
+  const block = nginx.slice(start, end + 6)
+  assert.match(block, /proxy_pass http:\/\/qqpet_sync;/)
+  assert.match(block, /proxy_http_version 1\.1;/)
+  assert.match(block, /proxy_read_timeout 3600s;/)
+  assert.match(block, /proxy_send_timeout 3600s;/)
+  assert.match(block, /proxy_buffering off;/)
+  // The prefix location must precede the catch-all 404 so it cannot shadow it.
+  assert.ok(start < nginx.indexOf('location / {'), '/v1/client/ must precede the catch-all location')
+})
+
 test('proxy smoke validates only the redacted public health schema', async () => {
   const publicHealth = {
     ok: true,

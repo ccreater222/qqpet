@@ -5,6 +5,13 @@
 //        [--out dist/packs] [--url-prefix https://github.com/AnkioTomas/qqpet/releases/download/v0.6.7/]
 // Without --base: the full "core" pack. With --base <tag>: only what changed in resources/pet since that tag, with
 // removed files listed as deletes. Both can be given in one run with --full; packs.json lists everything built.
+// Two indexes are written:
+//   packs.json         absolute urls (--url-prefix, e.g. the GitHub release download prefix) for older clients
+//                      and the GitHub release assets.
+//   packs-server.json  the same entries with url = name (a bare file name) because qqpet-server's
+//                      /v1/client/packs.json refuses anything but a relative name and serves the files itself.
+//                      Ship it as the qqpet-server client-data/packs.json (copy packs-server.json -> client-data/packs.json,
+//                      pack files -> client-data/) when hosting content from qqpet-server instead of GitHub.
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -71,5 +78,8 @@ if (a.base) {
   else packs.push(build(`QQPet-content-${base}-to-${version}.qqpetpack`, changed, { base, minShell: (a['min-shell'] ?? defaultMinShell(base)).replace(/^v/, ''), deletes }))
 }
 writeFileSync(join(out, 'packs.json'), JSON.stringify({ schema: 1, packs }, null, 2) + '\n')
-console.log(`packs.json: ${packs.length} packs`)
+// qqpet-server accepts only a bare file name as `url` and rewrites it to its own pack route, so its copy of the
+// index carries `url: name`; every other field stays identical to packs.json.
+writeFileSync(join(out, 'packs-server.json'), JSON.stringify({ schema: 1, packs: packs.map((p) => ({ ...p, url: p.name })) }, null, 2) + '\n')
+console.log(`packs.json: ${packs.length} packs (packs-server.json: relative urls)`)
 for (const p of packs) statSync(join(out, p.name))

@@ -1,5 +1,8 @@
 import type { PackApi } from '../shared/ipc'
 
+/** Where the first-run window keeps its server address; the pet adopts it as `settings.upstreamUrl` on the next start. */
+export const FIRST_RUN_UPSTREAM_KEY = 'qqpet.upstreamUrl'
+
 /** What the lite installer's first-run window shows (#28). */
 export type FirstRunState =
   | { kind: 'idle' }
@@ -45,13 +48,14 @@ export function firstRunFlow(api: Pick<PackApi, 'findFull' | 'download' | 'impor
   }
   show({ kind: 'idle' })
   return {
-    download: (mirror = ''): Promise<void> =>
+    /** `serverUrl` is the qqpet-server address typed on the page (https:// or wss://); find and download both use it. */
+    download: (serverUrl = ''): Promise<void> =>
       run(async () => {
         show({ kind: 'finding' })
-        const offer = await api.findFull(mirror)
+        const offer = await api.findFull(serverUrl)
         version = offer.version
         show({ kind: 'downloading', version, received: 0, total: offer.size })
-        return api.download(mirror)
+        return api.download(serverUrl)
       }),
     importPack: (): Promise<void> =>
       run(async () => {
