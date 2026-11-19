@@ -1,0 +1,5 @@
+ddw: IDENTICAL (renderer 5 entries, canonical 5 entries)
+growth: IDENTICAL (renderer 4 entries, canonical 4 entries)
+travel: IDENTICAL (renderer 9 entries, canonical 9 entries)
+tabs with reroll templates (local Math.random loot at load): ddw=2 growth=2 travel=1
+RESULT: tables identical; no static drift

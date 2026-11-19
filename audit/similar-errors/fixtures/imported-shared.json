@@ -1,0 +1,132 @@
+{
+ "activeOption": {
+  "die": null,
+  "ill": null,
+  "study": null,
+  "trip": null,
+  "work": null
+ },
+ "gameSaveDatas": {
+  "ddw": 0,
+  "fishing_harvestfish": 0,
+  "travel_china": [],
+  "travel_china_num": 0,
+  "yyds": 0
+ },
+ "havePet": true,
+ "illustrated": [
+  "10013006",
+  "102010001",
+  "10021008",
+  "10021005",
+  "60001",
+  "50001",
+  "b0000000",
+  "b0000001",
+  "t0002",
+  "100020045",
+  "growth"
+ ],
+ "isBury": false,
+ "nowTimeLine": 1794999727,
+ "petComputedlInfo": {
+  "cleanMax": 1100,
+  "healthMax": 5,
+  "hungerMax": 1100,
+  "level": 1,
+  "moodMax": 1000,
+  "nextGrowth": 125,
+  "upGrowth": 0
+ },
+ "petInfo": {
+  "PDgrowth": 0,
+  "PDgrowthValue": 0,
+  "PDgrowthValue_next": 0,
+  "PDiamondBeginDate": 0,
+  "PDiamondExpirationDate": 0,
+  "PDiamondLevel": 0,
+  "PDiamondYear": false,
+  "birthDay": 1794999727,
+  "charm": 48,
+  "clean": 1100,
+  "diamond": 4,
+  "growth": 1,
+  "health": 5,
+  "host": "主人",
+  "hunger": 1100,
+  "intel": 30,
+  "lastLoginTime": 0,
+  "mood": 1000,
+  "name": "小企鹅",
+  "onLineTime": 0,
+  "onlineDataTime": 0,
+  "pinkDiamond": false,
+  "sex": "MM",
+  "strong": 13,
+  "sweetHeart": false,
+  "sweetHeartOverTime": 0,
+  "yb": 5000
+ },
+ "saveJsonData": {
+  "activity": "0",
+  "album": "[]",
+  "email": "{}",
+  "farm": "{}",
+  "fishs": "{}",
+  "island": "{}",
+  "signin": "{\"collectionList\":{\"2026\":{\"11\":[1794952800]}},\"getBirthDayGift\":true,\"getGrowth\":[[0,2,6],null],\"isOnlineLastTime\":20,\"onlineGiftNum\":0}",
+  "task": "{}"
+ },
+ "saveNum": 1,
+ "selfGoodDatas": {
+  "background": [
+   "_b0000000*1",
+   "_b0000001*1"
+  ],
+  "clean": [
+   "_10021008*2",
+   "_10021005*2",
+   "_100020045*1"
+  ],
+  "food": [
+   "_10013006*2",
+   "_102010001*3"
+  ],
+  "medicine": [
+   "_60001*2",
+   "_50001*1"
+  ],
+  "nums": [
+   "_growth*26"
+  ],
+  "service": [],
+  "study": [],
+  "toy": [
+   "_t0002*1"
+  ],
+  "trip": [],
+  "work": []
+ },
+ "selfGoodUseOption": {
+  "background": null,
+  "clean": null,
+  "food": null,
+  "toy": null
+ },
+ "settings": {
+  "difficulty": "easy",
+  "paused": false,
+  "undying": false
+ },
+ "studyInfo": {
+  "art": 0,
+  "chinese": 0,
+  "labouring": 0,
+  "manner": 0,
+  "mathematics": 0,
+  "music": 0,
+  "pe": 0,
+  "politics": 0,
+  "wushu": 0
+ }
+}

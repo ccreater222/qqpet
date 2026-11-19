@@ -1,0 +1,564 @@
+# blob-audit evidence  (2026-11-18T20:58:46+08:00)
+
+## 0. repo state
+$ git rev-parse --short HEAD
+2b3f4ef7
+$ node -v
+v24.22.1
+
+## 1. probe.mjs full output
+$ node --experimental-strip-types audit/similar-errors/findings/blob-audit/probe.mjs
+
+== fixture sanity ==
+saveJsonData keys: activity,album,email,farm,fishs,island,signin,task
+task blob: {} | email: {} | island: {}
+
+== real imported save (task/signin/email/farm/fishs/island as imported) ==
+task.claim daily#0 | validEngine=true | REJECT not_available :: unknown task
+task.claim ddw#0 (counter 0) | validEngine=true | REJECT not_available :: task is not complete
+task.claim travel#2 Travel2 (counter 0) | validEngine=true | REJECT not_available :: task is not complete
+mail.claimAll | validEngine=true | REJECT not_available :: no mail rewards are available
+mail.claim id 0 | validEngine=true | REJECT not_available :: mail does not exist or was deleted
+signin.claimOnlineGift | validEngine=true | REJECT cooldown :: the online gift is not ready
+signin.claimBirthdayGift | validEngine=true | REJECT already_claimed :: the birthday gift was already claimed today
+signin.sign | validEngine=true | REJECT already_claimed :: already signed in today
+fishing.speedUp (non-VIP) | validEngine=true | REJECT not_available :: no pink-diamond speed-ups remain
+fishing.buy fry 2 | validEngine=true | OK {"fryId":2,"quantity":1,"cost":2,"fishIds":[1794974400]}
+farm.plant plot0 without seed | validEngine=true | REJECT insufficient_item :: not enough seeds
+farm.buySeed RadishSeed x1 | validEngine=true | OK {"seedId":"RadishSeed","quantity":1,"cost":80}
+island.arriveScene place 3 | validEngine=true | OK {"sceneId":"3","tourProgress":1,"errandId":null}
+island.turnInErrand unknown | validEngine=true | REJECT not_available :: island errand was not found
+travel.completeCollection | validEngine=true | REJECT not_available :: not every province has been visited
+
+== same save with signin blob = "{}" (post-import no sign-in history) ==
+signin.claimBirthdayGift | validEngine=true | REJECT already_claimed :: the birthday gift was already claimed today
+signin.claimOnlineGift | validEngine=true | REJECT cooldown :: the online gift is not ready
+
+== VIP with empty pond blob: speed-up counter only comes from reset/buy ==
+fishing.speedUp vip empty pond | validEngine=true | REJECT not_available :: no pink-diamond speed-ups remain
+after resetFishLimits pond: {"PD":{"allvipcnt":6,"canusecnt":6},"fishs":[]}
+fishing.speedUp vip after reset (still no fish) | validEngine=true | REJECT not_available :: the pond is empty
+
+== S3 shapes: import-validated save with empty non-blob groups ==
+pokeFace (gameSaveDatas.ddw missing) | validEngine=true | REJECT internal :: $.save.gameSaveDatas.ddw must be a finite JSON number
+task.claim travel#2 (travel_china missing) | validEngine=true | REJECT internal :: Cannot read properties of undefined (reading 'length')
+travel.completeCollection (travel_china missing) | validEngine=true | REJECT internal :: Cannot read properties of undefined (reading 'length')
+inventory.use toy t0002 (toy group missing) | validEngine=true | REJECT internal :: Cannot read properties of undefined (reading 'findIndex')
+inventory.buy food 102010001 (food group missing) | validEngine=true | REJECT internal :: Cannot read properties of undefined (reading 'findIndex')
+inventory.buy food 102010001 (food group present) | validEngine=true | OK {"itemId":"102010001","quantity":1,"paid":5}
+signin.claimOnlineGift (nums group missing) | validEngine=true | REJECT cooldown :: the online gift is not ready
+inventory.buy food 102010001 (illustrated=null) | validEngine=true | REJECT internal :: Cannot read properties of null (reading 'includes')
+job.startStudy xx-chinese (studyInfo {}) | validEngine=true | REJECT not_available :: unknown study subject
+job.startStudy xx-chinese (studyInfo.chinese=1, below classNum) | validEngine=true | OK {"jobId":1,"courseId":"xx-chinese","dueAtGameMs":1794976980000,"early":true}
+exam.start xx-chinese (studyInfo {}) | validEngine=true | REJECT not_available :: unknown study subject
+job.startWork bz (activeOption.trip missing) | validEngine=true | REJECT busy :: the pet is already busy
+activity.stop (activeOption.trip missing) | validEngine=true | OK {"stopped":"trip"}
+advanceMinute (selfGoodUseOption {}) | validEngine=true | REJECT internal :: Cannot read properties of undefined (reading 'left')
+advanceMinute (selfGoodUseOption missing toy) | validEngine=true | REJECT internal :: Cannot read properties of undefined (reading 'left')
+pokeFace (petComputedlInfo {}) | validEngine=true | REJECT internal :: $.save.petInfo.mood must be a finite JSON number
+
+== control: daily tab after a real 06:00 reset ==
+rolled daily: Toy,Study,Game,Clean
+task.claim daily#0 after reset | validEngine=true | REJECT not_available :: task is not complete
+
+== daily definitions present but taskList.daily entry missing ==
+task.claim daily#0 (definition only) | validEngine=true | REJECT not_available :: unknown task
+
+== control: fixed static-tab path (poke 5x then claim ddw#0) ==
+task.claim ddw#0 after 5 pokes | validEngine=true | OK {"tab":"ddw","index":0,"goods":[{"id":"102010001","type":"food","num":1}]}
+
+== island lazy materialization from an empty blob ==
+materialized island: day=1794952800 want="102010003" errands=8
+island.giftNpc 小艾 (materialized want) | validEngine=true | REJECT insufficient_item :: the daily want item is not owned
+
+== VIP speed-up works only after the reset counter exists ==
+fishing.speedUp vip after reset + 1 fish | validEngine=true | OK {"used":1,"remaining":5}
+
+== S3 source: legacy migration normalizes petInfo.diamond only ==
+bundle canonical studyInfo keys: chinese,mathematics,politics,music,art,manner,pe,labouring
+bundle canonical selfGoodDatas keys: food,clean,medicine,background,service,work,study,trip,nums
+bundle canonical gameSaveDatas: {"fishing_harvestfish":0,"travel_china_num":0,"ddw":0,"yyds":0}
+bundle canonical saveJsonData: {}
+bundle petInfo.diamond backfilled: 3
+bundle engine validates: true
+repaired save fields: studyInfo.wushu, selfGoodDatas.toy, gameSaveDatas.travel_china
+startSave(raw) repair result studyInfo.wushu: 0 | toy: [] | travel_china: []
+
+== commands on the real migrated bundle (no further normalization) ==
+task.claim daily#0 | validEngine=true | REJECT not_available :: unknown task
+job.startStudy xx-wushu (wushu key dropped) | validEngine=true | REJECT not_available :: unknown study subject
+inventory.use toy t0002 (toy group dropped) | validEngine=true | REJECT internal :: Cannot read properties of undefined (reading 'findIndex')
+task.claim travel#2 (travel_china dropped) | validEngine=true | REJECT internal :: Cannot read properties of undefined (reading 'length')
+travel.completeCollection (travel_china dropped) | validEngine=true | REJECT internal :: Cannot read properties of undefined (reading 'length')
+signin.claimOnlineGift (signin blob missing) | validEngine=true | REJECT cooldown :: the online gift is not ready
+
+== S3 source: legacy in-progress activity has no scheduled job after migration ==
+migrated activeOption.work: "bz" | scheduledJobs: 0 | activity blob: "30"
+after one tick -> activeOption.work: null | activity blob: "0" | task counts: {} | events: pet.statsChanged
+
+== petComputedlInfo {} : which first command survives ==
+job.startWork bz (petComputedlInfo {}) | validEngine=true | OK {"jobId":1,"activityId":"bz","dueAtGameMs":1794976200000}
+game.startSession (petComputedlInfo {}) | validEngine=true | REJECT not_available :: the pet is still an egg
+pet.cheer (petComputedlInfo {}) | validEngine=true | REJECT internal :: $.save.petInfo.mood must be a finite JSON number
+healed computed after startWork: {"level":1,"upGrowth":0,"nextGrowth":125,"hungerMax":1100,"cleanMax":1100,"healthMax":5,"moodMax":1000}
+pet.pokeFace after a successful startWork | validEngine=true | OK {"mood":9,"ddw":1,"amusing":1}
+
+## 2. blob readers and fallback shapes (src/shared/pet-runtime/runtime-helpers.ts)
+$ grep -n "export function readSharedBlob|readTaskProgress|readSignIn|readMails|readIsland|readPond|inventoryIndex|addGood|isBusy|taskCount"
+147:export function isBusy(save: SharedSaveData): boolean {
+231:export function readSharedBlob<T>(save: SharedSaveData, key: SharedSaveJsonKey, fallback: T): T {
+249:export function readTaskProgress(save: SharedSaveData): TaskProgress {
+276:export function taskCount(save: SharedSaveData, counter: TaskCounter): number {
+285:export function readSignIn(save: SharedSaveData): SignInState {
+300:export function readMails(save: SharedSaveData): MailMap {
+316:export function readIsland(save: SharedSaveData, gameTimeMs: number): IslandState {
+351:export function readPond(save: SharedSaveData): PondState {
+360:export function inventoryIndex(save: SharedSaveData, type: GoodType, id: string): number {
+370:export function addGood(save: SharedSaveData, good: RuntimeGood, count = good.num): void {
+
+$ sed -n "231,262p;285,302p;316,354p;360,390p" src/shared/pet-runtime/runtime-helpers.ts
+export function readSharedBlob<T>(save: SharedSaveData, key: SharedSaveJsonKey, fallback: T): T {
+  const raw = save.saveJsonData[key]
+  if (raw === undefined) return fallback
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return fallback
+  }
+}
+
+export function writeSharedBlob(save: SharedSaveData, key: SharedSaveJsonKey, value: unknown): void {
+  save.saveJsonData[key] = stableStringify(value)
+}
+
+export function defaultTaskProgress(): TaskProgress {
+  return { doNums: {}, taskList: { daily: [], ddw: [], growth: [], travel: [] }, daily: [], dailyDay: 0 }
+}
+
+export function readTaskProgress(save: SharedSaveData): TaskProgress {
+  const fallback = defaultTaskProgress()
+  const parsed = readSharedBlob<Partial<TaskProgress>>(save, 'task', {})
+  return {
+    doNums: parsed.doNums ?? {},
+    taskList: {
+      daily: parsed.taskList?.daily ?? fallback.taskList.daily,
+      ddw: parsed.taskList?.ddw ?? fallback.taskList.ddw,
+      growth: parsed.taskList?.growth ?? fallback.taskList.growth,
+      travel: parsed.taskList?.travel ?? fallback.taskList.travel,
+    },
+    daily: parsed.daily ?? [],
+    dailyDay: parsed.dailyDay ?? 0,
+  }
+export function readSignIn(save: SharedSaveData): SignInState {
+  const parsed = readSharedBlob<Partial<SignInState>>(save, 'signin', {})
+  return {
+    collectionList: parsed.collectionList ?? {},
+    getGrowth: parsed.getGrowth ?? null,
+    onlineGiftNum: parsed.onlineGiftNum ?? 0,
+    isOnlineLastTime: parsed.isOnlineLastTime ?? 20,
+    getBirthDayGift: parsed.getBirthDayGift ?? true,
+  }
+}
+
+export function writeSignIn(save: SharedSaveData, signin: SignInState): void {
+  writeSharedBlob(save, 'signin', signin)
+}
+
+export function readMails(save: SharedSaveData): MailMap {
+  return readSharedBlob<MailMap>(save, 'email', {})
+}
+export function readIsland(save: SharedSaveData, gameTimeMs: number): IslandState {
+  const parsed = readSharedBlob<Partial<IslandState>>(save, 'island', {})
+  if (parsed.newsFacts !== undefined) {
+    if (Array.isArray(parsed.newsFacts) === false || parsed.newsFacts.some(fact =>
+      Array.isArray(fact) === false || fact.length !== 2 ||
+      typeof fact[0] !== 'string' || typeof fact[1] !== 'string',
+    )) reject('invalid_payload', 'malformed island newsFacts')
+  }
+  if (parsed.newsDay !== undefined &&
+      (typeof parsed.newsDay !== 'number' || Number.isSafeInteger(parsed.newsDay) === false || parsed.newsDay < 0)) {
+    reject('invalid_payload', 'malformed island newsDay')
+  }
+  return {
+    day: parsed.day ?? Math.floor(gameTimeMs / 1000),
+    sent: parsed.sent ?? 0,
+    letter: parsed.letter ?? '',
+    lit: parsed.lit ?? [],
+    lamps: parsed.lamps ?? [],
+    tier: parsed.tier ?? 0,
+    pieces: parsed.pieces ?? 0,
+    piece: parsed.piece ?? false,
+    want: parsed.want ?? '',
+    loved: parsed.loved ?? false,
+    errands: parsed.errands ?? [],
+    fought: parsed.fought ?? [],
+    wins: parsed.wins ?? 0,
+    newsFacts: parsed.newsFacts ?? [],
+    newsDay: parsed.newsDay ?? 0,
+  }
+}
+
+export function writeIsland(save: SharedSaveData, island: IslandState): void {
+  writeSharedBlob(save, 'island', island)
+}
+
+export function readPond(save: SharedSaveData): PondState {
+  const parsed = readSharedBlob<Partial<PondState>>(save, 'fishs', {})
+  return { PD: parsed.PD ?? { allvipcnt: 0, canusecnt: 0 }, fishs: parsed.fishs ?? [] }
+}
+export function inventoryIndex(save: SharedSaveData, type: GoodType, id: string): number {
+  return save.selfGoodDatas[type].findIndex((entry: string) => entry.startsWith('_' + id + '*'))
+}
+
+export function inventoryCount(save: SharedSaveData, type: GoodType, id: string): number {
+  const index = inventoryIndex(save, type, id)
+  if (index < 0) return 0
+  return Number(save.selfGoodDatas[type][index].split('*')[1] ?? 0) || 0
+}
+
+export function addGood(save: SharedSaveData, good: RuntimeGood, count = good.num): void {
+  if (Number.isSafeInteger(count) === false || count <= 0) return
+  if (save.illustrated.includes(good.id) === false) save.illustrated.push(good.id)
+  const list = save.selfGoodDatas[good.type]
+  const index = inventoryIndex(save, good.type, good.id)
+  const next = (index >= 0 ? Number(list[index].split('*')[1] ?? 0) : 0) + count
+  const code = '_' + good.id + '*' + String(next)
+  if (index >= 0) list[index] = code
+  else list.push(code)
+}
+
+export function takeGood(save: SharedSaveData, type: GoodType, id: string, count = 1): boolean {
+  const current = inventoryCount(save, type, id)
+  if (current < count) return false
+  const index = inventoryIndex(save, type, id)
+  const list = save.selfGoodDatas[type]
+  const left = current - count
+  if (left > 0) list[index] = '_' + id + '*' + String(left)
+  else list.splice(index, 1)
+  return true
+}
+
+## 3. blob schema validators: every field optional, so '{}'/'[]' pass import
+$ grep -n "function assertTaskBlob|...assertPondBlob|assertFarmBlob|assertAlbumBlob|assertEmailBlob|assertActivityBlob|assertIslandCanonical|SHARED_SAVE_JSON_BLOB_VALIDATORS" src/shared/sync/data-boundary.ts
+668:function assertTaskBlob(value: unknown, path: string): void {
+693:function assertSigninBlob(value: unknown, path: string): void {
+728:function assertPondBlob(value: unknown, path: string): void {
+770:function assertFarmBlob(value: unknown, path: string): void {
+796:function assertAlbumBlob(value: unknown, path: string): void {
+825:function assertEmailBlob(value: unknown, path: string): void {
+833:function assertActivityBlob(value: unknown, path: string): void {
+847:function assertIslandCanonical(value: unknown, path: string): void {
+905:export const SHARED_SAVE_JSON_BLOB_VALIDATORS: Record<SharedSaveJsonKey, (value: unknown, path: string) => void> = {
+937:  SHARED_SAVE_JSON_BLOB_VALIDATORS[key](parsed, path)
+954:  if (key !== 'island') SHARED_SAVE_JSON_BLOB_VALIDATORS[key](canonical, path)
+
+$ sed -n "358,380p" src/shared/sync/data-boundary.ts   # assertSharedSaveData validates no non-blob group
+export function assertSharedSaveData(value: unknown): asserts value is SharedSaveData {
+  try {
+    assertJsonSafe(value)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'shared save is not JSON-safe'
+    failSchema('invalid_schema', '$.shared', message)
+  }
+  requireJsonValue(value, '$.shared')
+  requireRecord(value, '$.shared')
+  assertNoForbiddenJsonKey(value, '$.shared')
+  assertRequiredKeys(value, SHARED_SAVE_KEYS, '$.shared')
+  assertOnlyKeys(value, SHARED_SAVE_KEYS, '$.shared')
+  assertNoNeverUpload(value, '$.shared')
+  assertNoSessionAnswerKeys(value, '$.shared')
+  assertPetInfo(value.petInfo, '$.shared.petInfo')
+  assertSharedSettings(value.settings, '$.shared.settings')
+  requireRecord(value.saveJsonData, '$.shared.saveJsonData')
+  assertOnlyKeys(value.saveJsonData, SHARED_SAVE_JSON_KEYS, '$.shared.saveJsonData')
+  for (const [key, blob] of Object.entries(value.saveJsonData)) {
+    if (typeof blob !== 'string') failSchema('invalid_schema', '$.shared.saveJsonData.' + key, 'expected a JSON string')
+    assertCanonicalSaveJsonBlob(key, blob, '$.shared.saveJsonData.' + key)
+  }
+}
+
+## 4. non-blob canonical groups are never validated
+$ grep -rn "studyInfo|selfGoodDatas|selfGoodUseOption|gameSaveDatas|illustrated|petComputedlInfo|activeOption" src/shared/sync/*.ts
+src/shared/sync/data-boundary.ts:84:  'havePet', 'isBury', 'saveNum', 'nowTimeLine', 'petInfo', 'petComputedlInfo',
+src/shared/sync/data-boundary.ts:85:  'studyInfo', 'activeOption', 'selfGoodDatas', 'selfGoodUseOption', 'gameSaveDatas',
+src/shared/sync/data-boundary.ts:86:  'illustrated', 'saveJsonData', 'settings',
+src/shared/sync/portable.ts:616:      'havePet', 'isBury', 'saveNum', 'nowTimeLine', 'petInfo', 'petComputedlInfo', 'studyInfo',
+src/shared/sync/portable.ts:617:      'activeOption', 'selfGoodDatas', 'selfGoodUseOption', 'gameSaveDatas', 'illustrated',
+
+## 5. migration normalization covers petInfo.diamond only
+$ sed -n "589,607p" src/shared/sync/portable.ts
+/**
+ * Backfills canonical defaults added after an older bundle was written. A bundle carries the
+ * canonical snapshot twice (`shared` and `engine.save`); both copies get the same default so the
+ * bundle's shared/engine identity assertion still holds.
+ */
+function backfillPortableBundleDefaults(bundle: Record<string, unknown>): string[] {
+  const filled = backfillLegacySharedPetInfo(bundle.shared)
+  if (isRecord(bundle.engine)) filled.push(...backfillLegacySharedPetInfo(bundle.engine.save))
+  return filled
+}
+
+/**
+ * In-place upgrade for local v2 documents written before `petInfo.diamond` (#75) existed.
+ * Validation stays strict; this only fills fields a pre-upgrade document could not have.
+ */
+export function backfillLegacyLocalPetDocumentDefaults(value: unknown): string[] {
+  if (isRecord(value) === false || isRecord(value.bundle) === false) return []
+  return backfillPortableBundleDefaults(value.bundle)
+}
+
+$ sed -n "231,254p" src/shared/sync/data-boundary.ts
+/**
+ * Canonical petInfo fields that predate older saves, with the value startSave() repairs them to:
+ * a pet that never had the field gets the same 3 diamonds a new one starts with (#75).
+ */
+export const LEGACY_PET_INFO_DEFAULTS = { diamond: INITIAL_DIAMOND_COUNT } as const
+
+/**
+ * Backfills canonical petInfo fields that older saves/bundles predate, in place.
+ * Only absent keys are filled: a present-but-invalid value still fails the shared schema,
+ * so upgrading an old snapshot can never launder bad data. Returns the filled field names.
+ */
+export function backfillLegacySharedPetInfo(save: unknown): string[] {
+  if (typeof save !== 'object' || save === null || Array.isArray(save)) return []
+  const petInfo = (save as Record<string, unknown>).petInfo
+  if (typeof petInfo !== 'object' || petInfo === null || Array.isArray(petInfo)) return []
+  const record = petInfo as Record<string, unknown>
+  const filled: string[] = []
+  for (const [key, value] of Object.entries(LEGACY_PET_INFO_DEFAULTS)) {
+    if (record[key] !== undefined) continue
+    record[key] = value
+    filled.push(key)
+  }
+  return filled
+}
+
+## 6. server / local index receive the bundle without blob or group normalization
+$ sed -n "147,160p" server/src/portable-import.ts
+  let engine: EngineState
+  try {
+    engine = JSON.parse(JSON.stringify(bundle.engine)) as EngineState
+    assertEngineState(engine)
+  } catch {
+    return fail('invalid_payload', 'bundle engine is invalid')
+  }
+  const importedAnchor = engine.lastSchedulerWallMs
+  if (isSafeNonNegative(importedAnchor) === false) return fail('invalid_payload', 'imported scheduler anchor is invalid')
+  const canonicalDailyMetadata = hasCanonicalDailyBoundaryMetadata(engine)
+  if (canonicalDailyMetadata === false && hasRecoverableFrozenDailyBoundaryMetadata(engine) === false) {
+    return fail('invalid_payload', 'imported daily-boundary metadata is invalid')
+  }
+  if (canonicalDailyMetadata === false) normalizeDailyBoundaryMetadata(engine)
+
+$ sed -n "884,900p" src/main/local-repository.ts
+      revision: 0, eventSeq: 0, handoffId: this.newUuid(), detachedAtWallMs: 0,
+    }
+    const bundle = migrateLegacySaveDataToPortableBundle(raw, {
+      nowMs: now, localDeviceId,
+      timeZone: this.options.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
+      seedHex: this.options.seedHex || randomBytes(16).toString('hex'),
+      authority, advanceWhileEmpty: this.options.advanceWhileEmpty !== false,
+    })
+    const save = startSave(raw as Record<string, unknown> | null)
+    const device = toDeviceLocalOverlay(save, localDeviceId)
+    this.appInstanceId = this.options.appInstanceId || this.newUuid()
+    const document: LocalPetDocumentV2 = {
+      format: LOCAL_DOCUMENT_FORMAT, schemaVersion: LOCAL_DOCUMENT_SCHEMA_VERSION,
+      revision: authority.revision, eventSeq: authority.eventSeq,
+      authority: { state: 'active', stamp: authority }, bundle,
+      runtime: { appInstanceId: this.appInstanceId, startedAtWallMs: now },
+      device, idempotency: emptyOpIdCache(),
+
+## 7. the local load path DOES repair every group (the missing counterpart)
+$ grep -n "function repair|function startSave|const RULES" src/shared/save-logic.ts
+27:const RULES: Record<string, Record<string, Rule>> = {
+228:function repair(data: Record<string, any>): string[] {
+253:export function startSave(stored: Record<string, any> | null): SaveData {
+
+$ sed -n "230,262p" src/shared/save-logic.ts
+  for (const [group, rules] of Object.entries(RULES)) {
+    data[group] ??= {}
+    for (const [field, rule] of Object.entries(rules)) {
+      const v = rule(data[group][field])
+      if (v === data[group][field]) continue
+      data[group][field] = v
+      fixed.push(`${group}.${field}`)
+    }
+  }
+  data.illustrated ??= []
+  data.saveJsonData ??= {}
+  return fixed
+}
+
+/** The save in a file of ours, or in the original's config.json (under `petInfoData`). */
+export function petOf(data: Record<string, any>): Record<string, any> {
+  const pet = data.petInfoData ?? data
+  delete pet.machineId
+  delete pet.oId
+  return pet
+}
+
+/** The save to run with: the stored pet, repaired, or else a new one. */
+export function startSave(stored: Record<string, any> | null): SaveData {
+  if (stored?.havePet) {
+    const fixed = repair(stored)
+    if (fixed.length) console.warn('repaired save fields:', fixed.join(', '))
+    return stored as SaveData
+  }
+  // A new pet keeps the owner's preferences, but not the old pet's pause or hiding.
+  const save = fresh()
+  if (stored?.settings) Object.assign(save.settings, stored.settings, { paused: false, hidden: false })
+  save.settings.windowDirection = windowDirection(save.settings.windowDirection)
+
+## 8. runtime dependency points that require existing entries
+$ grep -n "travel_china|studyInfo|selfGoodUseOption|illustrated|activeOption|canusecnt" ...
+src/shared/pet-runtime/tick.ts:157:    save.activeOption.work = null
+src/shared/pet-runtime/tick.ts:162:      const subject = typeof good.value === 'string' ? good.value as keyof typeof save.studyInfo : undefined
+src/shared/pet-runtime/tick.ts:163:      if (subject !== undefined) save.studyInfo[subject] += 1
+src/shared/pet-runtime/tick.ts:168:    save.activeOption.study = null
+src/shared/pet-runtime/tick.ts:228:    if (save.activeOption.work !== null) save.activeOption.work = null
+src/shared/pet-runtime/tick.ts:229:    if (save.activeOption.study !== null) save.activeOption.study = null
+src/shared/pet-runtime/tick.ts:230:    if (save.activeOption.trip !== null) save.activeOption.trip = null
+src/shared/pet-runtime/tick.ts:239:    save.activeOption.work = activityId
+src/shared/pet-runtime/tick.ts:240:    save.activeOption.study = null
+src/shared/pet-runtime/tick.ts:241:    save.activeOption.trip = null
+src/shared/pet-runtime/tick.ts:243:    save.activeOption.study = activityId
+src/shared/pet-runtime/tick.ts:244:    save.activeOption.work = null
+src/shared/pet-runtime/tick.ts:245:    save.activeOption.trip = null
+src/shared/pet-runtime/tick.ts:247:    save.activeOption.trip = activityId
+src/shared/pet-runtime/tick.ts:248:    save.activeOption.work = null
+src/shared/pet-runtime/tick.ts:249:    save.activeOption.study = null
+src/shared/pet-runtime/tick.ts:261:    const timed = save.selfGoodUseOption[type]
+src/shared/pet-runtime/tick.ts:265:      save.selfGoodUseOption[type] = null
+src/shared/pet-runtime/tick.ts:268:      save.selfGoodUseOption[type] = { id: timed.id, left }
+src/shared/pet-runtime/tick.ts:310:        save.activeOption.ill = String(harsh ? 1 : rng.randIntInclusive(0, 2)) + '-'
+src/shared/pet-runtime/tick.ts:318:    save.activeOption.ill = null
+src/shared/pet-runtime/tick.ts:334:    save.activeOption.work = null
+src/shared/pet-runtime/tick.ts:335:    save.activeOption.study = null
+src/shared/pet-runtime/tick.ts:336:    save.activeOption.trip = null
+src/shared/pet-runtime/handlers-b.ts:65:  const currentIll = typeof save.activeOption.ill === 'string' ? save.activeOption.ill : null
+src/shared/pet-runtime/handlers-b.ts:71:    save.activeOption.ill = null
+src/shared/pet-runtime/handlers-b.ts:78:      save.activeOption.ill = null
+src/shared/pet-runtime/handlers-b.ts:118:      if (context.state.save.petInfo.health === 5) context.state.save.activeOption.ill = null
+src/shared/pet-runtime/handlers-b.ts:153:  const line = typeof save.activeOption.ill === 'string' ? save.activeOption.ill : '1-'
+src/shared/pet-runtime/handlers-b.ts:181:    save.activeOption.ill = null
+src/shared/pet-runtime/handlers-b.ts:217:  pond.PD.canusecnt = save.petInfo.pinkDiamond ? pond.PD.allvipcnt : 0
+src/shared/pet-runtime/handlers-b.ts:284:  if (save.gameSaveDatas.travel_china.length !== TRAVEL_PROVINCES.length) reject('not_available', 'not every province has been visited')
+src/shared/pet-runtime/handlers-b.ts:287:  save.gameSaveDatas.travel_china_num += 1
+src/shared/pet-runtime/handlers-b.ts:288:  save.gameSaveDatas.travel_china = []
+src/shared/pet-runtime/handlers-b.ts:293:    result: json({ travelCount: save.gameSaveDatas.travel_china_num, spent: 8888 }),
+src/shared/pet-runtime/handlers-b.ts:294:    events: [domainEvent('reward.granted', { source: 'travel_collection', travelCount: save.gameSaveDatas.travel_china_num })],
+src/shared/pet-runtime/handlers-c.ts:59:    if ((save.studyInfo[subject as keyof typeof save.studyInfo] ?? 0) < required) reject('not_available', 'education requirement is not met')
+src/shared/pet-runtime/handlers-c.ts:63:  save.activeOption.work = good.id
+src/shared/pet-runtime/handlers-c.ts:82:  const subject = (good as RuntimeGood & { value?: string }).value as keyof typeof context.state.save.studyInfo | undefined
+src/shared/pet-runtime/handlers-c.ts:83:  if (subject === undefined || Object.prototype.hasOwnProperty.call(context.state.save.studyInfo, subject) === false) {
+src/shared/pet-runtime/handlers-c.ts:86:  const lessons = context.state.save.studyInfo[subject] - (good.classNumUp ?? 0)
+src/shared/pet-runtime/handlers-c.ts:98:  context.state.save.activeOption.study = good.id
+src/shared/pet-runtime/handlers-c.ts:117:  context.state.save.activeOption.trip = province.name
+src/shared/pet-runtime/handlers-c.ts:133:  const kind = save.activeOption.work !== null ? 'work'
+src/shared/pet-runtime/handlers-c.ts:134:    : save.activeOption.study !== null ? 'study'
+src/shared/pet-runtime/handlers-c.ts:135:      : save.activeOption.trip !== null ? 'trip' : null
+src/shared/pet-runtime/handlers-c.ts:154:  const done = definition.obj === 'Travel2' ? save.gameSaveDatas.travel_china.length : counterValue(save, definition.obj)
+src/shared/pet-runtime/fishing-runtime.ts:166:  if (pond.PD.canusecnt <= 0) reject('not_available', 'no pink-diamond speed-ups remain')
+src/shared/pet-runtime/fishing-runtime.ts:173:  pond.PD.canusecnt--
+src/shared/pet-runtime/fishing-runtime.ts:175:    result: json({ used: pond.PD.allvipcnt - pond.PD.canusecnt, remaining: pond.PD.canusecnt }),
+src/shared/pet-runtime/fishing-runtime.ts:176:    events: [changed(context, pond, 'speedUp', { remaining: pond.PD.canusecnt })],
+src/shared/pet-runtime/travel.ts:82:  const existing = save.gameSaveDatas.travel_china.find(entry => entry.name === name)
+src/shared/pet-runtime/travel.ts:84:    save.gameSaveDatas.travel_china.push({ name, value: 1 })
+src/shared/pet-runtime/travel.ts:114:  save.activeOption.trip = null
+src/shared/pet-runtime/runtime-helpers.ts:148:  return save.activeOption.work !== null || save.activeOption.study !== null || save.activeOption.trip !== null
+src/shared/pet-runtime/runtime-helpers.ts:229:export interface PondState { PD: { allvipcnt: number; canusecnt: number }; fishs: FishState[] }
+src/shared/pet-runtime/runtime-helpers.ts:277:  if (counter === 'Travel2') return save.gameSaveDatas.travel_china.length
+src/shared/pet-runtime/runtime-helpers.ts:353:  return { PD: parsed.PD ?? { allvipcnt: 0, canusecnt: 0 }, fishs: parsed.fishs ?? [] }
+src/shared/pet-runtime/runtime-helpers.ts:372:  if (save.illustrated.includes(good.id) === false) save.illustrated.push(good.id)
+src/shared/pet-runtime/runtime-helpers.ts:428:  save.selfGoodUseOption[good.type as TimedType] = { id: good.id, left: minutes }
+src/shared/pet-runtime/runtime-helpers.ts:432:  return sumTimedGoodGroupBonuses(save.selfGoodUseOption, (type, id) => {
+src/shared/pet-runtime/runtime-helpers.ts:507:  save.activeOption[kind] = value
+src/shared/pet-runtime/runtime-helpers.ts:512:  save.activeOption.work = null
+src/shared/pet-runtime/runtime-helpers.ts:513:  save.activeOption.study = null
+src/shared/pet-runtime/runtime-helpers.ts:514:  save.activeOption.trip = null
+src/shared/pet-runtime/runtime-helpers.ts:594:  if (subject === undefined || Object.prototype.hasOwnProperty.call(save.studyInfo, subject) === false) return null
+
+## 9. test coverage of the audited paths
+$ grep -n "static task|task.claim|unknown task" scripts/tests/pet-runtime-c3.test.mjs
+295:test('group C: work, study, travel, activity cancellation and task claims', () => {
+332:  const claimed = ok(taskState, 'task.claim', { tab: 'daily', index: 0 })
+336:  rejected(claimed.state, 'task.claim', { tab: 'daily', index: 0 }, {}, 'already_claimed')
+344:  rejected(incomplete, 'task.claim', { tab: 'daily', index: 0 }, {}, 'not_available')
+347:test('group C: static task tab rewards are claimable before the first daily reset', () => {
+357:  const claimed = ok(poked, 'task.claim', { tab: 'ddw', index: 0 })
+366:  rejected(claimed.state, 'task.claim', { tab: 'ddw', index: 0 }, {}, 'already_claimed')
+367:  rejected(claimed.state, 'task.claim', { tab: 'ddw', index: 1 }, {}, 'not_available')
+370:test('group C: static task tabs materialize missing entries and keep existing ones intact', () => {
+377:  rejected(partial, 'task.claim', { tab: 'ddw', index: 0 }, {}, 'already_claimed')
+378:  const claimed = ok(partial, 'task.claim', { tab: 'ddw', index: 1 })
+389:  const rolled = ok(rerolled, 'task.claim', { tab: 'ddw', index: 4 })
+948:    'task.claim',
+1346:test('fresh static task rewards replay renderer load-then-reset RNG order', () => {
+
+$ grep -n "island|fishing|farm" scripts/tests/pet-runtime-c4a.test.mjs | grep "test("
+258:test('island daily interaction commands cover letters, errands, quiz and news', () => {
+337:test('fishing commands apply canonical pond growth, purchases, harvest and speed-ups', () => {
+379:test('farm commands cover seeded shop, planting, care, harvest, warehouse and sale', () => {
+436:test('fresh runtime farm can buy fertilizer then fertilize a growing plot', () => {
+462:test('farm fertilizer packages normalize to base inventory and grant seven units', () => {
+488:test('farm package fertilizer op-id replay is idempotent', () => {
+513:test('farm runtime bounds oversized farmland to the canonical plot limit', () => {
+525:test('farm reclaim validation is strict while duplicate ids are rejected by the handler', () => {
+545:test('farm reclaim converts only selected wasteland plots exactly once without rewards', () => {
+575:test('farm reclaim op-id replay is idempotent and a fresh op-id cannot reclaim twice', () => {
+602:test('C4a fishing, farm and island content tables drift-check against renderer/SWF sources', () => {
+744:test('island daily roll mirrors the 6+2, can-filtered, sold-want renderer path', () => {
+780:test('island refreshNews persists canonical facts and is idempotent until the next day', () => {
+806:test('canonical island news fields reject malformed shapes without crashing refresh', () => {
+
+$ grep -n "task|island|farm|fish|signin|mail" server/test/server.test.ts
+(no matches: server.test.ts does not exercise these command families)
+
+$ grep -n "task|daily|island" server/test/scheduler.test.ts
+12:import { createHeadlessRuntime, dailyBoundaryMs, dayKeyAt, nextDailyBoundaryMs, type EngineState } from '../../src/shared/pet-runtime/index.js'
+362:test('direct 06:00 boundaries run exactly once with no daily job rows and handle DST/timezone changes', async t => {
+372:  assert.equal(springForward.engine.nextDailyBoundaryMs, dailyBoundaryMs('2026-03-09', 'America/New_York'))
+373:  assert.equal(eventsOfType(h, 'task.progress').filter(payload => payload.dailyReset === true).length, 1)
+374:  assert.equal(eventsOfType(h, 'signin.changed').filter(payload => payload.dailyReset === true).length, 1)
+381:  const resets = eventsOfType(h, 'task.progress').filter(payload => payload.dailyReset === true)
+391:  assert.equal(shanghai.engine.nextDailyBoundaryMs, dailyBoundaryMs('2026-03-10', 'Asia/Shanghai'))
+392:  assert.equal(eventsOfType(h, 'task.progress').filter(payload => payload.dailyReset === true).length, 2)
+398:  const shanghaiResets = eventsOfType(h, 'task.progress').filter(payload => payload.dailyReset === true)
+403:  assert.equal(dailyBoundaryMs('2026-11-01', 'America/New_York'), Date.UTC(2026, 10, 1, 11, 0, 0))
+484:      throw new Error('forced daily-boundary catch-up failure')
+504:  assert.match(String(failedHttpHealth.lastError), /forced daily-boundary catch-up failure/)
+539:  assert.ok(eventsOfType(h, 'task.progress').some(payload => payload.dailyReset === true))
+731:test('portable import rejects invalid daily-boundary metadata before commit', async t => {
+749:  assert.match(rejectedNext.error?.message ?? '', /daily-boundary metadata/)
+762:  assert.match(rejectedLast.error?.message ?? '', /daily-boundary metadata/)
+798:test('portable import normalizes shifted daily metadata for paused, dead, and buried engines', async t => {
+1292:test('daily boundary keys are not replayed across a scheduler restart', async t => {
+1299:    .filter(event => event.type === 'task.progress' && JSON.parse(event.payloadJson).dailyReset === true)
+1308:    .filter(event => event.type === 'task.progress' && JSON.parse(event.payloadJson).dailyReset === true)
+
+## 10. helpers defined but never called by the runtime (fallbacks never exercised)
+$ grep -rn "claimTask(|studySubjectOf(|defaultIsland(|defaultSignIn(" src --include=*.ts
+src/renderer/pet/tasks.ts:159:    void dispatchRuntimeCommand(uiCommands.claimTask(tab, i)).then((result) => {
+src/renderer/pet/tasks.ts:175:  const result = await dispatchRuntimeCommand(uiCommands.claimTask(tab, i))
+src/shared/pet-runtime/runtime-tasks.ts:184:export function claimTask(
+src/shared/pet-runtime/runtime-helpers.ts:281:export function defaultSignIn(): SignInState {
+src/shared/pet-runtime/runtime-helpers.ts:308:export function defaultIsland(gameTimeMs: number): IslandState {
+src/shared/pet-runtime/runtime-helpers.ts:591:export function studySubjectOf(save: SharedSaveData, courseId: string): keyof StudyInfo | null {
+
+## 11. no startup/import-time materialization anywhere
+$ grep -rn "ensureStaticTaskLists|resetDailyTasks|materializeIslandDay|resetFishLimits" src server/src --include=*.ts
+src/shared/pet-runtime/tick.ts:33:import { materializeIslandDay } from './island-runtime'
+src/shared/pet-runtime/tick.ts:36:import { resetDailyTasks } from './runtime-tasks'
+src/shared/pet-runtime/tick.ts:37:import { resetFishLimits, settlePinkDiamond } from './handlers-b'
+src/shared/pet-runtime/tick.ts:124:  resetDailyTasks(state.save, boundaryMs, state.timeZone, rng, state.environment.calendarByDay?.[dayKey])
+src/shared/pet-runtime/tick.ts:126:  resetFishLimits(state.save)
+src/shared/pet-runtime/tick.ts:134:  materializeIslandDay(state, islandCtx, rng, readIsland(state.save, boundaryMs), true)
+src/shared/pet-runtime/handlers-b.ts:214:export function resetFishLimits(save: SharedSaveData): void {
+src/shared/pet-runtime/handlers-b.ts:236:  if (extending === false) resetFishLimits(save)
+src/shared/pet-runtime/handlers-c.ts:17:import { counterValue, ensureStaticTaskLists, taskDefinitionAt } from './runtime-tasks'
+src/shared/pet-runtime/handlers-c.ts:149:  const progress = ensureStaticTaskLists(save, context.rng)
+src/shared/pet-runtime/island-runtime.ts:171:export function materializeIslandDay(
+src/shared/pet-runtime/island-runtime.ts:198:  return materializeIslandDay(context.state, context.ctx, context.rng, island)
+src/shared/pet-runtime/runtime-tasks.ts:143:export function ensureStaticTaskLists(save: SharedSaveData, rng: RuntimeRng): TaskProgress {
+src/shared/pet-runtime/runtime-tasks.ts:160:export function resetDailyTasks(

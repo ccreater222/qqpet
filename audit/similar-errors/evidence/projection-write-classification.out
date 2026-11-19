@@ -1,0 +1,6 @@
+{"saveJsonData":{"freeze":"1"}} => THROWS CanonicalMutationBlockedError: canonical gameplay mutation is blocked in runtime projection mode: saveJsonData
+{"saveJsonData":{"album":"[]"}} => THROWS CanonicalMutationBlockedError: canonical gameplay mutation is blocked in runtime projection mode: saveJsonData
+{"saveJsonData":{"careLog":"[]"}} => THROWS CanonicalMutationBlockedError: canonical gameplay mutation is blocked in runtime projection mode: saveJsonData
+{"saveJsonData":{"weather":"{}"}} => allowed
+{"settings":{"faceClick":1}} => allowed
+{"settings":{"undying":true}} => THROWS CanonicalMutationBlockedError: canonical gameplay mutation is blocked in runtime projection mode: settings

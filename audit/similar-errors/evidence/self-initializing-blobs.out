@@ -1,0 +1,4 @@
+island.arriveScene -> ok | island = {"day":1792447200,"errands":8,"want":"102010003"}
+farm.reclaim -> ok | farm = {"rank":"01","farmland":18}
+fishing.buy -> ok | fishs = {"fishs":1}
+island.refreshNews -> ok | island = {"newsFacts":4}
