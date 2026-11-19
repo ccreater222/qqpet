@@ -234,3 +234,113 @@
 4. 本轮未重复 server 89 项测试、build、Electron E2E、Docker/proxy smoke；Round 1 server 测试 89/89 通过，Round 2 没有 server 业务代码改动。本结论不是发布级 gate:acceptance 替代品。
 
 **Round 2 最终判定：B1–B6 全部关闭，规定门禁通过，无未决 blocker；候选 `bf4d9dba` 在本任务范围内可提交给人类做合并决定。**
+
+---
+
+# Round 3：native 扫描与防绕过门禁复验
+
+- Tree / task：`tree-dbe0f1bdeb7ae1fa` / `task-15`。
+- 候选 HEAD：`cb6c571421e1fa1d2e17088dabab13fc2197c8c0`（在 `e2eb3400` 后一个功能提交）。
+- **Round 3 结论：可合并（仍须遵守人类合并门禁）。指定的 native、range、pre-push、CI 与正向门禁均通过，未发现新 blocker。**
+- 方法：真实候选仅做只读检查；所有 fixture、临时提交、merge 与 hook 反例在 `<tmp-clone>` 中构造。本节不记录禁用项目名、本机用户名或本机绝对路径；仓库位置统一写 `<repo-root>`。
+- 进入本轮时，报告已随 `e2eb3400` 成为 tracked 文件；因此最终状态是仅报告 `M`，而不是此前轮次的未跟踪状态。
+
+## R3.1 Native 词法与真实全量检查
+
+在 `<tmp-clone>` 的 tracked `native-verifier/` 中分别加入注释引用缺失文档：
+
+| 扩展 | 注释形式 | 结果 |
+|---|---|---|
+| `.kt` / `.kts` / `.ets` / `.m` / `.swift` | `//` 注释 | 均产生 `missing-code-doc` |
+| `.xml` / `.plist` / `.html` | `<!-- ... -->` | 均产生 `missing-code-doc` |
+| `.css` | `/* ... */` | 产生 `missing-code-doc` |
+
+`node scripts/docs/check-docs.mjs --json` 退出 **1**，九种扩展各有一条准确到文件的 `missing-code-doc`。
+
+随后删除注释 fixture，加入同路径的字符串、raw/template 字符串、XML/HTML 属性、XML/HTML 文本节点、plist `<string>`、CSS 声明值及 Objective-C `@\"...\"`；同一命令退出 **0**，`issues:[]`，没有误报。真实候选 `npm run check:docs` 也为 **0**，说明测试 fixture 的跳过边界没有污染真实检查。
+
+代码审查确认 `.java`、`.mm`、`.h`、`.gradle` 均在扩展集合及 C-like 注释映射中。它们没有独立 fixture，但复用已被 `.kt`/`.m` 等直接验证的扫描器，本轮判为可接受的非阻断测试边界，建议后续补各一条直接回归。
+
+## R3.2 `--range` 逐提交检查
+
+所有提交均在临时 clone 用 `--no-verify` 构造，以模拟提交钩子的绕过；检查命令为 `node scripts/docs/check-docs.mjs --range <base>..HEAD`（默认 baseline 场景除外）。
+
+| 场景 | 退出码 | 关键输出 / 判定 |
+|---|---:|---|
+| require 域 code-only 提交 | 1 | 失败定位到该提交、`server/src/db.ts` 与映射架构文档 |
+| 同一提交补上映射文档 | 0 | 1 个提交已同步文档 |
+| 合法 `Docs-Check: off — <至少 8 字符>` | 0 | 仅豁免该提交的 require 缺文档 |
+| 无 trailer | 1 | require 失败 |
+| 理由过短 | 1 | require 失败 |
+| warn 域提交 | 0 | 输出 1 条提醒但不阻断 |
+| `HEAD..HEAD` 空范围 | 0 | `commits:[]` / 没有需要检查的提交 |
+| 不存在的 base | 2 | 明确报告 base 提交不存在 |
+| `--range --staged` | 2 | 明确报告两种模式互斥 |
+| `DOCS_CHECK=off` 下的 code-only range | 1 | 环境变量不能跳过 range |
+| 修改 `docs/reviews/**` | 1 | `frozen-evidence-modified` |
+| 复活 `docs/superpowers/**` | 1 | `frozen-evidence-modified` |
+| reviews 文件 rename 到目录外 | 1 | 删除侧路径被冻结检查捕获 |
+| 删除 reviews 文件 | 1 | `frozen-evidence-modified` |
+| merge tree 相对第一父夹带 require 代码 | 1 | 失败 commit 正是 merge commit，证明 first-parent diff 非盲区 |
+
+另验证 `rangeBaseline`：
+
+- 默认 range 只列出 baseline 之后的 code-only 提交并退出 **1**；baseline 前的冻结迁移没有被反噬。
+- 显式 range 覆盖 baseline，同一历史迁移与后续代码提交都被报告，退出 **1**。
+- baseline 为不存在的 40 位 SHA → **2**；baseline 为非 SHA 字符串 → **2** 且明确提示必须为 40 位十六进制 commit SHA。
+
+## R3.3 `pre-push` 防绕过与 LFS 顺序
+
+临时 clone 使用真实 `core.hooksPath=.githooks`、真实 Node runtime 和旧 `.git/hooks/pre-push` marker：
+
+| 场景 | 退出码 | LFS / 参数证据 |
+|---|---:|---|
+| `--no-verify` 产生 code-only require 提交 | 1 | range 失败；旧 LFS marker 不存在 |
+| docs range 通过，旧 LFS 故意退出 27 | 27 | marker 为原始 `origin` 与 URL 两个参数，旧 hook 退出码原样透传 |
+| runtime 缺失 | 2 | 提示重新安装 hooks；旧 LFS 不执行 |
+| 假 runtime 报告 Node 20 | 2 | 提示需要 Node 22+；旧 LFS 不执行 |
+| 真实候选 HEAD 执行 `.githooks/pre-push origin <test-url>` | 0 | 默认 baseline 后 1 个提交通过；随后正常完成旧 hook 链 |
+
+这证明失败顺序为 runtime → range → LFS，不会在 docs 失败时意外转发。
+
+## R3.4 CI 接线
+
+- `.github/workflows/ci.yml` root job 在 full check 后执行 `npm run check:docs:range`。
+- 该命令不再传 `github.event.pull_request.base.sha` 或其它 PR base 参数；范围由 `docs/doc-map.json` 的 `rangeBaseline=e2eb3400...` 决定。
+- `package.json` 的 `check:docs:range` 为 `node scripts/docs/check-docs.mjs --range`。
+
+## R3.5 正向门禁
+
+| 命令 | 退出码 | 关键输出 |
+|---|---:|---|
+| `npm run test:docs` | 0 | `tests 106`, `pass 106`, `fail 0`, `skipped 0` |
+| `npm run check:docs` | 0 | 全量结构、索引、链接、native/代码引用通过 |
+| `npm run check:docs:staged` | 0 | 当前无 staged 映射影响 |
+| `npm run check:docs:range` | 0 | 默认范围内 1 个提交已同步文档 |
+| `node --check scripts/docs/*.mjs` | 0 | 无语法错误；逐文件检查也全部 0 |
+| `npm run typecheck` | 0 | node/web/harmony/e2e 四套通过 |
+| `npm run test:compat` | 0 | 自然退出；767 tests / 765 pass / 0 fail / 2 skip；89632.62ms |
+| `npm --prefix server run typecheck` | 0 | server TypeScript 通过 |
+| 真实 `.githooks/pre-push` | 0 | range 与后续转发链通过 |
+
+`git diff --check e2eb3400..HEAD` 退出 0。
+
+## R3.6 不变量复核
+
+- `5930b187` 的 8 个迁移仍为 `R100`。
+- `git diff --name-status 40fcf872..HEAD -- docs/reviews` 为空；`docs/superpowers` 不存在且无 tracked 文件。
+- doc-map 保持 8 条规则、4 require / 4 warn，并新增完整 40 位初始化 baseline。
+- 指定禁用项目名与本机用户名在相关 `md/mjs/json/yml/ts` 中检索均无匹配；本报告新增节不重复这些字面值。
+- AGENTS 仍为唯一事实源，CLAUDE 仍为 1 行指针。
+- 候选 HEAD 不在 main 中；本轮 main 也已不是 HEAD 的祖先，即两分支当前有分叉，但候选尚未合入 main。
+- 未改真实代码、文档或冻结证据，未 commit；最终只有本报告的追加修改。
+
+## R3.7 非阻断剩余风险
+
+1. **本地 `--no-verify` 不可被绝对阻止**：Git 始终允许本地绕过 commit hooks；当前增量已在 pre-push 与 CI range 检出并阻断，这满足防静默绕过目标，但不等于阻止本地产生坏提交。`git push --no-verify` 等主动绕过推送 hook 的行为仍需流程、评审和 CI 红线约束。
+2. **baseline 与 squash/rebase**：baseline 是初始化边界，不应随日常功能提交移动。squash 后合并提交自身必须同时带代码与文档或合法 trailer；rebase 若令记录的 baseline 不再存在会按工具错误 2 失败关闭，需要人类明确处理，不能自动改 baseline 规避历史检查。
+3. **serial compat**：本轮 767/765/0/2 再次自然通过；串行避免固定网络端口和短时序用例互相干扰，未减少覆盖。真实网络在极端负载下仍可能抖动，继续由 CI 观察。
+4. **native 边界**：九种格式已直接验证；`.java/.mm/.h/.gradle` 目前依赖共享 C-like lexer 与映射审查，无独立 fixture。复杂嵌套注释、非标准模板语法仍属轻量词法扫描边界，后续遇到误判应补回归而非静默跳过。
+5. 本轮未重复 server 集成测试、build、Electron E2E、Docker/proxy smoke；该结论只覆盖当前 native/range 增量，不替代发布级验收。
+
+**Round 3 最终判定：候选 `cb6c5714` 在本任务范围内可合并；无新增 blocker。**
