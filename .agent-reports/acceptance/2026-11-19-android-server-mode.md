@@ -4,7 +4,7 @@
 
 - Tree：`tree-8b47bb18fc4df96b`（Android 接入服务器模式）
 - 任务：task-1…task-9（调查 3、设计/实现 4、文档 1、独立验收 1）
-- 分支 / 基线：`feat/android-server-mode` / `b44b5a48`（未 commit、未 merge）
+- 分支 / 基线：`feat/android-server-mode` / `b44b5a48`；功能提交 `4e9b9049`，合并提交 `136d1421`，已推送 `origin/main`
 - 验收时间：2026-11-19（Asia/Shanghai）
 - 设备：`emulator-5554`，Android 13 / API 33 / arm64，WebView 101；真实 `qqpet-server` 监听 `127.0.0.1:8787`，Android 经 `adb reverse tcp:8787` 连接到 `ws://127.0.0.1:8787/v1/sync`。
 
@@ -146,5 +146,5 @@ App 设置 → 存储 → 填 `ws://127.0.0.1:8787/v1/sync` + 配对码 → “�
 3. **未实现桌面级交接**：Android 不上传本机宠物、不回迁服务器宠物、不做 owner detach/backup；这些仍走桌面 owner。移动端 `initialSource:'upload-local'` 显式拒绝。
 4. **player reset 错误只进 console**：player 在服务器模式点重置会被服务端拒绝，目前 `console.error`，无 UI 弹错；owner 正常。
 5. **桌面 Electron E2E 未在本机跑**：`test:e2e`/`test:e2e:main-process` 依赖 Electron 环境，本次用 typecheck + compat + remote 测试覆盖桌面共享层；CI 应在合并前覆盖。
-6. **规格门禁**：本次实现依据 `tmp/specs/android-server-mode.md` 草稿与用户“完成 Android 接入”的任务授权推进；未写入 `docs/specs/`、未 commit/merge，合并前需人类确认规格与合并门禁。
-7. **未提交**：工作区改动未 `git add/commit`；无关未跟踪 `audit/`、pnpm 文件保持原样。
+6. **规格门禁**：本次实现依据 `tmp/specs/android-server-mode.md` 草稿与用户“完成 Android 接入”的任务授权推进；未写入 `docs/specs/`。功能分支已按用户 2026-11-19 的明确指令合并并推送，规格正式批准稿仍可在后续单独补走流程。
+7. **合并与推送**：功能提交 `4e9b9049`，合并提交 `136d1421`（`merge: Android server mode`），`origin/main` 已同步到 `136d1421`；无关未跟踪 `audit/`、pnpm 文件保持原样。
