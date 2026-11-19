@@ -1,14 +1,26 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { registerHooks } from 'node:module'
 import test from 'node:test'
-import {
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith('.') && context.parentURL &&
+        /\/src\/shared\//.test(context.parentURL) &&
+        /\.[cm]?[jt]s$/.test(specifier) === false && specifier.endsWith('.json') === false) {
+      return nextResolve(specifier + '.ts', context)
+    }
+    return nextResolve(specifier, context)
+  },
+})
+const {
   HOLIDAY_DATA_YEARS,
   MAX_CALENDAR_DAYS,
   computeCalendarDays,
   holidayOf,
   lunarDateText,
   solarTerm,
-} from '../../src/shared/calendar-data.ts'
+} = await import('../../src/shared/calendar-data.ts')
 
 // The locally computed calendar must stand on its own: desktop local mode and qqpet-server both
 // use it when no upstream is configured. Every value below was checked against the Hong Kong
@@ -57,6 +69,10 @@ test('lunar dates match the published calendar, including a leap month', () => {
     '2026-12-09': '十一月初一',
     '2027-01-15': '腊月初八',
     '2027-02-05': '腊月廿九',
+    '2027-02-06': '正月初一',
+    '2027-02-07': '正月初二',
+    '2027-03-07': '正月三十',
+    '2027-03-08': '二月初一',
   }
   for (const [date, lunar] of Object.entries(anchors)) {
     assert.equal(computeCalendarDays(date, 1)[0].lunar, lunar, date)
@@ -192,9 +208,13 @@ test('malformed dates, ranges and day counts are rejected', () => {
   assert.equal(ancient.every((day) => day.lunar !== ''), true)
 })
 
-test('the module carries its holiday source and licence', () => {
+test('the module carries its holiday and lunar sources and licences', () => {
   const source = readFileSync(new URL('../../src/shared/calendar-data.ts', import.meta.url), 'utf8')
+  const lunar = readFileSync(new URL('../../src/shared/lunar.ts', import.meta.url), 'utf8')
   assert.match(source, /NateScarlet\/holiday-cn/)
   assert.match(source, /MIT/)
+  assert.match(lunar, /solarlunar/)
+  assert.match(lunar, /ISC/)
   assert.equal(/from\s+'electron'/.test(source), false)
+  assert.equal(/from\s+'electron'/.test(lunar), false)
 })

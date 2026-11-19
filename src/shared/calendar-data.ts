@@ -14,14 +14,15 @@
 // The 24 term dates for 2025, 2026 and 2027 match the Hong Kong Observatory tables exactly;
 // the algorithm is good for 1900-2100, and years outside that range report no term.
 //
-// Known deviation: ICU's lunar model moves a month start when the new moon falls within a few
-// minutes of Beijing midnight, and it names the 12th month 腊月 (the traditional tables and
-// src/renderer/pet/data/greet.ts both use that name, so it is kept). Across 2025-2027 every
-// lunar day matches the HKO tables except the 2027 正月: its new moon is 2027-02-06 23:57 CST
-// and Intl starts the month on 2027-02-07, one day after the published calendar. Correcting
-// that would mean replacing this Intl conversion with an own new-moon model.
+// Lunar dates come from the vendored 1900-2100 month table in `lunar.ts` (adapted from
+// solarlunar, ISC), not from ICU: ICU moves the 2027 正月 start to 2027-02-07 when the new
+// moon falls close to Beijing midnight, while the published calendar starts it on 2027-02-06.
+// The table matches the HKO tables for 2025-2027, including that boundary.
 
 import type { CalendarDay } from './ipc'
+import { lunarDateText } from './lunar'
+
+export { lunarDateText }
 
 /** The longest range `computeCalendarDays` serves; mirrors the /v1/client/calendar contract. */
 export const MAX_CALENDAR_DAYS = 31
@@ -158,19 +159,6 @@ export function holidayOf(date: string): CalendarDay['holiday'] {
   return { name: entry.name, off: entry.off }
 }
 
-const LUNAR_FORMAT = new Intl.DateTimeFormat('zh-CN-u-ca-chinese', {
-  month: 'long',
-  day: 'numeric',
-  timeZone: 'Asia/Shanghai',
-})
-
-/** 初一 … 三十, the day names Chinese calendars use (廿 not 二十). */
-const LUNAR_DAY_NAMES = [
-  '初一', '初二', '初三', '初四', '初五', '初六', '初七', '初八', '初九', '初十',
-  '十一', '十二', '十三', '十四', '十五', '十六', '十七', '十八', '十九', '二十',
-  '廿一', '廿二', '廿三', '廿四', '廿五', '廿六', '廿七', '廿八', '廿九', '三十',
-]
-
 const TERM_NAMES = [
   '小寒', '大寒', '立春', '雨水', '惊蛰', '春分', '清明', '谷雨', '立夏', '小满', '芒种', '夏至',
   '小暑', '大暑', '立秋', '处暑', '白露', '秋分', '寒露', '霜降', '立冬', '小雪', '大雪', '冬至',
@@ -237,30 +225,6 @@ function termDaysOfYear(year: number): Map<string, string> {
   }
   TERM_CACHE.set(year, days)
   return days
-}
-
-function lunarDayNumber(value: string): number {
-  const numeric = Number(value)
-  if (Number.isSafeInteger(numeric) && numeric >= 1) return numeric
-  // Defensive: an ICU build that localizes the day to Chinese numerals still resolves by name.
-  return LUNAR_DAY_NAMES.indexOf(value) + 1
-}
-
-/**
- * The lunar date of an instant's Beijing-time day, e.g. 十月十一 or 闰六月初一.
- * Throws a RangeError for an invalid Date (an unknown lunar day is a bug, not data).
- */
-export function lunarDateText(date: Date): string {
-  const parts = LUNAR_FORMAT.formatToParts(requireValidDate(date))
-  let month = ''
-  let day = 0
-  for (const part of parts) {
-    if (part.type === 'month') month = part.value
-    else if (part.type === 'day') day = lunarDayNumber(part.value)
-  }
-  const name: string | undefined = day >= 1 && day <= LUNAR_DAY_NAMES.length ? LUNAR_DAY_NAMES[day - 1] : undefined
-  if (month === '' || name === undefined) throw new RangeError('invalid_lunar_date')
-  return month + name
 }
 
 /** The solar term starting on an instant's Beijing-time day, e.g. 立冬; null for an ordinary day. */
