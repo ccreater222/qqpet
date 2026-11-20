@@ -69,7 +69,7 @@ jobs:
     timeout-minutes: 30
     env:
       NODE_OPTIONS: --max-old-space-size=2048
-      QQPET_E2E_ARTIFACTS: ${{ runner.temp }}/c12-e2e
+      QQPET_E2E_ARTIFACTS: /tmp/c12-e2e
       LIBGL_ALWAYS_SOFTWARE: '1'
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +100,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: c12-e2e-evidence
-          path: ${{ runner.temp }}/c12-e2e
+          path: /tmp/c12-e2e
           if-no-files-found: warn
 
   docker-smoke:
@@ -108,7 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      QQPET_DOCKER_SMOKE_REPORT: ${{ runner.temp }}/c12-docker/docker-smoke-report.json
+      QQPET_DOCKER_SMOKE_REPORT: /tmp/c12-docker/docker-smoke-report.json
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -144,7 +144,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: c12-docker-smoke-evidence
-          path: ${{ runner.temp }}/c12-docker
+          path: /tmp/c12-docker
           if-no-files-found: warn
 
   proxy-wss:
@@ -152,7 +152,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      QQPET_PROXY_REPORT: ${{ runner.temp }}/c12-proxy/proxy-smoke-report.json
+      QQPET_PROXY_REPORT: /tmp/c12-proxy/proxy-smoke-report.json
       QQPET_PROXY_NGINX_IMAGE: nginx:1.27-alpine
     steps:
       - uses: actions/checkout@v4
@@ -171,5 +171,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: c12-tls-wss-proxy-evidence
-          path: ${{ runner.temp }}/c12-proxy
+          path: /tmp/c12-proxy
           if-no-files-found: warn
