@@ -326,6 +326,8 @@ export interface QQPetApi {
   importSave(): Promise<void>
   /** Plays pet/game/<swf> in its own resizable window. */
   openGame(swf: string, windowId?: number): void
+  /** Optional small-game arrow keys; Android injects a trusted KeyEvent, other hosts omit or return false. */
+  sendGameKey?(code: 'ArrowLeft' | 'ArrowRight', phase: 'down' | 'up'): Promise<boolean>
   /** Native game-page exit; ordinary browser/Electron pages can keep window.close(). */
   closeGame?(): void
   /** Today and the next 30 days; computed locally when no upstream is configured, empty while the upstream fails. */

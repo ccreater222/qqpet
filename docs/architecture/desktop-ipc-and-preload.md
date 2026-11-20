@@ -77,6 +77,8 @@
 
 `capabilities` 的语义是「只在明确为 `false` 时表示不支持」，未声明即视为可用（渲染层判据见 `src/renderer/ui/setup.ts:104-117`）。移动桥不再一律写 `serverMode: false`：**Android 例外**——原生能力齐备时 `capabilities.serverMode = true` 且新增 `serverModeClientOnly = true`，表示「只能作为服务器宠物客户端，不能上传本机宠物或做权威交接」（`src/android/bridge.ts:364-370`、`src/shared/ipc.ts:285` 的 `QQPetApi.capabilities.serverModeClientOnly`）；原生能力缺失时两者都回到 `false` 并给出原因，本机模式不受影响。iOS/HarmonyOS 仍显式 `serverMode: false`（`src/ios/bridge.ts:73-83`）。桌面 preload 不声明 `localRepositoryV2`，因为渲染层优先用 `runtimeInfo()` 的真实返回值，只有该调用失败时才回落到 `capabilities.localRepositoryV2`（`src/renderer/bootstrap.ts:8-17`）。
 
+小游戏方向键是**可选宿主能力**，不进 IPC 通道表：契约在 `src/shared/renderer-api.ts` 声明 `sendGameKey?(code: ArrowLeft|ArrowRight, phase: down|up): Promise<boolean>`（`src/shared/ipc.ts` 的 `QQPetApi` 同名可选方法）。桌面不渲染 D-pad，preload 也显式返回 `Promise.resolve(false)`（`src/preload/index.ts:63`），渲染层据此回退 DOM 键盘事件；Android 则由 `src/android/bridge.ts` 的 `QQPetNative.sendGameKey` 走 `WebView.dispatchKeyEvent`，并在 down 前延迟 80ms、保证 down/up 顺序；iOS/Harmony 未实现即视为缺席。
+
 ## 4. sender 信任模型
 
 四种强度，全部失败关闭（抛错而非降级）：
@@ -143,7 +145,7 @@ Android 走的是同一组语义、不同实现：`src/mobile/server-mode.ts` �
 5. 主进程启动期只允许一个存档写入者（`desktopStartupAuthority`），冲突时进程退出（`src/main/index.ts:116-123`）。
 6. server 模式下本地运行时被冻结：不推投影、不接命令、不写盘（`src/main/storage-controller.ts:447-449`）。
 7. 命令执行失败不会让渲染进程「乐观前进」：`CommandResult` 携带 `status/revision/eventSeq/error`，投影缺口由 `requestResync` 补齐（`src/shared/renderer-api.ts:258-305`、`src/preload/renderer-api.ts:79-84`）。
-8. 平台专有能力缺席时以「字段 undefined」表达，而不是抛错或返回假值（`src/preload/index.ts:85-93`）。
+8. 平台专有能力缺席时以「字段 undefined」表达，而不是抛错或返回假值（`src/preload/index.ts:85-93`）；例外是显式声明但当前宿主不实现的 `sendGameKey`——桌面返回 `false` 以明确「有契约、无 D-pad」，渲染层据此走 DOM 回退。
 
 ## 8. 失败模式与定位
 

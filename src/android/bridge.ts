@@ -55,6 +55,8 @@ interface Native {
   /** Resolves to the picked file's text, null when cancelled. */
   importSave(id: number): void
   openGame(swf: string, windowId: number): void
+  /** Trusted arrow-key injection while a small game owns the overlay; absent on older shells. */
+  sendGameKey?(code: string, phase: string): boolean
   quit(): void
   copyText(text: string): void
   openUrl(url: string): void
@@ -94,6 +96,8 @@ declare global {
 }
 
 const native = window.QQPetNative
+/** A down delayed for cloud start must finish before its up, or a quick tap could leave a key held. */
+const pendingGameDown = new Map<string, Promise<boolean>>()
 
 // A phone sheet takes the back key while it is up: the sheet tells the host through this hook,
 // and the host calls `__qqpetBack` to close it. The desktop and the other mobile hosts have no
@@ -460,6 +464,32 @@ const api: QQPetApi = {
     relaunch()
   },
   openGame: (swf, windowId) => forwardOpenGame(native, swf, windowId),
+  // Small games only: a trusted KeyEvent reaches Ruffle's AS listener; false falls back to DOM.
+  sendGameKey: (code, phase) => {
+    if (code !== 'ArrowLeft' && code !== 'ArrowRight') return Promise.resolve(false)
+    if (phase !== 'down' && phase !== 'up') return Promise.resolve(false)
+    // A direct native call may bypass the D-pad's focus/start click; prepare the cloud first.
+    try { (window as Window & { __qqpetSmallGameKeyPrepare?: () => void }).__qqpetSmallGameKeyPrepare?.() } catch { /* old page */ }
+    const inject = (): boolean => {
+      try { return native.sendGameKey?.(code, phase) === true } catch { return false }
+    }
+    // Let Ruffle process the start click and install CloudControl's KEY_DOWN listener before
+    // the first native key. A quick up waits for the pending down, so ordering cannot invert.
+    if (phase === 'down') {
+      const pending = pendingGameDown.get(code)
+      if (pending) return pending
+      const down = new Promise<boolean>((resolve) => {
+        setTimeout(() => {
+          pendingGameDown.delete(code)
+          resolve(inject())
+        }, 80)
+      })
+      pendingGameDown.set(code, down)
+      return down
+    }
+    const pending = pendingGameDown.get(code)
+    return pending ? pending.then(() => inject()) : Promise.resolve(inject())
+  },
   calendar: () => calendar(nativeFetch, upstreamBase()),
   aiModels: (c) => aiModels(nativeFetch, c),
   aiChat: (c, messages) => aiChat(nativeFetch, c, messages),

@@ -22,6 +22,7 @@ import android.graphics.drawable.Icon
 import android.graphics.PixelFormat
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -109,6 +110,15 @@ class PetService : Service() {
     /** The page has a bottom sheet open and expects the back key (see [Bridge.setBackHandler]). */
     @Volatile
     private var backHandler = false
+
+    /** Set only while the page reports a running small game; gates all native arrow keys. */
+    @Volatile
+    private var gameKeyActive = false
+
+    /** Trusted arrow keys currently injected into the small-game overlay (37/39). */
+    private val gameKeyLock = Any()
+    private val gameKeysDown = mutableSetOf<Int>()
+    private val gameKeyLast = mutableMapOf<String, Long>()
 
     private lateinit var probe: View
     private val probeParams = LayoutParams(
@@ -294,7 +304,24 @@ class PetService : Service() {
 
     private fun quote(s: String?) = if (s == null) "null" else JSONObject.quote(s)
 
+    /** Drops every held arrow key before the overlay gives up small-game focus or visibility. */
+    private fun releaseGameKeys() {
+        val codes = synchronized(gameKeyLock) {
+            val held = gameKeysDown.toList()
+            gameKeysDown.clear()
+            gameKeyLast.clear()
+            held
+        }
+        if (codes.isEmpty()) return
+        web.post {
+            for (code in codes) {
+                try { web.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code)) } catch (_e: Throwable) { /* view may be gone */ }
+            }
+        }
+    }
+
     private fun setFocusable(on: Boolean) {
+        if (!on) releaseGameKeys()
         params.flags = if (on) params.flags and LayoutParams.FLAG_NOT_FOCUSABLE.inv() else params.flags or LayoutParams.FLAG_NOT_FOCUSABLE
         wm.updateViewLayout(root, params)
     }
@@ -380,6 +407,7 @@ class PetService : Service() {
 
     fun setShown(on: Boolean) = web.post {
         away = !on
+        if (away) releaseGameKeys()
         applyShown()
     }
 
@@ -617,6 +645,57 @@ class PetService : Service() {
 
         @JavascriptInterface
         fun setFocusable(on: Boolean) = web.post { this@PetService.setFocusable(on) }
+
+        /**
+         * Small-game arrow key bridge: only 37/39, only while the page has the game overlay
+         * focusable, 50 ms per (code, phase), down is not repeated until up, up is idempotent.
+         * The actual KeyEvent is injected on the UI thread through WebView.dispatchKeyEvent.
+         */
+        @JavascriptInterface
+        fun sendGameKey(code: String, phase: String): Boolean {
+            if (!gameKeyActive) return false
+            val keyCode = when (code) {
+                "ArrowLeft" -> KeyEvent.KEYCODE_DPAD_LEFT
+                "ArrowRight" -> KeyEvent.KEYCODE_DPAD_RIGHT
+                else -> return false
+            }
+            val action = when (phase) {
+                "down" -> KeyEvent.ACTION_DOWN
+                "up" -> KeyEvent.ACTION_UP
+                else -> return false
+            }
+            val now = SystemClock.uptimeMillis()
+            synchronized(gameKeyLock) {
+                val key = "$code:$phase"
+                val last = gameKeyLast[key] ?: 0L
+                if (now - last < 50L) return true
+                gameKeyLast[key] = now
+                if (action == KeyEvent.ACTION_DOWN) {
+                    if (!gameKeysDown.add(keyCode)) return true
+                } else if (!gameKeysDown.remove(keyCode)) {
+                    return true
+                }
+            }
+            web.post {
+                try {
+                    if ((params.flags and LayoutParams.FLAG_NOT_FOCUSABLE) != 0) setFocusable(true)
+                    web.isFocusable = true
+                    root.requestFocus()
+                    web.requestFocus()
+                    web.dispatchKeyEvent(KeyEvent(action, keyCode))
+                } catch (e: Throwable) {
+                    Log.w("QQPet", "small-game key injection failed", e)
+                }
+            }
+            return true
+        }
+
+        /** Enables the arrow bridge only for the running small game; disabling releases held keys. */
+        @JavascriptInterface
+        fun setGameKeyActive(on: Boolean) {
+            gameKeyActive = on
+            if (!on) releaseGameKeys()
+        }
 
         /** The page shows a bottom sheet that closes on the back key; kept in step with its focus. */
         @JavascriptInterface

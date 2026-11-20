@@ -59,6 +59,8 @@ const api: QQPetApi = {
   exportSave: () => ipcRenderer.invoke(IPC.exportSave),
   importSave: () => ipcRenderer.invoke(IPC.importSave),
   openGame: sendArgs(IPC.openGame),
+  // Desktop D-pads are not rendered; explicit false keeps the capability contract honest.
+  sendGameKey: () => Promise.resolve(false),
   calendar: () => ipcRenderer.invoke(IPC.calendar),
   aiModels: (c) => ipcRenderer.invoke(IPC.aiModels, c),
   aiChat: (c, messages) => ipcRenderer.invoke(IPC.aiChat, c, messages),

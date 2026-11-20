@@ -1,6 +1,6 @@
 # 原生桥接契约（Android / iOS / HarmonyOS）
 
-> 结论：三端宿主都向页面暴露同一个 `window.qqpet` 契约，但桥接方式分两族：Android 与 HarmonyOS 用「`QQPetNative` 同步方法 + `__qqpet.resolve(id, value, error)` 异步回执」的延迟调用协议；iOS 用「`webkit.messageHandlers.qqpet` 结构化消息 + 按 `page` 作用域回执」的 RPC 协议。方法名、参数形状、返回值语义在同一族内必须逐字对齐；新方法一律设计成可选能力，旧壳缺方法时页面降级而不是崩溃。Android 是唯一编入 server mode 的移动宿主：桥新增 Keystore token 三方法与 `removeStateFile`，状态文件白名单放行三个非机密配置文件，`remote-token.bin` 只能经 Keystore 方法读写；传输只允许 `wss://` 或 loopback `ws://`，iOS/HarmonyOS 仍不提供 server mode。Android 手机页面还按 1 CSS px = 1 dp 布局（平板仍 480 CSS px），手机面板打开时通过可选原生方法 `setBackHandler` 把返回键交给页面 `__qqpetBack`；旧壳缺该方法时退化为原行为。
+> 结论：三端宿主都向页面暴露同一个 `window.qqpet` 契约，但桥接方式分两族：Android 与 HarmonyOS 用「`QQPetNative` 同步方法 + `__qqpet.resolve(id, value, error)` 异步回执」的延迟调用协议；iOS 用「`webkit.messageHandlers.qqpet` 结构化消息 + 按 `page` 作用域回执」的 RPC 协议。方法名、参数形状、返回值语义在同一族内必须逐字对齐；新方法一律设计成可选能力，旧壳缺方法时页面降级而不是崩溃。Android 是唯一编入 server mode 的移动宿主：桥新增 Keystore token 三方法与 `removeStateFile`，状态文件白名单放行三个非机密配置文件，`remote-token.bin` 只能经 Keystore 方法读写；传输只允许 `wss://` 或 loopback `ws://`，iOS/HarmonyOS 仍不提供 server mode。Android 手机页面还按 1 CSS px = 1 dp 布局（平板仍 480 CSS px），手机面板打开时通过可选原生方法 `setBackHandler` 把返回键交给页面 `__qqpetBack`；旧壳缺该方法时退化为原行为。Android 另有一条只服务运行中小游戏的方向键桥 `sendGameKey`：页面声明 `window.qqpet.sendGameKey?`，原生仅注入 37/39 的真实 `KeyEvent`，其余平台缺失或返回 false，D-pad 回退 DOM 事件。
 
 ## 1. 范围与分层
 
@@ -70,6 +70,7 @@ iOS 没有 `QQPetNative`：桥用 WKScriptMessageHandler，handler 名固定 `qq
 | 导出/导入存档 | `exportSave(id,name,text)` / `importSave(id)`（`:582`、`:595`） | 同名（`Native.ets:155-189`） | `op: "exportSave"` / `"importSave"`（`:759-768`） |
 | Keystore token | `saveRemoteToken(token)` / `loadRemoteToken()` / `clearRemoteToken()`（`:526`、`:546`、`:567`） | 无 | 无 |
 | 窗口矩形 | `setBounds(x,y,w,h,viewport)`（`:637`） | `setBounds("x,y,w,h,viewport")` 单字符串（`Native.ets:228-231`） | `op: "setGeometry"` + `bounds` 字典（`QPHostController.m:625-639`） |
+| 小游戏方向键 | `sendGameKey(code,phase)` → `Boolean`，仅 37/39（`:651`） | 无 | 无 |
 | 安全区 | `safeArea(viewport)` → `"l,t,r,b"`（`:641`） | 同名同格式（`Native.ets:233-235`） | `op: "safeArea"` → 对象（`:652-692`） |
 | 托盘/通知 | `setTray(icon, tip?)`（`:631`） | `setTray(icon, tip)`，`'null'` 归一成空串（`Native.ets:220-222`） | `op: "setTray"`（`:696`） |
 | 隐藏宠物 | `setHidden(on)`（`:634`） | 同名（`Native.ets:224-226`） | 无同名 op，状态经 `status` 上报（`:697-707`） |
@@ -122,6 +123,17 @@ Android 手机与平板共用同一份 WebView，但设计空间由 `AssetClient
 - **页面入口**：`src/android/bridge.ts:98-101` 把 `native.setBackHandler?.(on)` 暴露为 `window.__qqpetSetBackHandler`，`Native` 接口里它是可选方法（`src/android/bridge.ts:61-63`）。手机模态共享 `src/renderer/ui/mobile/back.ts` 的栈：`pushBack(close)` 入栈时注册只关闭栈顶的 `window.__qqpetBack`，第一层入栈时调用 `setFocusable(true)`，最后一层释放时清空 `__qqpetBack`、调用 `setBackHandler(false)` 与 `setFocusable(false)`（`back.ts:13-39`）；sheet、box 框和宠物状态卡都复用该栈（`src/renderer/ui/mobile/sheet.ts:151`、`src/renderer/ui/box.ts:227-237`、`src/renderer/ui/state.ts:315`）。入栈的必须是会执行 `onClose`/清理的 close 路径，不能只是移除 DOM，否则面板的 `open` 闩锁不释放（见 [手机 UI 层](mobile-ui.md) §5.3）。
 - **旧壳降级**：没有 `setBackHandler` 的壳上钩子 no-op，`__qqpetBack` 永不触发，面板仍可用遮罩、✕ 或下滑关闭；这是显式能力缺席，不是失败兜底（`src/renderer/ui/mobile/back.ts:13-23`）。
 - **焦点与按键分离**：`setBackHandler` 只控制返回键路由，窗口可聚焦性仍由 `setFocusable` 负责；页面在最后一层模态关闭时统一释放两者（`src/renderer/ui/mobile/back.ts:13-23`），不要在 `__qqpetBack` 里单独切换窗口焦点。
+
+### 4.3 小游戏方向键桥（Android）
+
+`window.qqpet.sendGameKey?(code: 'ArrowLeft' | 'ArrowRight', phase: 'down' | 'up'): Promise<boolean>` 是只服务运行中小游戏的可选能力。Android 页面桥校验 code/phase 后调用 `QQPetNative.sendGameKey`（`src/android/bridge.ts:466-470`）；`PetService.Bridge.sendGameKey` 再在原生侧白名单 37/39，并在 `setGameKeyActive(true)` 之后才接受（`PetService.kt:651-689`）。按下/释放通过 `WebView.dispatchKeyEvent(KeyEvent(action, keyCode))` 注入，注入前在 UI 线程 `setFocusable(true)`、`requestFocus()` 并让 WebView 可聚焦；这是可信键盘事件，能进 Ruffle 的 AS `KEY_DOWN/KEY_UP`。
+
+- 限流与状态：同一 `(code, phase)` 50 ms 内重复忽略；down 在收到 up 前不重复注入；up 幂等；只保留两个 keyCode 的按下集合。
+- 释放：D-pad 的 `pointerup/pointercancel/pointerleave/mouseup/mouseleave` 发 up；`removeKeypad()`、`finish()`、页面隐藏和 `setGameKeyActive(false)` 都会释放所有按下的键（`smallgame.ts` 的 `releaseAll`、`PetService.kt:304-320`）。
+- 降级：方法缺失或返回 false 时，D-pad 继续走原有 DOM `KeyboardEvent`；桌面 preload 明确返回 false，HarmonyOS/iOS 不暴露该方法，D-pad 仍显示但按平台限制降级。
+- 边界：不接受其它键/文本/组合键，不申请权限，不做 `adb input`；只在 `keyboard` 声明的游戏显示 D-pad，非运行态 `setGameKeyActive(false)` 时原生直接返回 false。
+- 直接 API 调用（verifier 的 `sendGameKey` 探针）不经过 D-pad 的 press handler，所以 Android 页面桥在注入前先调用页面暴露的 `window.__qqpetSmallGameKeyPrepare()`：focus cloud iframe/Ruffle player 并向 cloud 的 canvas 派发 pointer/mouse 点击，让 `CloudControl.startGame` 安装 KEY_DOWN；down 再延迟 80ms 注入，给 Ruffle 处理 click 的时间，up 不延迟。
+- 排障：页面把非敏感计数挂在 `window.__qqpetSmallGameKeys`（`active/cloudFocus/cloudClicks/nativeDown/nativeUp/nativeTrue/nativeFalse/fallbackDown/playerHidden`），verifier 可据此区分“云未启动（playerHidden=true、cloudClicks>0）/焦点未到/native 返回 false”；原生注入异常仍写 logcat `small-game key injection failed`。
 
 ## 5. 同步返回值 vs 异步 resolve 的判据
 

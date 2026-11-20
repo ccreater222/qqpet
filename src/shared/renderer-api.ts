@@ -29,6 +29,14 @@ export interface RendererProjection {
   status?: RendererRepositoryStatus
 }
 
+/** Optional small-game arrow-key capability; missing means the renderer keeps DOM events. */
+export type GameKeyCode = 'ArrowLeft' | 'ArrowRight'
+export type GameKeyPhase = 'down' | 'up'
+export interface GameKeyBridge {
+  /** Android injects a trusted KeyEvent; other hosts return false/omit the method. */
+  sendGameKey?(code: GameKeyCode, phase: GameKeyPhase): Promise<boolean>
+}
+
 /** Unified repository status; connection is local for every C6a host. */
 export interface RendererRepositoryStatus {
   mode: 'local' | 'server'
