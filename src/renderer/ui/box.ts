@@ -1,6 +1,9 @@
 import { info, onSettingsChange, save } from '../pet/store'
 import { WINDOW_MARGIN } from '../../shared/window-direction'
 import { div, touch } from './dom'
+import { pushBack } from './mobile/back'
+import { phoneUI } from './mobile/sizing'
+import './css/phone-panels.css'
 import { windowDirectionAvailable } from './viewport'
 
 const SKINS = {
@@ -49,10 +52,23 @@ function visibleSize(viewport: HTMLElement): { w: number; h: number } {
  *
  * On touch screens it opens over a backdrop. Narrow rotatable screens can turn
  * it a quarter when that shrinks it less, unless the preference follows the screen.
+ * On a phone the frame also gets the `qp-panel` class, and `onBackdrop` closes it
+ * when the dimmed area outside the frame is tapped.
  */
-function show(frame: HTMLElement, keep?: HTMLElement): () => void {
+function show(frame: HTMLElement, keep?: HTMLElement, onBackdrop?: () => void): () => void {
+  // The page is laid out in dp on a phone (sizing.ts); the hook lets
+  // phone-panels.css restyle the frame's content without touching desktop rules.
+  const phone = phoneUI()
+  if (phone) frame.classList.add('qp-panel')
   const root = touch ? div('modal', frame) : frame
   root.dataset.hit = ''
+  // Tablets keep the old backdrop behaviour; a phone expects a tap outside the
+  // card to dismiss it, without reaching the pet underneath.
+  if (phone && onBackdrop) {
+    root.addEventListener('click', (event) => {
+      if (event.target === root) onBackdrop()
+    })
+  }
   document.body.appendChild(root)
   let dx = 0
   let dy = 0
@@ -167,7 +183,10 @@ function show(frame: HTMLElement, keep?: HTMLElement): () => void {
     document.addEventListener('pointermove', move)
     document.addEventListener('pointerup', () => document.removeEventListener('pointermove', move), { once: true })
   })
-  return () => {
+  // A phone's back key closes the framed panel like the sheet above it.
+  const releaseBack = phoneUI() ? pushBack(() => remove()) : (): void => {}
+  const remove = (): void => {
+    releaseBack()
     stopSettings()
     viewportObserver.disconnect()
     insetObserver.disconnect()
@@ -178,6 +197,7 @@ function show(frame: HTMLElement, keep?: HTMLElement): () => void {
     clearClick()
     root.remove()
   }
+  return remove
 }
 
 /**
@@ -202,7 +222,7 @@ export function openBox(content: HTMLElement, opts: { vip?: boolean; onClose?: (
   }
   frame.append(row('head', skin.head, closeBtn), body, row('foot', skin.foot))
 
-  const hide = show(frame, content)
+  let hide = (): void => {}
   let closed = false
   const close = (): void => {
     if (closed) return
@@ -210,6 +230,7 @@ export function openBox(content: HTMLElement, opts: { vip?: boolean; onClose?: (
     hide()
     opts.onClose?.()
   }
+  hide = show(frame, content, () => close())
   closeBtn.addEventListener('click', close)
   return close
 }
@@ -226,5 +247,14 @@ export function openFrame(content: HTMLElement, background?: string): () => void
   if (background) bg.style.backgroundImage = `url('${background}')`
   bg.appendChild(content)
   frame.appendChild(bg)
-  return show(frame)
+  let stop = (): void => {}
+  // Dismiss through the frame's own close control when it has one, so the
+  // panel's close hook (a timer, keyboard focus, ...) runs as well.
+  const remove = show(frame, undefined, () => {
+    const dismiss = frame.querySelector<HTMLElement>('.sclose, .windowViewBut')
+    if (dismiss) dismiss.click()
+    else stop()
+  })
+  stop = remove
+  return remove
 }

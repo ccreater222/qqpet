@@ -31,6 +31,7 @@
 | [同步协议](architecture/sync-protocol.md) | WebSocket hello、命令幂等、revision/eventSeq、resync、关闭码 |
 | [服务端数据](architecture/server-data.md) | SQLite schema、WAL/锁、覆盖度、portable import、备份与恢复世代 |
 | [原生桥](architecture/native-bridge.md) | Android/iOS/Harmony 双侧方法对齐、能力降级、移动共享层 |
+| [手机 UI 层](architecture/mobile-ui.md) | Android 手机 1 CSS px = 1 dp 设计空间、底部菜单/面板、触摸手势、逐界面适配状态与验证 |
 
 ## 指南
 

@@ -22,15 +22,24 @@ export interface PetInputActions {
   move(x: number, y: number, lifted: boolean): void
   end(lifted: boolean, vx: number, vy: number, cancelled: boolean): void
   hold(x: number, y: number): void
+  /**
+   * A press that came and went without dragging or long-pressing: the phone's
+   * click on the pet. Desktop callers omit it, so their clicks keep only the
+   * face hotspots and the context menu.
+   */
+  tap?(x: number, y: number): void
   active(on: boolean): void
   clock?(): number
   requestFrame?: typeof requestAnimationFrame
   cancelFrame?: typeof cancelAnimationFrame
 }
 
+/** A press shorter than this, with no lift and no hold, is a click (spec 4.1: tap ≤300 ms). */
+const TAP_MAX_MS = 300
+
 /** Both DOM and native gestures use the same grab point, lift threshold and velocity accounting. */
 export function createPetInput(actions: PetInputActions, holdMilliseconds = 0) {
-  let press: { id: number; source: string; x: number; y: number; startX: number; startY: number; dx: number; dy: number; grabX: number; grabY: number; scaleGrab: boolean; px: number; py: number; at: number; vx: number; vy: number; lifted: boolean } | null = null
+  let press: { id: number; source: string; x: number; y: number; startX: number; startY: number; dx: number; dy: number; grabX: number; grabY: number; scaleGrab: boolean; px: number; py: number; at: number; startedAt: number; vx: number; vy: number; lifted: boolean; held: boolean } | null = null
   let hold: ReturnType<typeof setTimeout> | null = null
   let anchorFrame = 0
   const clock = actions.clock ?? (() => performance.now())
@@ -47,6 +56,10 @@ export function createPetInput(actions: PetInputActions, holdMilliseconds = 0) {
     actions.active(false)
     const stale = cancelled || now - over.at > 80
     actions.end(over.lifted, stale ? 0 : over.vx, stale ? 0 : over.vy, cancelled)
+    // A click, not a drag and not the long press that already opened the menu.
+    // The release point is what the caller positions next to, and a cancel (a
+    // system gesture, a host pause) never becomes a click.
+    if (!cancelled && !over.lifted && !over.held && now - over.startedAt < TAP_MAX_MS) actions.tap?.(over.x, over.y)
   }
   return {
     get active(): boolean { return press !== null },
@@ -64,9 +77,9 @@ export function createPetInput(actions: PetInputActions, holdMilliseconds = 0) {
         actions.begin()
         const box = actions.position()
         const dx = input.x - box.x, dy = input.y - box.y
-        press = { id: input.id, source, x: input.x, y: input.y, startX: globalX, startY: globalY, dx, dy, grabX: dx / box.size, grabY: dy / box.size, scaleGrab: Boolean(input.scaleGrab), px: globalX, py: globalY, at: now, vx: 0, vy: 0, lifted: false }
+        press = { id: input.id, source, x: input.x, y: input.y, startX: globalX, startY: globalY, dx, dy, grabX: dx / box.size, grabY: dy / box.size, scaleGrab: Boolean(input.scaleGrab), px: globalX, py: globalY, at: now, startedAt: now, vx: 0, vy: 0, lifted: false, held: false }
         actions.active(true)
-        if (holdMilliseconds > 0) hold = setTimeout(() => { if (press) actions.hold(press.x, press.y) }, holdMilliseconds)
+        if (holdMilliseconds > 0) hold = setTimeout(() => { if (press) { press.held = true; actions.hold(press.x, press.y) } }, holdMilliseconds)
         return
       }
       if (!press || input.id !== press.id || source !== press.source) return

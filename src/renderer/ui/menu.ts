@@ -3,6 +3,9 @@ import type { TrayMenuItem } from '../../shared/ipc'
 import { info, runtimeProjectionMode, save, setPaused, setTray, update } from '../pet/store'
 import { openChat } from './chat'
 import { openGoods } from './control'
+import { openPhoneMenu } from './mobile/phone-menu'
+import type { MenuGroup } from './mobile/phone-menu-model'
+import { phoneUI } from './mobile/sizing'
 import { openFarm } from './farm'
 import { openFishing } from './fishing'
 import { openGames } from './games'
@@ -26,13 +29,17 @@ const ditu = (n: number): string => `pet/Menu/ditu0${n}.png`
 
 const WIDTH = 110
 
-interface Item {
+export interface MenuItem {
   label: string
   run?: () => void
-  children?: Item[]
+  children?: MenuItem[]
   /** Shows the check mark. */
   on?: boolean
   title?: string
+  /** The phone menu's section; unlabelled entries fall into 其他. */
+  group?: MenuGroup
+  /** Destructive entries are red and shown last. */
+  danger?: boolean
 }
 
 let current: HTMLElement | null = null
@@ -100,8 +107,8 @@ function togglePaused(): void {
   speak({ c: 'state', s: next ? 'stopGrowth' : 'startGrowth', now: true }, 'speak')
 }
 
-function items(adopt: () => void): Item[] {
-  const leave = { label: '退出宠物', run: quit }
+export function menuItems(adopt: () => void): MenuItem[] {
+  const leave = { label: '退出宠物', run: quit, danger: true }
   if (runtimeProjectionMode) {
     return runtimeMenuItems(save.havePet, {
       adopt,
@@ -124,37 +131,48 @@ function items(adopt: () => void): Item[] {
       buried: save.isBury,
     })
   }
-  if (!save.havePet) return [{ label: '选择宠物', run: adopt }, leave]
+  if (!save.havePet) return [{ label: '选择宠物', group: 'interact', run: adopt }, leave]
   if (save.isBury) {
     const title = '点击将会清空当前宠物数据，并且重置为未领养状态，请慎重选择'
-    return [...['您的宠物', '已被埋葬~', '请重新', '领养一个', '把！~'].map((label) => ({ label, title, run: readopt })), leave]
+    return [...['您的宠物', '已被埋葬~', '请重新', '领养一个', '把！~'].map((label) => ({ label, title, danger: true, run: readopt })), leave]
   }
   const help = {
     label: '设置帮助',
+    group: 'settings' as const,
     children: [
       { label: '宠物资料', run: openPetInfo },
       { label: '系统设置', run: openSetup },
     ],
   }
-  const state = { label: '宠物状态', run: () => openState(innerWidth / 2, innerHeight / 2) }
-  if (info.health === 0) return [{ label: '打开商城', run: openShop }, help, state, { label: '埋葬宠物', run: () => bury() }, leave]
+  const state = { label: '宠物状态', group: 'care' as const, run: () => openState(innerWidth / 2, innerHeight / 2) }
+  if (info.health === 0) {
+    return [
+      { label: '打开商城', group: 'care', run: openShop },
+      help,
+      state,
+      { label: '埋葬宠物', danger: true, run: () => bury() },
+      leave,
+    ]
+  }
   return [
-    { label: '和我聊天', run: openChat },
-    { label: '打开商城', run: openShop },
+    { label: '和我聊天', group: 'interact', run: openChat },
+    { label: '打开商城', group: 'care', run: openShop },
     {
       label: '喂养宠物',
+      group: 'interact',
       children: [
         { label: '喂养', run: () => openGoods('food') },
         { label: '清洗', run: () => openGoods('clean') },
         { label: '吃药', run: () => openGoods('medicine') },
       ],
     },
-    { label: save.settings.hidden ? '显示宠物' : '隐藏宠物', run: toggleHidden },
+    { label: save.settings.hidden ? '显示宠物' : '隐藏宠物', group: 'interact', run: toggleHidden },
     help,
     state,
-    { label: save.settings.paused ? '开始成长' : '停止成长', on: save.settings.paused, run: togglePaused },
+    { label: save.settings.paused ? '开始成长' : '停止成长', group: 'care', on: save.settings.paused, run: togglePaused },
     {
       label: '一起玩耍',
+      group: 'interact',
       children: [
         { label: '休息一下', run: () => void (rest() || speak({ s: '[host]，我现在还不想躺下呢~', now: true }, 'speak')) },
         { label: '找朋友玩', run: visitFriend },
@@ -165,13 +183,13 @@ function items(adopt: () => void): Item[] {
   ]
 }
 
-const pick = (it: Item) => (): void => {
+const pick = (it: MenuItem) => (): void => {
   if (it.children) return
   closeMenu()
   it.run!()
 }
 
-function list(entries: Item[], toLeft: boolean): HTMLElement {
+function list(entries: MenuItem[], toLeft: boolean): HTMLElement {
   return div(
     'menuList fC py6',
     ...entries.map((it) => {
@@ -190,7 +208,7 @@ function list(entries: Item[], toLeft: boolean): HTMLElement {
   )
 }
 
-const child = (it: Item): HTMLElement => button('menuC fc', pick(it), div('chooseC py2'), div('cententC f1 py2', it.label), div('rightNormalC py2'))
+const child = (it: MenuItem): HTMLElement => button('menuC fc', pick(it), div('chooseC py2'), div('cententC f1 py2', it.label), div('rightNormalC py2'))
 
 /**
  * Opens the context menu at window point (x, y), toward the screen's middle:
@@ -198,10 +216,13 @@ const child = (it: Item): HTMLElement => button('menuC fc', pick(it), div('choos
  */
 export function openMenu(at: { x: number; y: number; pet: boolean }, adopt: () => void): void {
   closeMenu()
-  const entries = items(adopt)
+  // A phone gets the bottom action sheet; desktop, tablets and old phone shells
+  // keep the exact popup path below (phoneUI only fires at 1 CSS px = 1 dp).
+  if (phoneUI()) return openPhoneMenu(at, adopt)
+  const entries = menuItems(adopt)
   if (!at.pet && window.qqpet.popupTrayMenu) {
     trayActions = []
-    const nativeItems = (list: Item[]): TrayMenuItem[] => list.map((item) => ({
+    const nativeItems = (list: MenuItem[]): TrayMenuItem[] => list.map((item) => ({
       label: item.label,
       checked: item.on,
       toolTip: item.title,

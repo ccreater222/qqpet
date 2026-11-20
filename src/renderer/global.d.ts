@@ -24,6 +24,10 @@ declare global {
     __qqpetNativePetInput?: boolean
     __qqpetSetPaused?: (paused: boolean) => void
     __qqpetHostPaused?: boolean
+    /** A phone sheet is open: the Android host asks it to close on the back key. */
+    __qqpetBack?: () => void
+    /** Registers the sheet owner with the Android host; unset on the desktop and the other mobile hosts. */
+    __qqpetSetBackHandler?: (on: boolean) => void
     RufflePlayer: { newest(): { createPlayer(): RufflePlayerElement } }
     /** Called by pet action SWFs (Stand and edge-peek eyes follow the cursor; scripts/swf-eyes.py). Values are "x,y,0" / "x,y,w,h". The community reads its ini through it. */
     API: { GetCursorPosition(): string; GetWindowRect(): string; GetPrivateProfileString(section: string, key: string, fallback: string, file: string): string; MoveBy(dx: number, dy: number): void }

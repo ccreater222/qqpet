@@ -14,7 +14,7 @@ import java.util.concurrent.ConcurrentHashMap
 /** Pages load from here: Ruffle fetches SWFs, configs and wasm, which file:// does not allow. */
 const val ORIGIN = "https://appassets.androidplatform.net"
 
-/** CSS pixels across the screen's short side; wider panels (the shop is 800) scale down to fit (box.ts). */
+/** CSS pixels across the screen's short side on tablets; wider panels (the shop is 800) scale down to fit (box.ts). */
 private const val VIEWPORT = 480
 
 private val TYPES = mapOf(
@@ -64,14 +64,22 @@ open class AssetClient(private val context: Context, private val hd: () -> Boole
         return dir
     }
 
-    /** The pet page, scaled so the screen's short side is [VIEWPORT] CSS pixels. */
+    /**
+     * A phone lays the page out in density-independent pixels: one CSS pixel is one dp, so touch sizes are authored
+     * as the size a finger needs (48 dp targets, 15 px text) instead of being shrunk with a fixed design space.
+     * A tablet keeps the original 480 CSS px short side, where the fixed pixel-art panels are proportioned.
+     */
     private fun indexHtml(): WebResourceResponse {
         hdOn = hd()
         val m = context.resources.displayMetrics
-        val scale = minOf(m.widthPixels, m.heightPixels) / m.density / VIEWPORT
+        val scale = maxOf(1f, minOf(m.widthPixels, m.heightPixels) / m.density / VIEWPORT)
         val meta = """<meta name="viewport" content="width=device-width, initial-scale=$scale, minimum-scale=$scale, maximum-scale=$scale, user-scalable=no">"""
         val html = context.assets.open("index.html").bufferedReader().readText().replaceFirst("<head>", "<head>$meta")
-        return response("html", ByteArrayInputStream(html.toByteArray()))
+        // The one unhashed URL: a cached copy would keep the old bundle after an APK
+        // update (the WebView cache survives reinstalls), so always revalidate it.
+        return response("html", ByteArrayInputStream(html.toByteArray())).apply {
+            setResponseHeaders(mapOf("Cache-Control" to "no-cache, no-store, must-revalidate"))
+        }
     }
 
     private fun hidpiSvg(path: String): WebResourceResponse? {

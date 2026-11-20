@@ -12,7 +12,7 @@ function load(path, services) {
   return runInNewContext(source + '\n' + (path.includes('/main/') ? 'createPetTray' : path.includes('/preload/') ? 'api' : 'openMenu'), services)
 }
 
-function fixture(platform) {
+function fixture(platform, options = {}) {
   const clicks = []
   const popups = []
   let tray
@@ -62,6 +62,10 @@ function fixture(platform) {
     update: (key, patch) => Object.assign(save[key], patch),
     setPaused: on => { save.settings.paused = on },
     runtimeProjectionMode: false,
+    // Phone menu lives in its own module; this fixture only exercises the
+    // desktop/native paths, so report tablet mode and record a phone call.
+    phoneUI: () => options.phone === true,
+    openPhoneMenu: () => { if (options.phone === true) actions.push('phone-menu') },
     speak: () => {},
   })
   return { open, save, tray, popups, clicks, actions, appended }
@@ -112,6 +116,14 @@ test('Windows keeps its HTML tray menu at the cursor, including an overflow flyo
   assert.equal(f.clicks[1].kind, 'state')
   assert.equal(f.clicks[1].x, -1200)
   assert.equal(f.clicks[1].y, -1400)
+})
+
+test('a phone opens the bottom action sheet instead of the popup/native menu', () => {
+  const f = fixture('mobile', { phone: true })
+  f.open({ x: 0, y: 0, pet: false }, () => {})
+  assert.deepEqual(f.actions, ['phone-menu'])
+  assert.equal(f.popups.length, 0, 'the phone branch runs before popupTrayMenu')
+  assert.equal(f.appended.length, 0, 'the phone branch runs before the HTML popup')
 })
 
 test('Linux and mobile retain their HTML menus and Linux retains its AppIndicator entries', () => {

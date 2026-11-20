@@ -9,3 +9,56 @@
   .ui-mstx .padButtons {grid-area:buttons;position:relative;right:auto;bottom:auto}
   .ui-mstx .padTools {grid-area:tools;position:static;align-self:start}
 }
+
+/*
+ * A phone lays the page out in dp (sizing.ts), so the pad does not have to be
+ * laid out beside the stage: side by side the 800x600 stage plus both pads made
+ * a 1188 px frame, which box.ts then shrank to 0.39 and 21 dp keys. The stage
+ * instead fits the screen by itself (4:3, never above 800x600) and the pad
+ * floats over it at its own 64 dp size, as it does on every other game page.
+ */
+body.qp-phone .ui-mstx {
+  display: block;
+}
+body.qp-phone .ui-mstx .mstx {
+  width: min(800px, calc(100vw - 32px), calc((100vh - 32px) * 4 / 3));
+  height: min(600px, calc(100vh - 32px), calc((100vw - 32px) * 0.75));
+}
+body.qp-phone .ui-mstx .gamepad {
+  display: block;
+}
+body.qp-phone .ui-mstx .gamepad[hidden] {
+  display: none;
+}
+/* Fixed to the frame (gamepad.css): arrows bottom-left, action buttons bottom-right, tools along the top. */
+body.qp-phone .ui-mstx .padArrows {
+  position: fixed;
+  left: 8px;
+  top: auto;
+  right: auto;
+  bottom: 8px;
+}
+body.qp-phone .ui-mstx .padButtons {
+  position: fixed;
+  right: 8px;
+  top: auto;
+  left: auto;
+  bottom: 8px;
+}
+body.qp-phone .ui-mstx .padTools {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  bottom: auto;
+  left: auto;
+  align-self: auto;
+}
+/* The tools are the exit path, so they meet the same 44 dp minimum as the keys. */
+body.qp-phone .ui-mstx .padTool {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 22px;
+  font-size: 15px;
+}
