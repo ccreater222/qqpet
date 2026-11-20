@@ -1,0 +1,647 @@
+/*
+ * Phone panels: the desktop pixel-art windows are fixed-size (190-432 px) with
+ * 12 px text, authored for a mouse on a 480 px design space. On a phone the page
+ * is laid out at 1 CSS px = 1 dp (sizing.ts), so those windows land at 10-12 dp
+ * text with 16-30 dp buttons. These rules resize and reflow the shared panel
+ * bodies for a finger; every selector is scoped to `body.qp-phone`, so the
+ * desktop and tablet layouts keep their own rules byte for byte.
+ */
+body.qp-phone {
+  --qp-panel-pad: 16px;
+}
+
+/* ---- box frames (box.ts) ------------------------------------------------ */
+
+/* The phone panels are centered by box.ts already; these only stop the native
+ * pixel-art frame from being wider than the reachable screen. */
+body.qp-phone .qp-panel {
+  max-width: calc(100vw - 2 * var(--qp-panel-pad));
+}
+
+/* The framed-window close button (chat, pet info) is 26x16 art. Give it a
+ * 44 dp box with the art centred at its original offset from the corner. */
+body.qp-phone .box.qp-panel .close {
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  right: -4px;
+  top: -12px;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 26px 16px;
+}
+body.qp-phone .box.qp-panel .close::before {
+  content: none;
+}
+body.qp-phone .box.vip.qp-panel .close {
+  right: 3px;
+  top: -5px;
+  background-size: 40px 30px;
+}
+
+/* ---- generic dialog (.ui-window, window-view.ts) ------------------------ */
+
+body.qp-phone .ui-window .windowView:not(.sweetHeart) {
+  width: min(340px, 92vw);
+  height: auto;
+  min-height: 236px;
+  padding: 10px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-sizing: border-box;
+  color: var(--qp-ink);
+  font-size: 15px;
+}
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .title {
+  position: static;
+  order: -1;
+  width: auto;
+  padding: 2px 30px;
+  font-size: var(--qp-font-title);
+  line-height: 1.3;
+}
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .main {
+  position: static;
+  width: auto;
+  height: auto;
+  min-height: 110px;
+  padding: 0 2px;
+  justify-content: flex-start;
+  font-size: 15px;
+  line-height: 1.45;
+}
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .msg {
+  display: block;
+  overflow: hidden;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  -webkit-box-orient: initial;
+  min-height: 0;
+  max-height: 42vh;
+  overflow-y: auto;
+  text-overflow: clip;
+  white-space: normal;
+}
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .goods {
+  height: 58px;
+  margin-top: 8px;
+}
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .goodImgBox,
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .goodImg {
+  width: 52px;
+  height: 52px;
+}
+/* Quantity stepper: 44 dp cells that keep the 18 px art centred at its own size. */
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .chooseNum {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 8px;
+}
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .chooseNum > .cut,
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .chooseNum > .cutUp,
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .chooseNum > .cutUpOver,
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .chooseNum > .add,
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .chooseNum > .addUp,
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .chooseNum > .addUpOver {
+  flex: none;
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  margin: 0;
+  background-position: center;
+  background-size: contain;
+  background-repeat: no-repeat;
+}
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .chooseNum > .content {
+  width: 72px;
+  height: var(--qp-tap-sm);
+  line-height: var(--qp-tap-sm);
+  font-size: 18px;
+  font-weight: 700;
+}
+/* The close/cancel button keeps its 26x16 art inside a 44 dp hit box. */
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .windowViewBut {
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  right: -5px;
+  top: -7px;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 26px 16px;
+}
+body.qp-phone .ui-window .sweetHeart .windowViewBut {
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  right: 2px;
+  top: 90px;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 35px 35px;
+}
+/* The primary button is a real 48 dp target; the 82x39 art is centred inside. */
+body.qp-phone .ui-window .windowView:not(.sweetHeart) .windowViewButSubmit {
+  position: static;
+  flex: none;
+  width: min(220px, 82%);
+  height: 48px;
+  min-height: 48px;
+  margin: 2px auto 0;
+  transform: none;
+  background-position: center;
+  background-size: contain;
+  background-repeat: no-repeat;
+}
+
+/* ---- pet status (.ui-state, state.ts) ---------------------------------- */
+
+/* state.ts opens the panel inside its `.ui-state` layer; on the phone the layer
+ * is the safe-area scrim and the panel is centered instead of anchored to the
+ * tray point or the pet. */
+body.qp-phone .ui-state {
+  position: fixed;
+  inset: 0;
+  z-index: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--safe-top) + 12px) 12px calc(var(--safe-bottom) + 12px);
+  box-sizing: border-box;
+  background: rgba(24, 14, 4, 0.36);
+}
+body.qp-phone .ui-state .close::before {
+  content: none;
+}
+body.qp-phone .ui-state .PetStateInfo {
+  position: relative;
+  left: auto;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  width: min(360px, 92vw);
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  color: var(--qp-ink);
+  font-size: 14px;
+  line-height: 1.4;
+}
+body.qp-phone .ui-state .px8 {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+/* The status card's own rows; the pixel frame's 9-slice rows use the same
+ * `.head`/`.foot` class names and must keep their desktop sizing. */
+body.qp-phone .ui-state .slotMain .head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 2px;
+}
+body.qp-phone .ui-state .slotMain .foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px 8px;
+}
+body.qp-phone .ui-state .slotMain .onceInfo {
+  min-height: 28px;
+  padding: 3px 2px;
+  align-items: center;
+}
+body.qp-phone .ui-state .slotMain .label {
+  font-size: 14px;
+  color: #2b3a4a;
+}
+body.qp-phone .ui-state .slotMain .value {
+  font-size: 14px;
+}
+/* The stat bars fill whatever the row has left instead of the desktop 190 px. */
+body.qp-phone .ui-state .slotMain .valueLine {
+  height: 24px;
+  min-width: 0;
+}
+body.qp-phone .ui-state .slotMain .valueLine .ui-progress {
+  width: 100%;
+}
+body.qp-phone .ui-state .slotMain .boneImg {
+  width: 14px;
+  height: 14px;
+}
+body.qp-phone .ui-state .slotMain .groupIcons {
+  width: 24px;
+  height: 24px;
+  margin-left: 6px;
+}
+/* The original pixel buttons are 17-40 px art. On a phone the element box is
+ * the 44 dp target and the art is centred inside it at its original size, so
+ * the look is unchanged while a finger gets something to hit. Sizing the box
+ * (rather than an overflowing ::after) keeps the card free of horizontal
+ * scrollable overflow. */
+body.qp-phone .ui-state .openPetInfo,
+body.qp-phone .ui-state .close,
+body.qp-phone .ui-state .butDo,
+body.qp-phone .ui-state .openSweetHeart,
+body.qp-phone .ui-state .closeSweetHeart,
+body.qp-phone .ui-state .sweetHeart,
+body.qp-phone .ui-state .pinkDiamondMain > div {
+  position: relative;
+  top: 0;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  flex: none;
+  box-sizing: border-box;
+}
+body.qp-phone .ui-state .openPetInfo {
+  width: 70px;
+  min-width: 70px;
+  height: var(--qp-tap-sm);
+  background-size: 70px 23px;
+}
+body.qp-phone .ui-state .close {
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  background-size: 17px 17px;
+}
+body.qp-phone .ui-state .butDo {
+  width: var(--qp-tap-sm);
+  min-width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  background-size: 35px 19px;
+  font-size: 14px;
+}
+body.qp-phone .ui-state .openSweetHeart,
+body.qp-phone .ui-state .closeSweetHeart {
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  background-size: 40px 23px;
+}
+body.qp-phone .ui-state .sweetHeart {
+  width: 65px;
+  height: var(--qp-tap-sm);
+  background-size: 65px 20px;
+}
+body.qp-phone .ui-state .pinkDiamondMain > div {
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  background-size: 25px 28px;
+}
+
+/* ---- chat (.ui-chat, chat.ts) ------------------------------------------ */
+
+body.qp-phone .ui-chat .chatMain {
+  width: 92vw;
+  height: 60vh;
+  padding: 12px;
+  box-sizing: border-box;
+  font-size: 15px;
+  color: var(--qp-ink);
+}
+body.qp-phone .ui-chat .chatTitle {
+  font-size: 16px;
+  padding-bottom: 8px;
+}
+body.qp-phone .ui-chat .chatLog {
+  padding: 8px;
+  font-size: 15px;
+  line-height: 1.45;
+}
+body.qp-phone .ui-chat .chatLine {
+  max-width: 86%;
+  padding: 8px 12px;
+}
+body.qp-phone .ui-chat .chatBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+}
+body.qp-phone .ui-chat .chatInput {
+  flex: 1;
+  min-width: 0;
+  height: var(--qp-tap-sm);
+  padding: 0 12px;
+  font-size: 15px;
+}
+body.qp-phone .ui-chat .chatSend {
+  flex: none;
+  width: 88px;
+  height: var(--qp-tap-sm);
+  min-width: var(--qp-tap-sm);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* ---- settings (.ui-setup2, setup.ts) ----------------------------------- */
+
+body.qp-phone .ui-setup2 .spanel {
+  width: 92vw;
+  height: min(80vh, 760px);
+  max-height: calc(100vh - var(--safe-top) - var(--safe-bottom) - 24px);
+  font-size: 15px;
+}
+body.qp-phone .ui-setup2 .stbar {
+  height: 48px;
+  padding: 0 8px 0 16px;
+}
+body.qp-phone .ui-setup2 .stname {
+  font-size: 17px;
+}
+body.qp-phone .ui-setup2 .sclose {
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 26px 16px;
+}
+body.qp-phone .ui-setup2 .sclose::before {
+  content: none;
+}
+body.qp-phone .ui-setup2 .snav {
+  gap: 8px;
+  padding: 8px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+body.qp-phone .ui-setup2 .smain,
+body.qp-phone .ui-setup2 .sbody {
+  min-width: 0;
+  max-width: 100%;
+}
+body.qp-phone .ui-setup2 .sbody {
+  overflow-x: hidden;
+}
+body.qp-phone .ui-setup2 .sgrid {
+  grid-template-columns: minmax(0, 1fr);
+}
+body.qp-phone .ui-setup2 .srun,
+body.qp-phone .ui-setup2 .snote,
+body.qp-phone .ui-setup2 .stip {
+  overflow-wrap: anywhere;
+}
+/* The tab strip scrolls sideways on a narrow window (setup2.css:74); on a phone
+   that hides 工具/AI/关于 past the right edge with no affordance, so wrap it. */
+body.qp-phone .ui-setup2 .snav {
+  flex-wrap: wrap;
+  overflow-x: visible;
+}
+body.qp-phone .ui-setup2 .stab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: var(--qp-tap-sm);
+  min-height: var(--qp-tap-sm);
+  padding: 0 14px;
+  font-size: 14px;
+}
+body.qp-phone .ui-setup2 .shead {
+  padding: 12px 48px 10px 16px;
+  font-size: 18px;
+}
+body.qp-phone .ui-setup2 .sbody {
+  padding: 6px 16px 20px;
+  font-size: 15px;
+}
+body.qp-phone .ui-setup2 .sh3 {
+  margin: 18px 0 8px;
+  font-size: 16px;
+}
+body.qp-phone .ui-setup2 .snote {
+  font-size: 14px;
+}
+body.qp-phone .ui-setup2 .stip {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+body.qp-phone .ui-setup2 .sstatus {
+  padding: 10px 12px;
+}
+body.qp-phone .ui-setup2 .srow {
+  margin: 10px 0;
+  gap: 10px;
+}
+body.qp-phone .ui-setup2 .sbuttonrow {
+  min-height: 48px;
+  align-items: center;
+  margin: 6px 0;
+}
+body.qp-phone .ui-setup2 .sbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--qp-tap-sm);
+  padding: 0 16px;
+  font-size: 15px;
+}
+body.qp-phone .ui-setup2 .sbtn.mini {
+  width: var(--qp-tap-sm);
+  min-width: var(--qp-tap-sm);
+  min-height: var(--qp-tap-sm);
+  padding: 0;
+}
+body.qp-phone .ui-setup2 .scheck {
+  min-height: 48px;
+  padding: 0 2px;
+  font-size: 15px;
+}
+body.qp-phone .ui-setup2 .scheck .cb {
+  width: 24px;
+  height: 24px;
+}
+body.qp-phone .ui-setup2 .scheck .cb.on::after {
+  left: 7px;
+  top: 2px;
+  width: 5px;
+  height: 11px;
+}
+body.qp-phone .ui-setup2 .sfield {
+  gap: 6px;
+  margin: 10px 0;
+}
+body.qp-phone .ui-setup2 .sfield .k,
+body.qp-phone .ui-setup2 .ssee .k {
+  font-size: 14px;
+}
+body.qp-phone .ui-setup2 .ssee {
+  min-height: 48px;
+  align-items: center;
+  font-size: 15px;
+}
+body.qp-phone .ui-setup2 .sinput,
+body.qp-phone .ui-setup2 .ssel .cur {
+  height: var(--qp-tap-sm);
+  padding: 0 12px;
+  font-size: 15px;
+}
+body.qp-phone .ui-setup2 .sinput.num {
+  width: 88px;
+}
+body.qp-phone .ui-setup2 .ssel .cur::after {
+  top: 18px;
+}
+body.qp-phone .ui-setup2 .ssel .menu {
+  top: 48px;
+  max-height: 40vh;
+}
+body.qp-phone .ui-setup2 .ssel.up .menu {
+  top: auto;
+  bottom: 48px;
+}
+body.qp-phone .ui-setup2 .ssel .opt {
+  display: flex;
+  align-items: center;
+  min-height: var(--qp-tap-sm);
+  padding: 0 12px;
+  font-size: 15px;
+}
+body.qp-phone .ui-setup2 .sslider {
+  margin: 10px 0;
+}
+body.qp-phone .ui-setup2 .sslider .line {
+  max-width: none;
+  gap: 12px;
+  min-height: var(--qp-tap-sm);
+}
+body.qp-phone .ui-setup2 .sslider .track {
+  height: 12px;
+}
+body.qp-phone .ui-setup2 .sadd {
+  gap: 10px;
+}
+body.qp-phone .ui-setup2 .sadd .grow {
+  min-width: 120px;
+}
+body.qp-phone .ui-setup2 .qitem {
+  min-height: 48px;
+  gap: 10px;
+  padding: 4px 10px;
+  font-size: 15px;
+}
+body.qp-phone .ui-setup2 .qitem .sbtn {
+  min-width: 64px;
+  min-height: var(--qp-tap-sm);
+  padding: 0 12px;
+  font-size: 14px;
+}
+body.qp-phone .ui-setup2 .qempty {
+  padding: 12px 10px;
+  font-size: 14px;
+}
+body.qp-phone .ui-setup2 .slog .le {
+  padding: 8px 10px;
+  font-size: 14px;
+}
+/* ---- goods sheet (control.ts openGoods on a phone) --------------------- */
+
+body.qp-phone .qp-goods {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 8px;
+}
+body.qp-phone .qp-goods-stat {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 20px 10px;
+}
+body.qp-phone .qp-goods-stat-label {
+  flex: none;
+  color: var(--qp-ink-soft);
+  font-size: 13px;
+}
+body.qp-phone .qp-goods-stat .ui-progress {
+  flex: 1;
+  min-width: 0;
+  height: 20px !important;
+}
+/* state.ts keeps the status figures on for a touch screen, where they sit on top of
+   the filled and the empty half of the bar: 13 px with a dark outline reads on both. */
+body.qp-phone .ui-state .ui-progress .seeNum {
+  font-size: 13px !important;
+  padding: 0 10px;
+  color: #fff;
+  text-shadow:
+    -1px -1px 0 rgba(0, 0, 0, 0.65),
+    -1px 1px 0 rgba(0, 0, 0, 0.65),
+    1px 1px 0 rgba(0, 0, 0, 0.65),
+    1px -1px 0 rgba(0, 0, 0, 0.65);
+}
+body.qp-phone .qp-goods-stat .ui-progress .seeNum {
+  display: none;
+}
+body.qp-phone .qp-goods-stat-value {
+  flex: none;
+  color: var(--qp-ink-soft);
+  font-size: 13px;
+}
+body.qp-phone .qp-goods-row {
+  min-height: 64px;
+  padding: 8px 20px;
+  gap: 14px;
+}
+body.qp-phone .qp-goods-row + .qp-goods-row {
+  box-shadow: inset 0 1px 0 var(--qp-line);
+}
+body.qp-phone .qp-goods-icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: #fff;
+  object-fit: contain;
+}
+body.qp-phone .qp-goods-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+body.qp-phone .qp-goods-name {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+body.qp-phone .qp-goods-line {
+  overflow: hidden;
+  color: var(--qp-ink-soft);
+  font-size: 13px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-goods-none {
+  padding: 28px 20px;
+  color: var(--qp-ink-soft);
+  font-size: 15px;
+  text-align: center;
+}
+body.qp-phone .qp-goods-pager {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 20px 2px;
+}
+body.qp-phone .qp-goods-pager .qp-btn {
+  flex: none;
+  min-width: 104px;
+  min-height: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  padding: 0 16px;
+  border-radius: 22px;
+  font-size: 14px;
+}
+body.qp-phone .qp-goods-pager .qp-btn[aria-disabled='true'] {
+  opacity: 0.4;
+}
+body.qp-phone .qp-goods-pageinfo {
+  flex: 1;
+  color: var(--qp-ink-soft);
+  font-size: 13px;
+  text-align: center;
+}

@@ -7,6 +7,8 @@ import { avatar, info, onInfoChange, runtimeProjectionMode, save } from '../pet/
 import { openFrame } from './box'
 import './css/shop.css'
 import { button, div, img } from './dom'
+import { openPhoneShop } from './mobile/phone-shop'
+import { phoneUI } from './mobile/sizing'
 import { settleCartLines } from './shop-cart'
 import { windowView } from './window-view'
 
@@ -124,6 +126,9 @@ let close: (() => void) | null = null
 
 /** The shop: own inventory on the left, the mall on the right, and a cart. */
 export function openShop(): void {
+  // One CSS px is one dp on a phone (sizing.ts): the 803 px window below would be
+  // shrunk to ~0.49 by box.ts, and its 加购/购买 buttons only exist on :hover.
+  if (phoneUI()) return openPhoneShop()
   if (close) return
   const left = div('leftSelf')
   const right = div('rightShpping')

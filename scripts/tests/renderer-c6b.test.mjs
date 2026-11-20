@@ -744,6 +744,8 @@ test('runtime busy-state stop guard releases when the shared pending command set
     onStoreEvent: () => {},
     onInfoChange: () => {},
     onStopTaskPending: (listener) => { listeners.push(listener); return () => {} },
+    // state.ts starts with its figures shown on a touch screen; this fixture is the desktop.
+    touch: false,
     runtimeProjectionMode: true,
     stopTaskPending: () => pending,
     stopTask: () => { calls.stopTask += 1; pending = true; listeners.forEach((listener) => listener(true)); return 'work' },
@@ -879,6 +881,7 @@ test('shared stop-pending state disables the status stop button with a real attr
     onStoreEvent: () => {},
     onInfoChange: () => {},
     onStopTaskPending: () => () => {},
+    touch: false,
     runtimeProjectionMode: true,
     stopTaskPending: () => pending,
     stopTask: () => null,

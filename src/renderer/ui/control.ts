@@ -7,6 +7,8 @@ import { info, onInfoChange, petSize, runtimeProjectionMode, save } from '../pet
 import { viewportSize } from './viewport'
 import './css/control.css'
 import { button, div, img, touch } from './dom'
+import { openSheet } from './mobile/sheet'
+import { phoneUI } from './mobile/sizing'
 import { openCommunity } from './community'
 import { openEmail } from './email'
 import { openFarm } from './farm'
@@ -58,24 +60,132 @@ interface Entry {
 
 const activeIcon = (n: number): string => `${ICONS}active/${n}.svg`
 
-const inventory = (type: GoodType, icon: number, stat: Stat) => (): void =>
-  openPanel({
-    icon: activeIcon(icon),
-    list: (page) => listGoods(type, page, PAGE),
-    lines: (g) => [...describe(g), `数量：${g.num}`],
-    use: (g) => {
-      useItem(g)
-      return false
-    },
-    type,
-    stat,
-  })
+const inventoryPanel = (type: GoodType, icon: number, stat: Stat): Panel => ({
+  icon: activeIcon(icon),
+  list: (page) => listGoods(type, page, PAGE),
+  lines: (g) => [...describe(g), `数量：${g.num}`],
+  use: (g) => {
+    useItem(g)
+    return false
+  },
+  type,
+  stat,
+})
 
 const PANELS = {
-  food: inventory('food', 18, 'hunger'),
-  clean: inventory('clean', 20, 'clean'),
-  medicine: inventory('medicine', 22, 'health'),
-  toy: inventory('toy', 28, 'mood'),
+  food: inventoryPanel('food', 18, 'hunger'),
+  clean: inventoryPanel('clean', 20, 'clean'),
+  medicine: inventoryPanel('medicine', 22, 'health'),
+  toy: inventoryPanel('toy', 28, 'mood'),
+}
+
+/** On a phone the icon bar is gone: the same inventory opens as a bottom sheet. */
+const PHONE_GOODS_TITLES: Record<keyof typeof PANELS, string> = {
+  food: '喂养',
+  clean: '清洁',
+  medicine: '吃药',
+  toy: '玩耍',
+}
+
+interface PhoneGoods {
+  type: keyof typeof PANELS
+  draw: () => void
+  close: () => void
+}
+
+/** The open phone goods sheet, so an inventory change repaints it in place. */
+let phoneGoods: PhoneGoods | null = null
+
+/**
+ * The everyday goods panel as a phone sheet: one 64 dp row per good (40 dp icon,
+ * 15 px name, 13 px description), 44 dp paging, 去购物 kept at the bottom.
+ * A tap uses the good at once instead of the toolbar's tap-to-preview dance.
+ */
+function openPhoneGoods(type: keyof typeof PANELS): void {
+  phoneGoods?.close()
+  const panel = PANELS[type]
+  let page = 1
+  let sheet: ReturnType<typeof openSheet> | null = null
+  let self: PhoneGoods | null = null
+  const content = div('qp-goods')
+  const draw = (): void => {
+    const { list: goods, totalPage } = panel.list(page)
+    page = Math.min(Math.max(page, 1), Math.max(totalPage, 1))
+    const rows = goods.map((g) => {
+      const row = div('qp-row qp-goods-row')
+      row.setAttribute('role', 'button')
+      row.tabIndex = 0
+      row.append(
+        img('qp-goods-icon', g.url),
+        div('qp-goods-main', div('qp-goods-name', g.name), ...panel.lines(g).map((line) => div('qp-goods-line', line))),
+      )
+      const use = (): void => {
+        if (!self) return
+        if (panel.use(g)) return void sheet?.close()
+        draw()
+      }
+      row.addEventListener('click', use)
+      row.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        event.preventDefault()
+        use()
+      })
+      return row
+    })
+    const prev = button('qp-btn qp-btn-ghost qp-goods-page', () => {
+      if (page > 1) {
+        page -= 1
+        draw()
+      }
+    }, '上一页')
+    const next = button('qp-btn qp-btn-ghost qp-goods-page', () => {
+      if (page < totalPage) {
+        page += 1
+        draw()
+      }
+    }, '下一页')
+    if (page <= 1) prev.setAttribute('aria-disabled', 'true')
+    if (page >= totalPage) next.setAttribute('aria-disabled', 'true')
+    const pager = div(
+      'qp-goods-pager',
+      prev,
+      div('qp-goods-pageinfo', totalPage ? `第 ${page} / ${totalPage} 页` : '暂无物品'),
+      next,
+    )
+    const stat = panel.stat
+      ? (() => {
+          const max = save.petComputedlInfo[`${panel.stat}Max`]
+          return div(
+            'qp-goods-stat',
+            div('qp-goods-stat-label', '当前'),
+            progress(info[panel.stat], max),
+            div('qp-goods-stat-value', `${Math.round(info[panel.stat])} / ${max}`),
+          )
+        })()
+      : null
+    content.replaceChildren(...(stat ? [stat] : []), ...(rows.length ? rows : [div('qp-goods-none', '空空如也~~')]), pager)
+  }
+  const footer = panel.stat
+    ? div(
+        'qp-footer',
+        button('qp-btn', () => {
+          sheet?.close()
+          openShop()
+        }, '去购物'),
+      )
+    : undefined
+  const handle = openSheet({
+    title: PHONE_GOODS_TITLES[type],
+    body: content,
+    footer,
+    onClose: () => {
+      if (phoneGoods === self) phoneGoods = null
+    },
+  })
+  sheet = handle
+  self = { type, draw, close: () => handle.close() }
+  phoneGoods = self
+  draw()
 }
 
 /** A menu group opens its children on hover, or runs `run` on click. */
@@ -84,10 +194,10 @@ const MENU: { name: string; icon: string; children?: Entry[]; run?: () => void }
     name: '日常',
     icon: 'richang.png',
     children: [
-      { name: '食物', icon: 'weishi.png', run: PANELS.food },
-      { name: '清洁', icon: 'qingjie.png', run: PANELS.clean },
-      { name: '吃药', icon: 'zhibing.png', run: PANELS.medicine },
-      { name: '玩具', icon: 'wanshua.png', run: PANELS.toy },
+      { name: '食物', icon: 'weishi.png', run: () => openPanel(PANELS.food) },
+      { name: '清洁', icon: 'qingjie.png', run: () => openPanel(PANELS.clean) },
+      { name: '吃药', icon: 'zhibing.png', run: () => openPanel(PANELS.medicine) },
+      { name: '玩具', icon: 'wanshua.png', run: () => openPanel(PANELS.toy) },
     ],
   },
   {
@@ -264,10 +374,11 @@ export function showControl(): void {
   intro()
 }
 
-/** Shows the bar with an everyday goods panel open. */
+/** Shows the bar with an everyday goods panel open; on a phone the panel is a bottom sheet instead. */
 export function openGoods(type: keyof typeof PANELS): void {
+  if (phoneUI()) return openPhoneGoods(type)
   showControl()
-  PANELS[type]()
+  openPanel(PANELS[type])
 }
 
 /** The bar hides 1.5 s (5 s on touch screens) after the pointer leaves it, unless an inventory panel is open. */
@@ -357,5 +468,6 @@ onInfoChange((key) => {
   }
 })
 onGoodsChange((type) => {
+  if (phoneGoods?.type === type) phoneGoods.draw()
   if (open?.type === type) openPanel(open, Math.min(open.page, Math.max(open.list(1).totalPage, 1)))
 })

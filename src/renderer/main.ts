@@ -24,6 +24,17 @@ import { initVoice } from './ui/voice'
 import { resizePetPosition } from '../shared/layout'
 import { bootRenderer, mountLanVisits } from './pet/runtime-boot'
 import { hitCover, type Box } from '../mobile/overlay'
+import { applyPhoneClass, phoneUI, safeInset } from './ui/mobile/sizing'
+
+// Phone layout is keyed off the real viewport (1 CSS px = 1 dp, short side < 600dp): mark the body before
+// anything measures the pet, and re-check on resize so a rotation or a phone/tablet boundary swaps layouts.
+const refreshPhoneLayout = (): void => {
+  if (typeof applyPhoneClass === 'function') applyPhoneClass()
+}
+refreshPhoneLayout()
+addEventListener('resize', refreshPhoneLayout)
+const phoneMode = (): boolean => typeof phoneUI === 'function' && phoneUI()
+const phoneSafeInset = (side: 'top' | 'bottom'): number => (typeof safeInset === 'function' ? safeInset(side) : 0)
 
 /** Mirrors the store flag; kept local so legacy source-level renderer tests can run without the full graph. */
 const projectionMode = window.__qqpetRuntimeV2 === true
@@ -77,14 +88,18 @@ let dragMove: ((point: DesktopCursor) => void) | null = null
 function clampOnScreen(): void {
   const s = petSize()
   const area = viewportSize()
+  // On a phone the pet may not sit under the status bar or the navigation bar: the system bars are edges.
+  const top = phoneMode() ? phoneSafeInset('top') : 0
+  const bottom = phoneMode() ? phoneSafeInset('bottom') : 0
   setInfo('lastX', Math.min(Math.max(info.lastX, 0), Math.max(0, area.width - s)))
-  setInfo('lastY', Math.min(Math.max(info.lastY, 0), Math.max(0, area.height - s)))
+  setInfo('lastY', Math.min(Math.max(info.lastY, top), Math.max(top, area.height - bottom - s)))
 }
 
 /** Left/right: keep the box on-screen. Hide_left/right already peek from the sprite edge. */
 function snapEdge(): 'hideleft' | 'hideright' | null {
   const edge = applyEdge()
-  if (!edge) clampOnScreen()
+  // A phone keeps clear of the system bars even while peeking from a side.
+  if (!edge || phoneMode()) clampOnScreen()
   return edge
 }
 
@@ -125,6 +140,8 @@ function resizeMobilePet(): void {
   size = next.size
   setInfo('lastX', position.x)
   setInfo('lastY', position.y)
+  // A rotation can shrink the reachable area under the system bars; the pet must stay visible.
+  clampOnScreen()
   layout()
 }
 // Desktop transfers use native global coordinates, including mid-drag.
@@ -139,14 +156,27 @@ else {
     })
   }
   addEventListener('resize', scheduleResize)
+  // The Android overlay can take longer than one frame to adopt a rotation: the
+  // resize event fires while innerWidth/innerHeight are still the old values, the
+  // move is skipped, and no further event arrives. Re-read once it has settled.
+  let settleTimer = 0
+  const settleResize = (): void => {
+    clearTimeout(settleTimer)
+    settleTimer = setTimeout(resizeMobilePet, 350)
+  }
+  addEventListener('orientationchange', settleResize)
   // WebKit can emit resize with an intermediate width, then settle the root
   // viewport without another window event. Read the final dimensions per frame.
   const viewportObserver = new ResizeObserver(scheduleResize)
   viewportObserver.observe(document.documentElement)
+  addEventListener('resize', settleResize)
   addEventListener('pagehide', () => {
     viewportObserver.disconnect()
     if (resizeFrame) cancelAnimationFrame(resizeFrame)
+    clearTimeout(settleTimer)
     removeEventListener('resize', scheduleResize)
+    removeEventListener('resize', settleResize)
+    removeEventListener('orientationchange', settleResize)
   })
 }
 layout()
@@ -286,8 +316,8 @@ const petInput = createPetInput({
   begin: () => {
     clearFacePoints()
     closeMenu()
-    // Converted panels are reachable from the runtime control bar too.
-    if (save.settings.petBar) showControl()
+    // The phone's entry point is the bottom action panel; the floating icon bar is desktop-only.
+    if (save.settings.petBar && !phoneMode()) showControl()
     catchDiudiule()
   },
   active: (on) => {
@@ -295,6 +325,16 @@ const petInput = createPetInput({
     if (!on) { dragLifted = false; releaseDomInput() }
   },
   hold: (x, y) => openMenu({ x, y, pet: true }, startAdoption),
+  // A phone click (no drag, no long press) opens the menu: a thumb has no hover and the desktop's face
+  // hotspots are not discoverable. It opens one task later on purpose: the tap's own click is hit-tested
+  // after pointerup, so a panel built right here would receive that click on whichever row is under the
+  // finger (observed on Android). Letting the click land on the pet first keeps menu rows inert.
+  tap: (x, y) => {
+    if (!phoneMode()) return
+    // After the click, not during pointerup: the click the browser still dispatches would
+    // otherwise land on the row the freshly opened sheet puts under the finger.
+    setTimeout(() => openMenu({ x, y, pet: true }, startAdoption))
+  },
   lift: (s, align) => {
     dragLifted = true
     if (stage() === 'Adult') {

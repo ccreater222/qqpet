@@ -1,0 +1,243 @@
+/*
+ * Phone menu styling. Every rule is scoped to body.qp-phone (sizing.ts), so the
+ * desktop popup menu keeps its 110 px / 21 px chrome untouched. Sized in dp:
+ * rows 56, inline children 48, body text 15, section labels 13.
+ */
+
+/* ---- card and header ---------------------------------------------------- */
+
+body.qp-phone .qp-menu-card {
+  width: 100%;
+  /* The sheet caps itself at 560 px in landscape; only the phone portrait width is full. */
+  max-width: min(560px, 100%);
+}
+body.qp-phone .qp-menu-card .qp-sheet-body {
+  padding: 0 0 10px;
+  scrollbar-width: none;
+}
+body.qp-phone .qp-menu-card .qp-sheet-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+body.qp-phone .qp-menu {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+body.qp-phone .qp-menu-head {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 8px 12px;
+  flex: none;
+  align-items: center;
+  padding: 6px 20px 14px;
+  border-bottom: 1px solid var(--qp-line);
+  background: linear-gradient(180deg, rgba(241, 149, 29, 0.1), rgba(241, 149, 29, 0));
+}
+body.qp-phone .qp-menu-head:active {
+  background: rgba(241, 149, 29, 0.16);
+}
+body.qp-phone .qp-menu-avatar {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+body.qp-phone .qp-menu-who {
+  min-width: 0;
+}
+body.qp-phone .qp-menu-name {
+  overflow: hidden;
+  color: var(--qp-ink);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-menu-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 2px;
+  color: var(--qp-ink-soft);
+}
+body.qp-phone .qp-menu-level {
+  font-size: 13px;
+  font-weight: 600;
+}
+body.qp-phone .qp-menu-stats {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 12px;
+}
+body.qp-phone .qp-menu-stat {
+  flex: 1;
+  min-width: 0;
+}
+body.qp-phone .qp-menu-stat-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px;
+  color: var(--qp-ink-soft);
+  font-size: 13px;
+  line-height: 1.2;
+}
+body.qp-phone .qp-menu-stat-value {
+  font-variant-numeric: tabular-nums;
+}
+body.qp-phone .qp-menu-stat-track {
+  overflow: hidden;
+  height: 5px;
+  margin-top: 4px;
+  border-radius: 3px;
+  background: #ecdcc2;
+}
+body.qp-phone .qp-menu-stat-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--qp-accent);
+  transition: width 0.2s ease;
+}
+body.qp-phone .qp-stat-clean {
+  background: #4aa3df;
+}
+body.qp-phone .qp-stat-mood {
+  background: #e5739b;
+}
+
+/* ---- quick actions ------------------------------------------------------ */
+
+body.qp-phone .qp-menu-shortcuts {
+  flex: none;
+  border-bottom: 1px solid var(--qp-line);
+}
+body.qp-phone .qp-menu-shortcut-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(72px, 1fr));
+  gap: 8px;
+  padding: 4px 20px 10px;
+}
+body.qp-phone .qp-shortcut {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 72px;
+  min-height: 72px;
+  border-radius: 14px;
+  background: rgba(241, 149, 29, 0.08);
+  color: var(--qp-ink);
+}
+body.qp-phone .qp-shortcut:active {
+  background: rgba(241, 149, 29, 0.2);
+}
+body.qp-phone .qp-shortcut-icon {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+}
+body.qp-phone .qp-shortcut-label {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+/* ---- sections and rows -------------------------------------------------- */
+
+body.qp-phone .qp-menu-section-title {
+  padding-top: 14px;
+}
+body.qp-phone .qp-menu-danger-title {
+  color: var(--qp-danger);
+}
+body.qp-phone .qp-menu-item {
+  display: block;
+}
+body.qp-phone .qp-menu-item + .qp-menu-item > .qp-menu-row {
+  box-shadow: inset 0 1px 0 var(--qp-line);
+}
+body.qp-phone .qp-menu-row {
+  width: 100%;
+  min-height: 56px;
+  padding: 0 20px;
+  font-size: 15px;
+}
+body.qp-phone .qp-menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-menu-arrow {
+  flex: none;
+  color: #b08a5a;
+  font-size: 18px;
+  line-height: 1;
+}
+body.qp-phone .qp-menu-parent .qp-caret {
+  font-size: 17px;
+  transition: transform 0.18s ease;
+}
+body.qp-phone .qp-menu-parent[aria-expanded='true'] .qp-caret {
+  transform: rotate(90deg);
+}
+body.qp-phone .qp-menu-check {
+  flex: none;
+  color: var(--qp-accent);
+  font-size: 15px;
+  font-weight: 700;
+}
+body.qp-phone .qp-menu-row.qp-danger {
+  color: var(--qp-danger);
+}
+body.qp-phone .qp-menu-row.qp-danger .qp-menu-arrow {
+  color: var(--qp-danger);
+}
+
+/* ---- inline expansion --------------------------------------------------- */
+
+body.qp-phone .qp-menu-sub {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease;
+}
+body.qp-phone .qp-menu-sub.qp-open {
+  grid-template-rows: 1fr;
+}
+body.qp-phone .qp-menu-sub-inner {
+  min-height: 0;
+  overflow: hidden;
+  background: rgba(241, 149, 29, 0.06);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+body.qp-phone .qp-menu-sub.qp-open .qp-menu-sub-inner {
+  opacity: 1;
+}
+body.qp-phone .qp-menu-sub-row {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 20px 0 40px;
+  font-size: 15px;
+  font-weight: 400;
+}
+body.qp-phone .qp-menu-sub-row + .qp-menu-sub-row {
+  box-shadow: inset 0 1px 0 var(--qp-line);
+}
+body.qp-phone .qp-menu-sub-row.qp-danger {
+  color: var(--qp-danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.qp-phone .qp-menu-sub {
+    transition: none;
+  }
+  body.qp-phone .qp-menu-sub-inner {
+    transition: none;
+  }
+  body.qp-phone .qp-menu-stat-fill {
+    transition: none;
+  }
+}

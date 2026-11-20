@@ -84,6 +84,8 @@ function fixture({ rotatable = true, width = 375, height = 812, touch = true, di
       for (const child of children) element.appendChild(child)
       return element
     },
+    // box.ts adds the phone-panel hook only when the page is laid out in dp; these fixtures are the desktop.
+    phoneUI: () => false,
   }
   // Load the real store entry without unrelated pet startup side effects.
   const store = runInNewContext(executable(storeSource.slice(0, storeBoundary)) + '\n({ save, info, update, onSettingsChange })', services)

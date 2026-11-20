@@ -1,0 +1,256 @@
+/*
+ * Phone surface primitives. Loaded on every host, but every rule is scoped to
+ * `body.qp-phone` (see sizing.ts) so the desktop layout is byte-for-byte the
+ * same: one CSS pixel is one dp there, and a finger needs 44-48 of them.
+ */
+body.qp-phone {
+  --qp-tap: 48px;
+  --qp-tap-sm: 44px;
+  --qp-row: 56px;
+  --qp-font: 15px;
+  --qp-font-sm: 13px;
+  --qp-font-title: 17px;
+  --qp-gap: 12px;
+  --qp-ink: #4a2a10;
+  --qp-ink-soft: #8a6a44;
+  --qp-line: #efe0c7;
+  --qp-card: #fdf7ea;
+  --qp-accent: #f1951d;
+  --qp-danger: #c0392b;
+  /* WebView paints a grey box on every tap and waits 300 ms for a double tap; a
+     phone app answers at once and shows its own pressed state. */
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+body.qp-phone .qp-row,
+body.qp-phone .qp-btn,
+body.qp-phone .qp-sheet-close {
+  touch-action: manipulation;
+}
+/* A phone scrolls by finger; the desktop's 5 px orange scrollbar only eats width. */
+body.qp-phone .qp-sheet-body::-webkit-scrollbar,
+body.qp-phone .qp-goods::-webkit-scrollbar,
+body.qp-phone .qp-phone-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* ---- sheet ------------------------------------------------------------- */
+
+.qp-sheet {
+  position: fixed;
+  inset: 0;
+  /* Below the 700 layer of .box/.modal/.ui-state: a confirmation or an error raised
+     from inside a sheet has to be visible above it, not behind it. */
+  z-index: 690;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.qp-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(24, 14, 4, 0.42);
+  animation: qp-fade 0.18s ease-out;
+}
+.qp-sheet-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  max-height: 88%;
+  /* A landscape phone is 800+ dp wide: a full-width sheet would stretch every row
+     and every shortcut tile across the screen. */
+  max-width: 560px;
+  margin: var(--safe-top) auto 0;
+  border-radius: 20px 20px 0 0;
+  background: var(--qp-card);
+  color: var(--qp-ink);
+  box-shadow: 0 -8px 32px rgba(60, 35, 10, 0.28);
+  outline: none;
+  animation: qp-rise 0.22s cubic-bezier(0.2, 0.9, 0.25, 1);
+  transition: transform 0.18s ease-out;
+  will-change: transform;
+}
+.qp-sheet.qp-closing {
+  animation: qp-fade-out 0.18s ease-in forwards;
+}
+.qp-sheet.qp-closing .qp-sheet-card {
+  transform: translateY(24px);
+}
+.qp-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 10px 6px 10px 16px;
+  touch-action: none;
+}
+.qp-sheet-grip {
+  position: absolute;
+  left: 50%;
+  top: 6px;
+  width: 36px;
+  height: 4px;
+  margin-left: -18px;
+  border-radius: 2px;
+  background: #dcc6a4;
+}
+.qp-sheet-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--qp-font-title);
+  font-weight: 700;
+  line-height: 1.3;
+}
+.qp-sheet-close {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--qp-tap);
+  height: var(--qp-tap);
+  border-radius: 50%;
+  color: #8a6a44;
+  font-size: 20px;
+  line-height: 1;
+}
+.qp-sheet-close:active {
+  background: rgba(120, 80, 30, 0.12);
+}
+.qp-sheet-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 0 8px;
+}
+
+/* ---- list rows --------------------------------------------------------- */
+
+.qp-section {
+  padding: 14px 20px 6px;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  font-weight: 600;
+}
+.qp-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: var(--qp-row);
+  padding: 0 20px;
+  border: 0;
+  background: transparent;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  font-weight: 500;
+  text-align: left;
+  line-height: 1.35;
+}
+.qp-row + .qp-row {
+  box-shadow: inset 0 1px 0 var(--qp-line);
+}
+.qp-row:active {
+  background: rgba(120, 80, 30, 0.1);
+}
+.qp-row[aria-disabled='true'] {
+  color: #b3a08a;
+}
+.qp-row-grow {
+  flex: 1;
+  min-width: 0;
+}
+.qp-row-note {
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+}
+/* The arrow of a row that opens something; a row that expands inline uses .qp-caret. */
+.qp-chevron {
+  flex: none;
+  color: #b08a5a;
+  font-size: 18px;
+  line-height: 1;
+}
+.qp-caret {
+  flex: none;
+  color: #b08a5a;
+  font-size: 13px;
+  transition: transform 0.16s;
+}
+.qp-row[aria-expanded='true'] .qp-caret {
+  transform: rotate(180deg);
+}
+.qp-danger {
+  color: var(--qp-danger);
+}
+.qp-sub {
+  background: rgba(241, 149, 29, 0.06);
+}
+.qp-sub .qp-row {
+  min-height: var(--qp-tap-sm);
+  padding-left: 36px;
+  font-size: 14px;
+  font-weight: 400;
+}
+
+/* ---- buttons ----------------------------------------------------------- */
+
+.qp-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--qp-tap);
+  min-height: var(--qp-tap);
+  padding: 0 20px;
+  border: 0;
+  border-radius: 24px;
+  background: var(--qp-accent);
+  color: #fff;
+  font-size: var(--qp-font);
+  font-weight: 700;
+}
+.qp-btn:active {
+  filter: brightness(0.94);
+}
+.qp-btn-ghost {
+  background: transparent;
+  color: var(--qp-ink-soft);
+  font-weight: 600;
+}
+.qp-footer {
+  display: flex;
+  gap: 12px;
+  flex: none;
+  padding: 10px 16px 14px;
+  box-shadow: inset 0 1px 0 var(--qp-line);
+}
+.qp-footer .qp-btn {
+  flex: 1;
+}
+
+/* The pet keeps still under an open sheet; its own clicks would reach the page. */
+body.qp-sheet-open #pet {
+  pointer-events: none;
+}
+
+@keyframes qp-rise {
+  from {
+    transform: translateY(28px);
+    opacity: 0.4;
+  }
+}
+@keyframes qp-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes qp-fade-out {
+  to {
+    opacity: 0;
+  }
+}

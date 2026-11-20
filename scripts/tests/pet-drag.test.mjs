@@ -550,3 +550,92 @@ test('a panel remains interactive beside a peeking pet (#74)', () => {
   app.cursor({ x: 550, y: 340 })
   assert.deepEqual(app.clickThrough, [false])
 })
+
+// ---- phone pet: tap opens the menu, drag moves it, system bars are edges -----------------
+
+/** Services a phone host provides; a phone layout is on and reports system-bar insets. */
+const phoneServices = (top = 0, bottom = 0) => ({
+  phoneUI: () => true,
+  applyPhoneClass: () => true,
+  safeInset: side => (side === 'top' ? top : side === 'bottom' ? bottom : 0),
+})
+
+test('a phone click opens the pet menu at the finger', () => {
+  const menus = []
+  const app = renderer(144, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, ui: { ...phoneServices(), openMenu: at => menus.push(at) },
+  })
+  app.pointer('pointerdown', 550, 340)
+  app.pointer('pointerup', 550, 340)
+  // The panel opens on the next task, after the tap's own click has been dispatched and gone to the pet.
+  app.runTimers()
+  // The menu arguments were built inside the sandbox realm; compare their data, not prototypes.
+  assert.deepEqual(JSON.parse(JSON.stringify(menus)), [{ x: 550, y: 340, pet: true }])
+})
+
+test('a desktop click keeps its old behaviour and opens no menu', () => {
+  const menus = []
+  const app = renderer(144, { x: 0, y: 0 }, null, 'Egg', { x: 500, y: 300, ui: { openMenu: at => menus.push(at) } })
+  app.pointer('pointerdown', 550, 340)
+  app.pointer('pointerup', 550, 340)
+  assert.deepEqual(menus, [], 'desktop clicks belong to the face hotspots')
+})
+
+test('a phone drag moves the pet and never opens the menu on release', () => {
+  const menus = []
+  const app = renderer(144, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, ui: { ...phoneServices(), openMenu: at => menus.push(at) },
+  })
+  app.pointer('pointerdown', 550, 340)
+  app.pointer('pointermove', 570, 340)
+  app.pointer('pointerup', 570, 340)
+  assert.equal(app.info.lastX, 520)
+  assert.equal(app.info.lastY, 300)
+  assert.deepEqual(menus, [])
+})
+
+test('a phone pet is clamped between the status and navigation bars', () => {
+  const app = renderer(144, { x: 0, y: 0 }, null, 'Egg', {
+    x: 100, y: 0, area: { width: 412, height: 892 }, ui: phoneServices(24, 34),
+  })
+  assert.equal(app.info.lastX, 100)
+  assert.equal(app.info.lastY, 24, 'y=0 would sit under the status bar')
+  // Dragged above the status bar it follows the finger, then springs back below the inset.
+  app.pointer('pointerdown', 150, 80)
+  app.pointer('pointermove', 150, -60)
+  assert.equal(app.info.lastY, -116, 'while held the pet follows the finger')
+  app.pointer('pointerup', 150, -60)
+  assert.equal(app.info.lastY, 24)
+  // A rotation that shortens the page cannot leave it under the bars either.
+  app.resize({ width: 412, height: 300 })
+  assert.equal(app.info.lastY, 24)
+})
+
+test('the phone class is applied at startup and refreshed on every resize', () => {
+  let applied = 0
+  const app = renderer(144, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, area: { width: 412, height: 892 },
+    ui: { ...phoneServices(), applyPhoneClass: () => { applied++ } },
+  })
+  assert.equal(applied, 1)
+  app.resize({ width: 892, height: 412 })
+  assert.equal(applied, 2, 'a rotation re-checks whether the phone layout applies')
+})
+
+test('the phone entry point is the menu panel, not the floating icon bar', () => {
+  let shown = 0
+  const phone = renderer(144, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, ui: { ...phoneServices(), showControl: () => { shown++ } },
+  })
+  phone.save.settings.petBar = true
+  phone.pointer('pointerdown', 550, 340)
+  assert.equal(shown, 0, 'the phone does not pop the desktop icon bar')
+  phone.pointer('pointerup', 550, 340)
+
+  const desktop = renderer(144, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, ui: { showControl: () => { shown++ } },
+  })
+  desktop.save.settings.petBar = true
+  desktop.pointer('pointerdown', 550, 340)
+  assert.equal(shown, 1, 'the desktop keeps the icon bar')
+})

@@ -43,6 +43,8 @@ function statePanel(focused = false) {
     activity: () => false, growthPerMinute: () => 1, onInfoChange() {}, onSettingsChange() {}, onStoreEvent() {}, onStopTaskPending() {}, stopTaskPending: () => false, runtimeProjectionMode: false,
     openPetInfo: () => profiles.push(focus.at(-1)),
     touch: false, mouseDrag: (el, touch) => drags.push([el, touch]),
+    // These assertions describe the desktop tray panel; a phone centers the card instead (phone-panels.css).
+    phoneUI: () => false,
   })
   const elapse = () => { const due = [...timers.values()]; timers.clear(); for (const t of due) t.f() }
   return { ...ui, body, drags, focus, profiles, timers, elapse, move: (x, y) => cursor({ x, y }), leaveTray: () => trayLeave(), blur: () => events.dispatchEvent(new Event('blur')) }

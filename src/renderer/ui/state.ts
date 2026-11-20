@@ -13,6 +13,8 @@ import { formatDate } from './date'
 import { button, div, img, touch } from './dom'
 import { mouseDrag } from './drag'
 import { frame } from './frame'
+import { pushBack } from './mobile/back'
+import { phoneUI } from './mobile/sizing'
 import { openPetInfo } from './petinfo'
 import { progress } from './progress'
 import { windowView } from './window-view'
@@ -26,7 +28,8 @@ const BUSY = [
 
 let panel: HTMLElement | null = null
 /** Bars show their numbers always instead of on hover; toggled by clicking the growth bar. */
-let showNums = false
+// A touch screen has no hover: the status numbers would never appear.
+let showNums = touch
 
 /** Level badges: one per 5 levels written in binary (128s down to 2s), then one or two plain bones. */
 function bones(level: number): string[] {
@@ -229,7 +232,7 @@ function render(): void {
     ),
     div('foot fcb w100', heart, button(info.sweetHeart ? 'closeSweetHeart' : 'openSweetHeart', sweetHeart)),
   )
-  panel.replaceChildren(frame(content, (n) => `pet/stateInfo/ditu0${n}.png`, [32, 32]))
+  panel.replaceChildren(frame(content, (n) => `pet/stateInfo/ditu0${n}.png`, phoneUI() ? [12, 12] : [32, 32]))
 }
 
 // Only release the focus this panel took; chat, setup, community... may still need the window as a key target.
@@ -265,6 +268,9 @@ window.qqpet.onTrayHoverLeave?.(() => {
   if (!hovered) countdown()
 })
 
+/** The back-key layer of the phone card; released with it (see openState). */
+let releaseBack = (): void => {}
+
 export function closeState(): void {
   clearTimeout(closing)
   closing = undefined
@@ -272,6 +278,7 @@ export function closeState(): void {
   if (!panel) return
   panel.parentElement!.remove()
   panel = null
+  releaseBack()
   if (ownsFocus) window.qqpet.setFocusable(false)
   ownsFocus = false
 }
@@ -283,19 +290,36 @@ export function openState(x: number, y: number, closesItself = false, focusTaken
   const keepFocus = ownsFocus
   if (panel) ownsFocus = false
   closeState()
+  // Phone: the card is centered in the safe area by .ui-state (phone-panels.css);
+  // desktop keeps the tray-point anchor below.
+  const phone = phoneUI()
   panel = div('PetStateInfo focusPress')
   panel.dataset.hit = ''
-  panel.style.width = `${WIDTH}px`
-  panel.style.left = `${Math.min(Math.max(x - WIDTH / 2, 0), innerWidth - WIDTH)}px`
-  if (y < innerHeight / 2) panel.style.top = `${Math.max(y, 0)}px`
-  else panel.style.bottom = `${Math.max(innerHeight - y, 0)}px`
-  document.body.appendChild(div('ui-state', panel))
+  if (!phone) {
+    panel.style.width = `${WIDTH}px`
+    panel.style.left = `${Math.min(Math.max(x - WIDTH / 2, 0), innerWidth - WIDTH)}px`
+    if (y < innerHeight / 2) panel.style.top = `${Math.max(y, 0)}px`
+    else panel.style.bottom = `${Math.max(innerHeight - y, 0)}px`
+  }
+  const layer = div('ui-state', panel)
+  if (phone) {
+    // The scrim covers the phone screen (and the Android overlay window it needs),
+    // and a tap outside the card closes the panel.
+    layer.dataset.hit = ''
+    layer.addEventListener('click', (event) => {
+      if (event.target === layer) closeState()
+    })
+  }
+  document.body.appendChild(layer)
+  // A phone's back key closes the card like any other panel; the desktop tray card never sees it.
+  releaseBack = phone ? pushBack(() => closeState()) : (): void => {}
   // Dragged like the pet info window (#53).
   mouseDrag(panel, touch)
   render()
   // Windows may report DOM focus even when the native overlay is unfocusable.
   // The tray activates it first so an outside click can produce a real blur.
-  if (focusTaken || keepFocus) ownsFocus = true
+  if (phone) ownsFocus = false
+  else if (focusTaken || keepFocus) ownsFocus = true
   else if (!document.hasFocus()) {
     ownsFocus = true
     window.qqpet.setFocusable(true)

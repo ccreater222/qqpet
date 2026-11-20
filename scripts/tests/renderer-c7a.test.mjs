@@ -233,7 +233,8 @@ test('runtime navigation exposes converted panels and keeps unconverted E-F entr
   assert.match(control, /name: '找朋友玩'/)
   assert.match(control, /runtimeProjectionMode/)
   const main = readFileSync(new URL('../../src/renderer/main.ts', import.meta.url), 'utf8')
-  assert.match(main, /if \(save\.settings\.petBar\) showControl\(\)/)
+  // The phone's entry point is the bottom action panel; the icon bar stays desktop-only.
+  assert.match(main, /if \(save\.settings\.petBar && !phoneMode\(\)\) showControl\(\)/)
   const menu = readFileSync(new URL('../../src/renderer/ui/runtime-menu.ts', import.meta.url), 'utf8')
   assert.match(menu, /openFishing/)
   assert.match(menu, /openGames/)

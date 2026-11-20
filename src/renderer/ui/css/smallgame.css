@@ -4,3 +4,31 @@
 .smallGameWin .quit,#pet > .quit {display:none;position:absolute;right:-6px;top:-6px;width:17px;height:17px;background:url(/pet/stateInfo/close_normal.png) 0 0/100% 100%;cursor:pointer;z-index:5}
 .smallGameWin:hover .quit,#pet:hover > .quit {display:block}
 .smallGameWin .quit:hover,#pet > .quit:hover {background-image:url(/pet/stateInfo/close_click.png)}
+
+/*
+ * A phone has no hover, and the quit button is the only way out of a small game
+ * and of 丢丢乐 there: it stays visible instead of waiting for a mouse. The
+ * 17 px art keeps its own size inside a 44 dp target (one css px is one dp on a
+ * phone, sizing.ts), moved inside the window so it can never fall off screen.
+ * The dark disc keeps the white cross readable on any game backdrop.
+ */
+body.qp-phone .smallGameWin .quit,
+body.qp-phone #pet > .quit {
+  display: block;
+  right: 0;
+  top: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background-color: rgb(38 40 44 / 0.5);
+  background-size: 14px 16px;
+  background-position: center;
+  background-repeat: no-repeat;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.35);
+  touch-action: manipulation;
+}
+body.qp-phone .smallGameWin .quit:active,
+body.qp-phone #pet > .quit:active {
+  background-color: rgb(38 40 44 / 0.72);
+  background-image: url(/pet/stateInfo/close_click.png);
+}

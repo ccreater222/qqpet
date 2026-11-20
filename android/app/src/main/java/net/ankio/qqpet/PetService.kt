@@ -106,6 +106,10 @@ class PetService : Service() {
         }
     }
 
+    /** The page has a bottom sheet open and expects the back key (see [Bridge.setBackHandler]). */
+    @Volatile
+    private var backHandler = false
+
     private lateinit var probe: View
     private val probeParams = LayoutParams(
         1, 1, LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -142,6 +146,11 @@ class PetService : Service() {
             // A focusable overlay takes the back key from the app below; give it back.
             override fun dispatchKeyEvent(e: KeyEvent): Boolean {
                 if (e.keyCode != KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(e)
+                // A phone sheet owns the key while it is up: the page closes it and releases the focus itself.
+                if (backHandler) {
+                    web.evaluateJavascript("window.__qqpetBack && window.__qqpetBack()", null)
+                    return true
+                }
                 setFocusable(false)
                 return true
             }
@@ -608,6 +617,12 @@ class PetService : Service() {
 
         @JavascriptInterface
         fun setFocusable(on: Boolean) = web.post { this@PetService.setFocusable(on) }
+
+        /** The page shows a bottom sheet that closes on the back key; kept in step with its focus. */
+        @JavascriptInterface
+        fun setBackHandler(on: Boolean) {
+            backHandler = on
+        }
 
         @JavascriptInterface
         fun setAutoStart(on: Boolean) = prefs.edit().putBoolean("autoStart", on).apply()

@@ -1,0 +1,432 @@
+/*
+ * Phone shop. The desktop shop (ui/shop.ts, ui/css/shop.css) is an 803 px
+ * pixel-art canvas: on a phone box.ts shrinks it to ~0.49, its body text lands
+ * at 5.9 dp and its 加购/购买 buttons only appear on :hover. This sheet is the
+ * phone replacement: one column of thumb-sized controls at 1 CSS px = 1 dp.
+ * Every rule is scoped to body.qp-phone, so the desktop window keeps its own
+ * rules byte for byte. Sizes: segmented 48, chips/cards' buttons 44, bag rows
+ * 64, product icon 56, body text 15, prices and notes 13.
+ */
+
+/* ---- sheet shell -------------------------------------------------------- */
+
+body.qp-phone .qp-shop-sheet {
+  width: 100%;
+  /* The sheet caps itself at 560 px in landscape; only the phone portrait width is full. */
+  max-width: min(560px, 100%);
+}
+body.qp-phone .qp-shop-sheet .qp-sheet-body {
+  padding: 0;
+  scrollbar-width: none;
+}
+body.qp-phone .qp-shop-sheet .qp-sheet-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+body.qp-phone .qp-shop,
+body.qp-phone .qp-shop * {
+  box-sizing: border-box;
+}
+
+/* ---- 商店 / 我的 segmented control --------------------------------------- */
+
+body.qp-phone .qp-shop-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 2px 16px 8px;
+  padding: 4px;
+  border-radius: 14px;
+  background: rgba(241, 149, 29, 0.12);
+}
+body.qp-phone .qp-shop-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--qp-tap);
+  border-radius: 10px;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font);
+  font-weight: 600;
+  cursor: pointer;
+}
+body.qp-phone .qp-shop-tab[aria-selected='true'] {
+  background: var(--qp-accent);
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 1px 3px rgba(90, 50, 10, 0.28);
+}
+body.qp-phone .qp-shop-tab:active {
+  filter: brightness(0.95);
+}
+
+/* Wallet line: what a purchase spends, so 元宝不足 is visible before the tap. */
+body.qp-phone .qp-shop-wallet {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 16px 8px;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  font-weight: 600;
+}
+body.qp-phone .qp-shop-wallet-bad {
+  color: var(--qp-danger);
+}
+
+/* ---- category chips (horizontally scrollable) --------------------------- */
+
+/* 属性/装扮 sat past the right edge of a scrolling row: a hidden entry. Two rows
+   of 44 dp chips fit every category without a gesture nobody knows about. */
+body.qp-phone .qp-shop-chips {
+  flex-wrap: wrap;
+  overflow-x: visible;
+}
+body.qp-phone .qp-shop-chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 16px 10px;
+  scrollbar-width: none;
+}
+body.qp-phone .qp-shop-chips::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+body.qp-phone .qp-shop-chip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
+  min-height: var(--qp-tap-sm);
+  padding: 0 16px;
+  border: 1px solid var(--qp-line);
+  border-radius: 22px;
+  background: #fff;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+body.qp-phone .qp-shop-chip[aria-selected='true'] {
+  border-color: var(--qp-accent);
+  background: var(--qp-accent);
+  color: #fff;
+  font-weight: 700;
+}
+body.qp-phone .qp-shop-chip:active {
+  filter: brightness(0.95);
+}
+
+/* ---- product grid ------------------------------------------------------- */
+
+body.qp-phone .qp-shop-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 16px 12px;
+}
+body.qp-phone .qp-shop-product {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--qp-line);
+  border-radius: 14px;
+  background: #fff;
+}
+body.qp-phone .qp-shop-icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+body.qp-phone .qp-shop-name {
+  display: -webkit-box;
+  overflow: hidden;
+  min-height: 20px;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  font-weight: 600;
+  line-height: 1.3;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+body.qp-phone .qp-shop-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.4;
+}
+body.qp-phone .qp-shop-price {
+  color: #b8590a;
+  font-size: var(--qp-font-sm);
+  font-weight: 700;
+  white-space: nowrap;
+}
+body.qp-phone .qp-shop-price-was {
+  margin-left: 4px;
+  color: #b3a08a;
+  font-size: var(--qp-font-sm);
+  text-decoration: line-through;
+}
+body.qp-phone .qp-shop-owned {
+  flex: none;
+  overflow: hidden;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-shop-buy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--qp-tap-sm);
+  border-radius: 12px;
+  background: var(--qp-accent);
+  color: #fff;
+  font-size: var(--qp-font-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-shop-buy:active {
+  filter: brightness(0.94);
+}
+body.qp-phone .qp-shop-buy[data-locked='true'] {
+  background: #efe0c7;
+  color: #8a6a44;
+}
+
+/* ---- quantity picker, inline in the card -------------------------------- */
+
+body.qp-phone .qp-shop-buybox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+body.qp-phone .qp-shop-total {
+  color: var(--qp-ink);
+  font-size: var(--qp-font-sm);
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: center;
+}
+body.qp-phone .qp-shop-qty {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+body.qp-phone .qp-shop-step {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  border-radius: 11px;
+  background: rgba(241, 149, 29, 0.16);
+  color: #a4530a;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+body.qp-phone .qp-shop-step:active {
+  background: rgba(241, 149, 29, 0.3);
+}
+body.qp-phone .qp-shop-count {
+  flex: 1;
+  min-width: 0;
+  color: var(--qp-ink);
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+body.qp-phone .qp-shop-actions {
+  display: flex;
+  gap: 6px;
+}
+body.qp-phone .qp-shop-cancel,
+body.qp-phone .qp-shop-ok {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--qp-tap-sm);
+  border-radius: 11px;
+  font-size: var(--qp-font-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-shop-cancel {
+  background: #f1e6d2;
+  color: var(--qp-ink-soft);
+}
+body.qp-phone .qp-shop-ok {
+  background: var(--qp-accent);
+  color: #fff;
+}
+body.qp-phone .qp-shop-cancel:active,
+body.qp-phone .qp-shop-ok:active {
+  filter: brightness(0.94);
+}
+
+/* ---- 我的: inventory rows ----------------------------------------------- */
+
+body.qp-phone .qp-shop-bag {
+  display: flex;
+  flex-direction: column;
+  padding: 0 0 8px;
+}
+body.qp-phone .qp-shop-bag-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 16px;
+  color: var(--qp-ink);
+  text-align: left;
+}
+/* The row is the target (role=button). Its text and icon are not, so they must
+ * not inherit a pointer cursor: a probe (and a user) would read them as hits. */
+body.qp-phone .qp-shop-bag-icon,
+body.qp-phone .qp-shop-bag-text,
+body.qp-phone .qp-shop-bag-name,
+body.qp-phone .qp-shop-bag-note,
+body.qp-phone .qp-shop-bag-use {
+  cursor: default;
+}
+body.qp-phone .qp-shop-bag-row + .qp-shop-bag-row {
+  box-shadow: inset 0 1px 0 var(--qp-line);
+}
+body.qp-phone .qp-shop-bag-row:active {
+  background: rgba(120, 80, 30, 0.1);
+}
+body.qp-phone .qp-shop-bag-icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+body.qp-phone .qp-shop-bag-text {
+  flex: 1;
+  min-width: 0;
+}
+body.qp-phone .qp-shop-bag-name {
+  overflow: hidden;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-shop-bag-note {
+  overflow: hidden;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-shop-bag-use {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
+  min-height: var(--qp-tap-sm);
+  border-radius: 12px;
+  background: rgba(241, 149, 29, 0.14);
+  color: #a4530a;
+  font-size: var(--qp-font-sm);
+  font-weight: 700;
+}
+
+/* ---- empty shelf -------------------------------------------------------- */
+
+body.qp-phone .qp-shop-empty {
+  padding: 48px 16px;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* ---- pinned footer: feedback line + pager ------------------------------- */
+
+body.qp-phone .qp-shop-footer {
+  flex: none;
+  padding: 8px 16px 10px;
+  background: var(--qp-card);
+  box-shadow: inset 0 1px 0 var(--qp-line);
+}
+body.qp-phone .qp-shop-toast {
+  display: none;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: var(--qp-font-sm);
+  font-weight: 600;
+  line-height: 1.35;
+}
+body.qp-phone .qp-shop-toast.qp-shop-toast-ok {
+  display: block;
+  background: rgba(47, 125, 74, 0.14);
+  color: #2f7d4a;
+}
+body.qp-phone .qp-shop-toast.qp-shop-toast-error {
+  display: block;
+  background: rgba(192, 57, 43, 0.12);
+  color: var(--qp-danger);
+}
+body.qp-phone .qp-shop-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+body.qp-phone .qp-shop-page {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 96px;
+  min-height: var(--qp-tap-sm);
+  border-radius: 12px;
+  background: rgba(241, 149, 29, 0.14);
+  color: #a4530a;
+  font-size: var(--qp-font-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-shop-page[aria-disabled='true'] {
+  background: #f1e6d2;
+  color: #b3a08a;
+  cursor: default;
+}
+body.qp-phone .qp-shop-pageno {
+  flex: 1;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-align: center;
+}

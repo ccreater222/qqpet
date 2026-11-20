@@ -59,6 +59,8 @@ interface Native {
   copyText(text: string): void
   openUrl(url: string): void
   setFocusable(on: boolean): void
+  /** The page has a modal open and wants the back key; absent on older shells. */
+  setBackHandler?(on: boolean): void
   setAutoStart(on: boolean): void
   /** The notification standing in for the tray: an icon under pet/img_res/Tray/, and its text unless null. */
   setTray(icon: string, tip: string | null): void
@@ -92,6 +94,11 @@ declare global {
 }
 
 const native = window.QQPetNative
+
+// A phone sheet takes the back key while it is up: the sheet tells the host through this hook,
+// and the host calls `__qqpetBack` to close it. The desktop and the other mobile hosts have no
+// such hook, so their sheets simply close by the backdrop or the close button.
+window.__qqpetSetBackHandler = (on: boolean): void => native.setBackHandler?.(on)
 // The real frame clock: the SWF player holds page animation frames while the host is paused (#119), and the window
 // must still follow a menu or panel opened from the notification while the pet is hidden.
 const frame = window.requestAnimationFrame.bind(window)
