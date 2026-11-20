@@ -59,7 +59,9 @@ body.qp-phone .qp-phone-scroll::-webkit-scrollbar {
   flex-direction: column;
   max-height: 88%;
   /* A landscape phone is 800+ dp wide: a full-width sheet would stretch every row
-     and every shortcut tile across the screen. */
+     and every shortcut tile across the screen. width:100% is what keeps the
+     portrait sheet full-width — auto margins alone make a flex item shrink to fit. */
+  width: 100%;
   max-width: 560px;
   margin: var(--safe-top) auto 0;
   border-radius: 20px 20px 0 0;

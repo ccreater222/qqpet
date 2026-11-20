@@ -1,0 +1,1111 @@
+/*
+ * Phone pages: the sign-in, task, mail and pet-profile windows rebuilt as bottom
+ * sheets at 1 CSS px = 1 dp. Their desktop versions (ui/signin.ts 737x485,
+ * ui/task.ts 607x455, ui/email.ts 355x500, ui/petinfo.ts 432x420) are fixed-pixel
+ * layouts authored for a mouse on a 480 px design space: on a phone box.ts shrinks
+ * them to 0.53-0.90, leaving 6-11 dp text with 14-25 dp buttons, and the fixed
+ * widths push the calendar, the claim buttons and the profile's stats off the
+ * right edge. The phone modules (ui/mobile/phone-signin.ts, phone-task.ts,
+ * phone-email.ts, phone-petinfo.ts) therefore lay the same data out again here.
+ *
+ * Sizes: primary action 56, every tap target 44 or more, task/mail rows 64,
+ * calendar cells >=44, tier cards 64, text 15 / 13 / 12, meters 20.
+ * Every selector is scoped to `body.qp-phone`, so the desktop windows keep their
+ * own rules byte for byte. The desktop windows never carry that class.
+ */
+
+/* ---- sheet shell shared by the four pages -------------------------------- */
+
+body.qp-phone .qp-page-sheet .qp-sheet-body {
+  padding: 0;
+  scrollbar-width: none;
+}
+body.qp-phone .qp-page-sheet .qp-sheet-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* showResult() overlays the element it is given. Inside a sheet that is the card,
+   so the goods card is centred on the whole sheet instead of on a scrolled body
+   that may be taller (or scrolled past) the viewport. */
+body.qp-phone .qp-sheet-card > .markFull {
+  border-radius: inherit;
+}
+body.qp-phone .qp-sheet-card > .markFull .getResult {
+  width: min(340px, 88%);
+  padding: 10px;
+}
+body.qp-phone .qp-sheet-card > .markFull .getResultBorder {
+  padding: 12px;
+}
+body.qp-phone .qp-sheet-card > .markFull .grb_mgs,
+body.qp-phone .qp-sheet-card > .markFull .getResultBorder {
+  font-size: var(--qp-font);
+  line-height: 1.5;
+}
+body.qp-phone .qp-sheet-card > .markFull .grb_mgs {
+  max-height: 50vh;
+}
+body.qp-phone .qp-sheet-card > .markFull .but_small {
+  min-width: 120px;
+  min-height: 48px;
+  font-size: var(--qp-font);
+}
+body.qp-phone .qp-sheet-card > .markFull .grb_goods {
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+/* ---- sign-in (ui/mobile/phone-signin.ts) --------------------------------- */
+
+body.qp-phone .qp-signin {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 12px 12px;
+}
+body.qp-phone .qp-signin-card {
+  padding: 12px;
+  border: 1px solid var(--qp-line);
+  border-radius: 14px;
+  background: #fff;
+}
+body.qp-phone .qp-signin-title {
+  margin: 2px 0 6px;
+  font-size: var(--qp-font);
+  font-weight: 700;
+  color: var(--qp-ink);
+}
+body.qp-phone .qp-signin-subtitle {
+  margin-top: 16px;
+}
+body.qp-phone .qp-signin-count {
+  margin-bottom: 6px;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  font-weight: 600;
+  line-height: 1.4;
+}
+body.qp-phone .qp-signin-hint {
+  margin-top: 4px;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.5;
+}
+/* The one daily action: 56 dp and full width, above every secondary block. */
+body.qp-phone .qp-signin-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 56px;
+  margin: 10px 0 6px;
+  border-radius: 14px;
+  background: var(--qp-accent);
+  color: #fff;
+  font-size: 17px;
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-signin-primary[aria-disabled='true'] {
+  background: #efe0c7;
+  color: #8a6a44;
+  cursor: default;
+}
+body.qp-phone .qp-signin-primary:active:not([aria-disabled='true']) {
+  filter: brightness(0.94);
+}
+
+/* calendar: 7 columns on every phone width, cells never below 44 dp */
+body.qp-phone .qp-signin-cal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+body.qp-phone .qp-signin-month {
+  flex: 1;
+  min-width: 0;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  font-weight: 700;
+  text-align: center;
+}
+body.qp-phone .qp-signin-nav {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  border-radius: 12px;
+  background: rgba(241, 149, 29, 0.14);
+  color: #a4530a;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+body.qp-phone .qp-signin-nav[aria-disabled='true'] {
+  background: #f1e6d2;
+  color: #b3a08a;
+  cursor: default;
+}
+body.qp-phone .qp-signin-week,
+body.qp-phone .qp-signin-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+body.qp-phone .qp-signin-week {
+  margin: 10px 0 4px;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  text-align: center;
+}
+body.qp-phone .qp-signin-day {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  min-height: var(--qp-tap-sm);
+  border-radius: 10px;
+  background: #f7efe1;
+  color: var(--qp-ink);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+body.qp-phone .qp-signin-day-blank {
+  background: transparent;
+}
+body.qp-phone .qp-signin-day-past {
+  background: #ece3d4;
+  color: #a99982;
+}
+body.qp-phone .qp-signin-day-signed {
+  background: rgba(226, 41, 84, 0.16);
+  color: #b0183c;
+  font-weight: 700;
+}
+body.qp-phone .qp-signin-day-today {
+  outline: 2px solid var(--qp-accent);
+  outline-offset: -2px;
+  font-weight: 700;
+}
+body.qp-phone .qp-signin-day-future {
+  color: #b3a08a;
+}
+
+/* growth draw + online gift: one line of numbers, one 44 dp action */
+body.qp-phone .qp-signin-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+}
+body.qp-phone .qp-signin-digits {
+  display: flex;
+  gap: 6px;
+}
+body.qp-phone .qp-signin-digit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 52px;
+  border-radius: 8px;
+  background: #fdfeff;
+  box-shadow: inset 2px 2px 2px rgba(0, 0, 0, 0.35), inset -2px -2px 2px rgba(255, 255, 255, 0.6);
+  color: var(--qp-ink);
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+body.qp-phone .qp-signin-action {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 120px;
+  min-height: var(--qp-tap-sm);
+  padding: 0 16px;
+  border-radius: 12px;
+  background: rgba(241, 149, 29, 0.16);
+  color: #a4530a;
+  font-size: var(--qp-font);
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-signin-action[aria-disabled='true'] {
+  background: #f1e6d2;
+  color: #b3a08a;
+  cursor: default;
+}
+body.qp-phone .qp-signin-action:active:not([aria-disabled='true']) {
+  background: rgba(241, 149, 29, 0.3);
+}
+
+/* 图鉴: wrapping type chips, then two columns of 64 dp cards */
+body.qp-phone .qp-signin-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+body.qp-phone .qp-signin-chip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
+  min-height: var(--qp-tap-sm);
+  padding: 0 14px;
+  border: 1px solid var(--qp-line);
+  border-radius: 22px;
+  background: #fff;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font);
+  font-weight: 600;
+  cursor: pointer;
+}
+body.qp-phone .qp-signin-chip[aria-selected='true'] {
+  border-color: var(--qp-accent);
+  background: var(--qp-accent);
+  color: #fff;
+  font-weight: 700;
+}
+body.qp-phone .qp-signin-tier {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--qp-line);
+}
+body.qp-phone .qp-signin-tier-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: var(--qp-tap-sm);
+}
+body.qp-phone .qp-signin-tier-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-signin-tier-toggle {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 88px;
+  min-height: var(--qp-tap-sm);
+  border-radius: 12px;
+  background: rgba(241, 149, 29, 0.14);
+  color: #a4530a;
+  font-size: var(--qp-font);
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-signin-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+body.qp-phone .qp-signin-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 64px;
+  padding: 8px;
+  border: 1px solid var(--qp-line);
+  border-radius: 12px;
+  background: #fff;
+}
+body.qp-phone .qp-signin-icon {
+  flex: none;
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+body.qp-phone .qp-signin-name {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--qp-ink);
+  font-size: var(--qp-font-sm);
+  line-height: 1.3;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+body.qp-phone .qp-signin-item[data-seen='false'] .qp-signin-icon {
+  filter: grayscale(1) opacity(0.55);
+}
+body.qp-phone .qp-signin-item[data-seen='false'] .qp-signin-name {
+  color: #a99982;
+}
+
+/* ---- tasks (ui/mobile/phone-task.ts) ------------------------------------- */
+
+body.qp-phone .qp-task {
+  display: flex;
+  flex-direction: column;
+  padding: 0 12px 12px;
+}
+body.qp-phone .qp-task-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+body.qp-phone .qp-task-tab {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
+  min-height: var(--qp-tap-sm);
+  padding: 0 14px;
+  border: 1px solid var(--qp-line);
+  border-radius: 22px;
+  background: #fff;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font);
+  font-weight: 600;
+  cursor: pointer;
+}
+body.qp-phone .qp-task-tab[aria-selected='true'] {
+  border-color: var(--qp-accent);
+  background: var(--qp-accent);
+  color: #fff;
+  font-weight: 700;
+}
+body.qp-phone .qp-task-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: rgba(192, 57, 43, 0.9);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+body.qp-phone .qp-task-section-title {
+  padding: 12px 4px 4px;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  font-weight: 700;
+}
+body.qp-phone .qp-task-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 64px;
+  padding: 8px 0;
+  box-shadow: inset 0 1px 0 var(--qp-line);
+}
+body.qp-phone .qp-task-main {
+  flex: 1;
+  min-width: 0;
+}
+body.qp-phone .qp-task-title {
+  overflow: hidden;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-task-progress {
+  color: #b8590a;
+  font-size: var(--qp-font-sm);
+  font-weight: 600;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+body.qp-phone .qp-task-msg {
+  overflow: hidden;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-task-goods {
+  display: flex;
+  gap: 4px;
+  margin-top: 2px;
+}
+body.qp-phone .qp-task-good {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+body.qp-phone .qp-task-claim {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 96px;
+  min-height: var(--qp-tap-sm);
+  padding: 0 12px;
+  border-radius: 12px;
+  background: var(--qp-accent);
+  color: #fff;
+  font-size: var(--qp-font);
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-task-claim[aria-disabled='true'] {
+  background: #efe0c7;
+  color: #8a6a44;
+  cursor: default;
+}
+body.qp-phone .qp-task-claim:active:not([aria-disabled='true']) {
+  filter: brightness(0.94);
+}
+body.qp-phone .qp-task-empty {
+  padding: 40px 16px;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* ---- mail (ui/mobile/phone-email.ts) ------------------------------------- */
+
+body.qp-phone .qp-email {
+  display: flex;
+  flex-direction: column;
+  padding: 0 12px 12px;
+}
+body.qp-phone .qp-email-list {
+  display: flex;
+  flex-direction: column;
+}
+body.qp-phone .qp-email-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  box-shadow: inset 0 1px 0 var(--qp-line);
+  cursor: pointer;
+}
+body.qp-phone .qp-email-row:active {
+  background: rgba(120, 80, 30, 0.08);
+}
+body.qp-phone .qp-email-badge {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+body.qp-phone .qp-email-main {
+  flex: 1;
+  min-width: 0;
+}
+body.qp-phone .qp-email-sender {
+  overflow: hidden;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-email-subject {
+  overflow: hidden;
+  color: var(--qp-ink);
+  font-size: var(--qp-font-sm);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-email-time {
+  color: #a99982;
+  font-size: 12px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+body.qp-phone .qp-email-go {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--qp-tap-sm);
+  height: var(--qp-tap-sm);
+  color: #b08a5a;
+  font-size: 20px;
+  line-height: 1;
+}
+body.qp-phone .qp-email-empty {
+  padding: 48px 16px;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* detail: 返回 44, subject 17, body scrolls in the sheet */
+body.qp-phone .qp-email-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+body.qp-phone .qp-email-back {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 96px;
+  min-height: var(--qp-tap-sm);
+  padding: 0 12px;
+  border-radius: 12px;
+  background: rgba(241, 149, 29, 0.14);
+  color: #a4530a;
+  font-size: var(--qp-font);
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-email-detail-subject {
+  color: var(--qp-ink);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+body.qp-phone .qp-email-detail-meta {
+  color: var(--qp-ink-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+body.qp-phone .qp-email-detail-body {
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid var(--qp-line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+body.qp-phone .qp-email-detail-goods {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+body.qp-phone .qp-email-good {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--qp-tap-sm);
+  padding: 6px 8px;
+  border: 1px solid var(--qp-line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--qp-ink);
+  font-size: var(--qp-font-sm);
+  line-height: 1.3;
+}
+body.qp-phone .qp-email-good-icon {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+body.qp-phone .qp-email-photo {
+  display: block;
+  width: 100%;
+  max-height: 40vh;
+  margin: 8px 0;
+  border-radius: 12px;
+  object-fit: contain;
+  background: #fff;
+  border: 1px solid var(--qp-line);
+}
+body.qp-phone .qp-email-detail-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+body.qp-phone .qp-email-claim {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  border-radius: 12px;
+  background: var(--qp-accent);
+  color: #fff;
+  font-size: var(--qp-font);
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-email-claim.qp-email-delete {
+  background: rgba(192, 57, 43, 0.12);
+  color: var(--qp-danger);
+}
+body.qp-phone .qp-email-claim[aria-disabled='true'] {
+  background: #efe0c7;
+  color: #8a6a44;
+  cursor: default;
+}
+
+/* pinned footer: pager row, then the two bulk actions */
+body.qp-phone .qp-email-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px 10px;
+  background: var(--qp-card);
+  box-shadow: inset 0 1px 0 var(--qp-line);
+}
+body.qp-phone .qp-email-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+body.qp-phone .qp-email-page {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 96px;
+  min-height: var(--qp-tap-sm);
+  border-radius: 12px;
+  background: rgba(241, 149, 29, 0.14);
+  color: #a4530a;
+  font-size: var(--qp-font);
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-email-page[aria-disabled='true'] {
+  background: #f1e6d2;
+  color: #b3a08a;
+  cursor: default;
+}
+body.qp-phone .qp-email-pageno {
+  flex: 1;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+body.qp-phone .qp-email-bulk {
+  display: flex;
+  gap: 8px;
+}
+body.qp-phone .qp-email-bulk-act {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--qp-tap-sm);
+  border-radius: 12px;
+  background: rgba(241, 149, 29, 0.16);
+  color: #a4530a;
+  font-size: var(--qp-font-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-email-bulk-act[aria-disabled='true'] {
+  background: #f1e6d2;
+  color: #b3a08a;
+  cursor: default;
+}
+
+/* ---- pet profile (ui/mobile/phone-petinfo.ts) ---------------------------- */
+
+body.qp-phone .qp-petinfo {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 12px 12px;
+}
+body.qp-phone .qp-petinfo-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+/* The avatar keeps its 96 dp box; the background (the pet's own wallpaper art)
+   and the breathing portrait are the same sources as the desktop head. */
+body.qp-phone .qp-petinfo-avatar-wrap {
+  position: relative;
+  flex: none;
+  width: 96px;
+  height: 96px;
+  overflow: hidden;
+  border-radius: 14px;
+  background-position: center;
+  background-size: cover;
+}
+body.qp-phone .qp-petinfo-avatar {
+  position: absolute;
+  left: 6%;
+  top: 6%;
+  width: 88%;
+  height: 88%;
+  object-fit: contain;
+  transform-origin: center bottom;
+  pointer-events: none;
+}
+body.qp-phone .qp-petinfo-who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+body.qp-phone .qp-petinfo-name {
+  overflow: hidden;
+  color: var(--qp-ink);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-petinfo-meta {
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.45;
+}
+body.qp-phone .qp-petinfo-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+body.qp-phone .qp-petinfo-tag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 15px;
+  background: rgba(241, 149, 29, 0.12);
+  color: #a4530a;
+  font-size: var(--qp-font-sm);
+  font-weight: 600;
+}
+body.qp-phone .qp-petinfo-badge {
+  flex: none;
+  width: 20px;
+  height: 26px;
+  background-repeat: no-repeat;
+  background-size: contain;
+}
+body.qp-phone .qp-petinfo-heart {
+  flex: none;
+  width: 32px;
+  height: 16px;
+  background-repeat: no-repeat;
+  background-size: contain;
+}
+body.qp-phone .qp-petinfo-section {
+  padding-top: 10px;
+  border-top: 1px solid var(--qp-line);
+}
+body.qp-phone .qp-petinfo-section-title {
+  margin-bottom: 8px;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  font-weight: 700;
+}
+
+/* rename: 44 dp input and 44 dp save key on one line */
+body.qp-phone .qp-petinfo-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+body.qp-phone .qp-petinfo-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+body.qp-phone .qp-petinfo-field-label {
+  flex: none;
+  width: 84px;
+  color: var(--qp-ink);
+  font-size: var(--qp-font-sm);
+  font-weight: 600;
+}
+body.qp-phone .qp-petinfo-input {
+  flex: 1;
+  min-width: 0;
+  height: var(--qp-tap-sm);
+  padding: 0 12px;
+  border: 1px solid var(--qp-line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  -webkit-user-select: text;
+  user-select: text;
+}
+body.qp-phone .qp-petinfo-save {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  min-height: var(--qp-tap-sm);
+  border-radius: 12px;
+  background: var(--qp-accent);
+  color: #fff;
+  font-size: var(--qp-font);
+  font-weight: 700;
+  cursor: pointer;
+}
+body.qp-phone .qp-petinfo-save:active {
+  filter: brightness(0.94);
+}
+
+/* two-column stat grid: label 13, value 15, meter 20 */
+body.qp-phone .qp-petinfo-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+body.qp-phone .qp-petinfo-stat {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--qp-line);
+  border-radius: 12px;
+  background: #fff;
+}
+body.qp-phone .qp-petinfo-stat-blank {
+  border: 0;
+  background: transparent;
+}
+body.qp-phone .qp-petinfo-label {
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.3;
+}
+body.qp-phone .qp-petinfo-value {
+  overflow: hidden;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.qp-phone .qp-petinfo-meter {
+  height: 20px;
+  margin-top: 6px;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #f1e6d2;
+}
+body.qp-phone .qp-petinfo-meter-fill {
+  height: 100%;
+  border-radius: 10px;
+  background: var(--qp-accent);
+}
+body.qp-phone .qp-petinfo-meter-fill.qp-meter-high {
+  background: #2f7d4a;
+}
+body.qp-phone .qp-petinfo-meter-fill.qp-meter-low {
+  background: var(--qp-danger);
+}
+
+/* achievements and diplomas: chips, never a 30x40 absolute-positioned list */
+body.qp-phone .qp-petinfo-ach {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+body.qp-phone .qp-petinfo-ach-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: var(--qp-tap-sm);
+  min-height: 64px;
+  padding: 6px 8px;
+  border: 1px solid var(--qp-line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--qp-ink-soft);
+  font-size: 12px;
+  line-height: 1.2;
+}
+body.qp-phone .qp-petinfo-ach-img {
+  width: 32px;
+  height: 40px;
+  object-fit: contain;
+}
+body.qp-phone .qp-petinfo-diplomas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+body.qp-phone .qp-petinfo-diploma {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 4px 10px;
+  border-radius: 15px;
+  background: rgba(241, 149, 29, 0.12);
+  color: #a4530a;
+  font-size: var(--qp-font-sm);
+  line-height: 1.3;
+}
+body.qp-phone .qp-petinfo-empty {
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.5;
+}
+
+/* ---- island (appended by the phone island surface) ----------------------- */
+
+/* ---- island sheet (island-runtime.ts) ----------------------------------- */
+/*
+ * 企鹅岛 used to open as a 580 px framed window: box.ts shrank it to 0.671 on a
+ * 412 dp phone, so its 13/14 px text landed at 8.7/9.4 dp and 交谈/聊天 were
+ * 17x14. The phone surface is a bottom sheet: one row per islander, place,
+ * errand, spot or game, 56 dp tall, body text 15 px and every action 44 dp.
+ * The markup is the desktop markup (i_head/i_row/i_line/i_acts/focusPress); only
+ * the container and the sizes change, so no island command is phone-only.
+ */
+body.qp-phone .qp-island-sheet {
+  width: 100%;
+  /* The sheet caps itself at 560 px in landscape; only the phone portrait width is full. */
+  max-width: min(560px, 100%);
+}
+body.qp-phone .qp-island-sheet .qp-sheet-body {
+  padding: 0 0 8px;
+  font-size: var(--qp-font);
+  line-height: 1.5;
+}
+body.qp-phone .qp-island {
+  color: var(--qp-ink);
+}
+/* Section titles (布袋长老 / 岛民与地点 / 今日委托 / ...) separate the row groups. */
+body.qp-phone .qp-island > .i_head {
+  padding: 14px 16px 6px;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  font-weight: 700;
+  text-shadow: none;
+}
+/* A row: heading + detail on the left, the row's own action on the right, and
+   grouped buttons (交谈/聊天, 硬拼/智取/说服) on a line of their own. */
+body.qp-phone .qp-island .i_row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 12px;
+  min-height: 56px;
+  padding: 10px 16px;
+  border-bottom: 0;
+  box-shadow: inset 0 1px 0 var(--qp-line);
+}
+body.qp-phone .qp-island .i_row .i_head {
+  grid-column: 1;
+  color: var(--qp-ink);
+  font-size: var(--qp-font);
+  font-weight: 600;
+  line-height: 1.35;
+  text-shadow: none;
+}
+body.qp-phone .qp-island .i_line {
+  grid-column: 1;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.4;
+  word-break: break-word;
+}
+/* The two lines the island writes straight into the body (no news yet, quiz prompt). */
+body.qp-phone .qp-island > .i_line {
+  padding: 0 16px 6px;
+  color: var(--qp-ink-soft);
+  font-size: var(--qp-font-sm);
+  line-height: 1.5;
+}
+body.qp-phone .qp-island .i_row > .focusPress {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+body.qp-phone .qp-island .i_row > .i_acts {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px;
+  margin: 8px 0 0;
+}
+/* Every island action is a 44 dp button: 交谈/聊天, 硬拼/智取/说服, 前往/查看/
+   游玩, 接信/送达, 答题/交付, the quiz options and the five footer entries. */
+body.qp-phone .qp-island .focusPress,
+body.qp-phone .qp-island-acts .focusPress {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--qp-tap-sm);
+  min-height: var(--qp-tap-sm);
+  padding: 0 16px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--qp-accent);
+  color: #fff;
+  font-size: var(--qp-font);
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+  white-space: normal;
+  word-break: break-word;
+}
+body.qp-phone .qp-island .focusPress:active,
+body.qp-phone .qp-island-acts .focusPress:active {
+  filter: brightness(0.94);
+}
+/* Quiz options are direct children: one full-width row each. */
+body.qp-phone .qp-island > .focusPress {
+  display: flex;
+  width: calc(100% - 32px);
+  min-height: 48px;
+  margin: 8px 16px 0;
+}
+/* Footer: 领成长礼 / 领宝藏碎片 / 刷新新闻 / 去商店 / 玩游戏. Three per row, so
+   five 13 px labels never push a row past 412 dp. */
+body.qp-phone .qp-island-acts {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px 16px 14px;
+  box-shadow: inset 0 1px 0 var(--qp-line);
+}
+body.qp-phone .qp-island-acts .focusPress {
+  min-width: 0;
+  padding: 0 6px;
+  font-size: var(--qp-font-sm);
+}

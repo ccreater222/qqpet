@@ -32,7 +32,18 @@ export function openFishing(): void {
   // Blocks the buy button for a second after a purchase: fish ids are purchase seconds.
   const cooldown = Object.assign(div('controlTF'), { title: '投放冷却中' })
   const player = new SwfPlayer(host)
-  const remove = openFrame(div('ui-fishing', div('fishing', host, cooldown)))
+  // Closing by the back key or the backdrop never reaches the SWF's own close
+  // callback, so the overridden globals and the open latch are restored here too.
+  let finished = false
+  const finish = (): void => {
+    if (finished) return
+    finished = true
+    window.alert = alert
+    window.confirm = confirm
+    window.before_pay = beforePay
+    open = false
+  }
+  const remove = openFrame(div('ui-fishing', div('fishing', host, cooldown)), undefined, finish)
   const receive = player.callback('PETEventOnReceived')
   const send = async (cmd: number, data: unknown): Promise<void> => void (await receive)(JSON.stringify({ data, head: { ...HEAD, cmd } }))
   const alert = window.alert
@@ -191,10 +202,7 @@ export function openFishing(): void {
     setTimeout(() => {
       if (!host.isConnected) return
       remove()
-      window.alert = alert
-      window.confirm = confirm
-      window.before_pay = beforePay
-      open = false
+      finish()
     })
   }
 

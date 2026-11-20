@@ -7,6 +7,8 @@ import { openBox } from './box'
 import './css/petinfo.css'
 import { formatDate } from './date'
 import { button, div, img, typeable } from './dom'
+import { openPhonePetInfo } from './mobile/phone-petinfo'
+import { phoneUI } from './mobile/sizing'
 import { progress } from './progress'
 import { age, status } from './state'
 
@@ -59,6 +61,7 @@ function nameRow(cls: string, label: string, key: 'name' | 'host', saved: () => 
 }
 
 export function openPetInfo(): void {
+  if (phoneUI()) return openPhonePetInfo()
   close()
   const g = save.gameSaveDatas
   const portrait = img('img penguin_breathe', avatar())

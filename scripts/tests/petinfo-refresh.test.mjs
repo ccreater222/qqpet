@@ -79,6 +79,9 @@ function profile() {
     window: { qqpet: { setFocusable: value => { focusable.push(value); if (!value) document.activeElement = null } } },
     setInterval: (callback, delay) => { assert.equal(delay, 1000); timers.set(++nextTimer, callback); return nextTimer },
     clearInterval: id => timers.delete(id),
+    // petinfo.ts branches to the phone sheet first; this harness tests the desktop window.
+    phoneUI: () => false,
+    openPhonePetInfo: () => { throw new Error('the phone profile must not open on a desktop harness') },
     openBox(content, options) {
       document.body.append(content)
       closePanel = () => { content.remove(); options.onClose() }

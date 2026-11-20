@@ -9,6 +9,8 @@ import './css/games.css'
 import { button, div, img } from './dom'
 import { floatMood } from './float'
 import { playDiudiule } from './diudiule'
+import { openPhoneGames } from './mobile/phone-games'
+import { phoneUI } from './mobile/sizing'
 import { playSmallGame, SMALL_GAMES } from './smallgame'
 
 let open = false
@@ -49,8 +51,12 @@ window.qqpet.onGamePlayed((minutes, windowId) => {
   speak({ s: `[host]，陪我玩了${m}分钟小游戏，好开心！获得${got}元宝~`, now: true }, 'speak')
 })
 
-/** Starts a server-owned flash-game session, then opens the legacy SWF window. */
-async function startFlashGame(gameId: string): Promise<void> {
+/**
+ * Starts a server-owned flash-game session, then opens the legacy SWF window.
+ * Exported because the phone lobby (mobile/phone-games.ts) launches the same
+ * game through this path instead of keeping a second copy of the session code.
+ */
+export async function startFlashGame(gameId: string): Promise<void> {
   const windowId = nextRuntimeGameWindow++
   if (runtimeProjectionMode) {
     const result = await dispatchRuntimeCommand(uiCommands.gameStart(gameId, 'flash'))
@@ -63,6 +69,9 @@ async function startFlashGame(gameId: string): Promise<void> {
 
 /** Game picker: the desktop games play with the pet, the rest open in their own window. */
 export function openGames(): void {
+  // One CSS px is one dp on a phone (mobile/sizing.ts): the 675 px window below
+  // shows 56 % of itself there, so a phone gets the sheet instead.
+  if (phoneUI()) return openPhoneGames()
   if (open) return
   open = true
   const cats = [

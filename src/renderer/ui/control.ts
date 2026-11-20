@@ -79,6 +79,24 @@ const PANELS = {
   toy: inventoryPanel('toy', 28, 'mood'),
 }
 
+/**
+ * 打工 / 学习: the same one-page inventory list as the everyday panels. They live
+ * here so the desktop toolbar and the phone sheet share one definition; the phone
+ * menu must not copy workGoods/describeWork to reach them (review 05-review-c §3).
+ */
+const WORK_PANEL: Panel = {
+  icon: activeIcon(26),
+  list: (page) => pageOf(workGoods(), page, PAGE),
+  lines: describeWork,
+  use: work,
+}
+const STUDY_PANEL: Panel = {
+  icon: activeIcon(24),
+  list: (page) => pageOf(studyGoods(), page, PAGE),
+  lines: describeStudy,
+  use: study,
+}
+
 /** On a phone the icon bar is gone: the same inventory opens as a bottom sheet. */
 const PHONE_GOODS_TITLES: Record<keyof typeof PANELS, string> = {
   food: '喂养',
@@ -88,7 +106,8 @@ const PHONE_GOODS_TITLES: Record<keyof typeof PANELS, string> = {
 }
 
 interface PhoneGoods {
-  type: keyof typeof PANELS
+  /** Set for the everyday inventory panels, whose sheet repaints on that inventory change. */
+  type?: keyof typeof PANELS
   draw: () => void
   close: () => void
 }
@@ -100,10 +119,10 @@ let phoneGoods: PhoneGoods | null = null
  * The everyday goods panel as a phone sheet: one 64 dp row per good (40 dp icon,
  * 15 px name, 13 px description), 44 dp paging, 去购物 kept at the bottom.
  * A tap uses the good at once instead of the toolbar's tap-to-preview dance.
+ * Also serves 打工/学习, which are ordinary panels on the desktop toolbar.
  */
-function openPhoneGoods(type: keyof typeof PANELS): void {
+function openPhonePanel(panel: Panel, title: string, type?: keyof typeof PANELS): void {
   phoneGoods?.close()
-  const panel = PANELS[type]
   let page = 1
   let sheet: ReturnType<typeof openSheet> | null = null
   let self: PhoneGoods | null = null
@@ -175,7 +194,7 @@ function openPhoneGoods(type: keyof typeof PANELS): void {
       )
     : undefined
   const handle = openSheet({
-    title: PHONE_GOODS_TITLES[type],
+    title,
     body: content,
     footer,
     onClose: () => {
@@ -186,6 +205,26 @@ function openPhoneGoods(type: keyof typeof PANELS): void {
   self = { type, draw, close: () => handle.close() }
   phoneGoods = self
   draw()
+}
+
+function openPhoneGoods(type: keyof typeof PANELS): void {
+  openPhonePanel(PANELS[type], PHONE_GOODS_TITLES[type], type)
+}
+
+/**
+ * 打工 and 学习: the icon toolbar's panels, exported so the phone menu can open the
+ * very same panel data as a bottom sheet instead of duplicating the job/lesson logic.
+ */
+export function openWorkPanel(): void {
+  if (phoneUI()) return openPhonePanel(WORK_PANEL, '打工')
+  showControl()
+  openPanel(WORK_PANEL)
+}
+
+export function openStudyPanel(): void {
+  if (phoneUI()) return openPhonePanel(STUDY_PANEL, '学习')
+  showControl()
+  openPanel(STUDY_PANEL)
 }
 
 /** A menu group opens its children on hover, or runs `run` on click. */
@@ -207,12 +246,12 @@ const MENU: { name: string; icon: string; children?: Entry[]; run?: () => void }
       {
         name: '打工',
         icon: 'dagong.png',
-        run: () => openPanel({ icon: activeIcon(26), list: (page) => pageOf(workGoods(), page, PAGE), lines: describeWork, use: work }),
+        run: openWorkPanel,
       },
       {
         name: '学习',
         icon: 'xuexi.png',
-        run: () => openPanel({ icon: activeIcon(24), list: (page) => pageOf(studyGoods(), page, PAGE), lines: describeStudy, use: study }),
+        run: openStudyPanel,
       },
       { name: '旅游', icon: 'lvyou.png', run: openTravel },
       { name: '看病', icon: 'zhibing.png', run: doctor },

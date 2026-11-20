@@ -1,9 +1,9 @@
 // The phone menu's pure model: a menu tree becomes ordered sections (互动 /
-// 养成 / 设置 / 其他, danger last) and a flat list of rows whose children show
-// inline. No DOM or store imports, so scripts/tests can import it directly and
-// the rendering layer stays a thin projection of this state.
+// 工具 / 养成 / 设置 / 其他, danger last) and a flat list of rows whose children
+// show inline. No DOM or store imports, so scripts/tests can import it directly
+// and the rendering layer stays a thin projection of this state.
 
-export type MenuGroup = 'interact' | 'care' | 'settings' | 'other'
+export type MenuGroup = 'interact' | 'tools' | 'care' | 'settings' | 'other'
 export type MenuSectionId = MenuGroup | 'danger'
 
 export interface PhoneMenuItem {
@@ -38,10 +38,11 @@ export interface MenuRow<T extends PhoneMenuItem = PhoneMenuItem> {
   expanded: boolean
 }
 
-export const MENU_GROUP_ORDER: readonly MenuGroup[] = ['interact', 'care', 'settings', 'other']
+export const MENU_GROUP_ORDER: readonly MenuGroup[] = ['interact', 'tools', 'care', 'settings', 'other']
 
 export const MENU_GROUP_TITLES: Record<MenuGroup, string> = {
   interact: '互动',
+  tools: '工具',
   care: '养成',
   settings: '设置',
   other: '其他',

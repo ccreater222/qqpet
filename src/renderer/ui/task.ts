@@ -3,11 +3,14 @@ import { onStoreEvent, runtimeProjectionMode } from '../pet/store'
 import { openBox } from './box'
 import './css/task.css'
 import { button, div, img } from './dom'
+import { openPhoneTask } from './mobile/phone-task'
+import { phoneUI } from './mobile/sizing'
 import { showResult } from './result'
 
 let open = false
 
 export function openTask(): void {
+  if (phoneUI()) return openPhoneTask()
   if (open) return
   open = true
   const root = div('ui-task')

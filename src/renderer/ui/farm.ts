@@ -7,6 +7,8 @@ import { FARM_MAX_PLOTS } from '../../shared/pet-runtime/farm-limits'
 import { SwfPlayer } from '../swf/player'
 import { readSol, writeSol, type Sol } from '../swf/sol'
 import { openBox } from './box'
+import { openSheet } from './mobile/sheet'
+import { phoneUI } from './mobile/sizing'
 import './css/farm.css'
 import { button, div, img } from './dom'
 
@@ -180,14 +182,20 @@ function openRuntimeFarm(): void {
   }
   const off = onProjectionApplied(() => render())
   window.qqpet.setFocusable(true)
-  closeFarm = openBox(host, {
-    onClose: () => {
-      off()
-      closeFarm = null
-      open = false
-      window.qqpet.setFocusable(false)
-    },
-  })
+  const closed = (): void => {
+    off()
+    closeFarm = null
+    open = false
+    window.qqpet.setFocusable(false)
+  }
+  // The 700 px six-column farm is unreadable once box.ts shrinks it to fit a phone;
+  // the sheet keeps dp text and phone-farm.css turns the plots into two columns.
+  if (phoneUI()) {
+    const sheet = openSheet({ title: '农场', body: host, cardClass: 'qp-farm-card', onClose: closed })
+    closeFarm = () => sheet.close()
+  } else {
+    closeFarm = openBox(host, { onClose: closed })
+  }
   render()
 }
 

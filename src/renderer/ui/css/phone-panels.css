@@ -12,11 +12,9 @@ body.qp-phone {
 
 /* ---- box frames (box.ts) ------------------------------------------------ */
 
-/* The phone panels are centered by box.ts already; these only stop the native
- * pixel-art frame from being wider than the reachable screen. */
-body.qp-phone .qp-panel {
-  max-width: calc(100vw - 2 * var(--qp-panel-pad));
-}
+/* A box frame must keep its natural width: box.ts measures offsetWidth to compute
+ * the fit scale, so capping the frame here would skip the scaling and leave the
+ * fixed-pixel content overflowing past the right edge of the screen. */
 
 /* The framed-window close button (chat, pet info) is 26x16 art. Give it a
  * 44 dp box with the art centred at its original offset from the corner. */
@@ -644,4 +642,215 @@ body.qp-phone .qp-goods-pageinfo {
   color: var(--qp-ink-soft);
   font-size: 13px;
   text-align: center;
+}
+
+/* ---- adopt (adopt.ts) ---------------------------------------------------- */
+
+/* The original choose window is 607x455 with 800x600 art: on a phone it lands
+   clipped to 65% with its import button off-screen, so the phone replaces it
+   with the art above two 56 dp choice buttons. */
+body.qp-phone .qp-adopt {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 16px 4px;
+}
+body.qp-phone .qp-adopt-art {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #eaf6ff;
+}
+body.qp-phone .qp-adopt-art ruffle-player {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+body.qp-phone .qp-adopt-import {
+  border-radius: 10px;
+  font-size: var(--qp-font-sm);
+}
+body.qp-phone .qp-adopt-card .qp-footer .qp-btn {
+  min-height: 56px;
+}
+
+/* ---- farm (farm.ts) ------------------------------------------------------ */
+
+/* The runtime farm is a flex/grid form, so it can reflow instead of shrinking:
+   six plot columns become two, and every chip is a thumb target. */
+body.qp-phone .qp-farm-card .ui-farm-runtime {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: none;
+  font-size: 14px;
+  padding: 0 16px 8px;
+}
+/* Sowing needs a seed first and a plot second, so the shop rows stay above the
+   plots — but 19 crops + 5 fertilisers would push the plots a full screen down.
+   Each chip block scrolls inside 150 px instead, keeping the plots in reach. */
+body.qp-phone .qp-farm-card .ui-farm-runtime .farmHeader {
+  font-size: 15px;
+  margin: 4px 0 8px;
+}
+body.qp-phone .qp-farm-card .ui-farm-runtime .farmSeeds {
+  max-height: 150px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+body.qp-phone .qp-farm-card .ui-farm-runtime .farmPlots {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+body.qp-phone .qp-farm-card .ui-farm-runtime .farmPlot {
+  min-height: 72px;
+  font-size: 13px;
+}
+body.qp-phone .qp-farm-card .ui-farm-runtime .farmSeed,
+body.qp-phone .qp-farm-card .ui-farm-runtime .farmAct {
+  min-height: 44px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+body.qp-phone .qp-farm-card .ui-farm-runtime .farmStatus {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ---- travel (travel.ts) -------------------------------------------------- */
+
+/* The map pane is 600 px wide; at 1:1 on a phone the tab strip overflows and the
+   province labels fall under 8 px. Let the pane use the sheet's width instead. */
+body.qp-phone .qp-travel-card .travel {
+  display: block;
+  width: 100%;
+  height: auto;
+  padding: 0 16px 8px;
+}
+/* The panes are flex:1 + height:0 inside a fixed 500 px window; with an auto height
+   they would collapse to nothing, so let them size from their content. */
+body.qp-phone .qp-travel-card .travel .f1.h0 {
+  height: auto;
+}
+body.qp-phone .qp-travel-card .travelTabs {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0 10px;
+}
+body.qp-phone .qp-travel-card .travelTab {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 16px;
+  font-size: 15px;
+}
+/* The three trip buttons are .but_normal (30 px); the phone row grows them so a
+   thumb can hit 去旅行 / 停止旅行 / 结束旅行 without aiming. */
+body.qp-phone .qp-travel-card .toTarvelBut {
+  height: auto;
+  min-height: 48px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+body.qp-phone .qp-travel-card .toTarvelBut > * {
+  height: 44px;
+  min-width: 96px;
+  font-size: 15px;
+}
+body.qp-phone .qp-travel-card .tip {
+  height: auto;
+  padding-bottom: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+body.qp-phone .qp-travel-card .travelMain {
+  min-height: 320px;
+}
+body.qp-phone .qp-travel-card text {
+  font-size: 13px;
+}
+
+/* ---- album (album.ts) ---------------------------------------------------- */
+
+body.qp-phone .qp-photo-card .ui-photo {
+  width: auto;
+  padding: 0 16px 8px;
+}
+body.qp-phone .qp-photo-card .photoImg {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 10 / 7;
+  object-fit: contain;
+  background: #fff;
+  border-radius: 8px;
+}
+body.qp-phone .qp-photo-card .photoBar {
+  font-size: 13px;
+  padding-top: 10px;
+}
+/* The album grid is 3 columns of ~150 px cards inside the travel sheet. */
+body.qp-phone .qp-travel-card .albumGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+body.qp-phone .qp-travel-card .albumCap {
+  font-size: 13px;
+}
+
+/* ---- exam (exam.ts) ------------------------------------------------------ */
+
+/* The 300 px question card already fits; the 20 px choice boxes and the exit
+   buttons are the problem. The hit area grows without touching the art. */
+body.qp-phone .ui-exam .answerQuestions {
+  width: min(360px, 92vw);
+  font-size: 15px;
+}
+body.qp-phone .ui-exam .a_title {
+  font-size: 17px;
+}
+body.qp-phone .ui-exam .aq_option {
+  margin-top: 10px;
+}
+body.qp-phone .ui-exam .choose,
+body.qp-phone .ui-exam .aqb,
+body.qp-phone .ui-exam .close {
+  position: relative;
+}
+body.qp-phone .ui-exam .choose::after,
+body.qp-phone .ui-exam .aqb::after,
+body.qp-phone .ui-exam .close::after {
+  content: '';
+  position: absolute;
+  inset: -12px;
+}
+body.qp-phone .ui-exam .choose {
+  width: 24px;
+  height: 24px;
+}
+body.qp-phone .ui-exam .aqb {
+  width: 64px;
+  height: 26px;
+}
+body.qp-phone .ui-exam .aq_buts {
+  padding: 16px 0;
+  gap: 12px;
+}
+
+/* ---- result overlay (result.ts) ------------------------------------------ */
+
+body.qp-phone .markFull .getResult {
+  max-width: 92vw;
+  padding: 12px;
+}
+body.qp-phone .markFull .grb_mgs {
+  font-size: 14px;
+  line-height: 1.5;
+  max-height: 60vh;
+}
+body.qp-phone .markFull .but_small {
+  min-width: 120px;
+  min-height: 48px;
+  font-size: 15px;
 }
