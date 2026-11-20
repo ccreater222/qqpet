@@ -10,6 +10,8 @@ import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command
 import { resetTour } from '../pet/tasks'
 import { albumView } from './album'
 import { openBox } from './box'
+import { openSheet } from './mobile/sheet'
+import { phoneUI } from './mobile/sizing'
 import './css/travel.css'
 import { button, div, img } from './dom'
 import { windowView } from './window-view'
@@ -132,11 +134,13 @@ export function openTravel(): void {
   }
   show(0)
   const content = div('travel fC', div('travelTabs fc', ...tabs), mapPane, albumPane)
-  openBox(div('ui-travel', content), {
-    onClose: () => {
-      stopPending()
-      clearInterval(timer)
-      open = false
-    },
-  })
+  const closed = (): void => {
+    stopPending()
+    clearInterval(timer)
+    open = false
+  }
+  // The 600 px map pane shrinks to 10 dp text; the sheet lets the map and the tab
+  // strip use the phone's width instead (phone-panels.css).
+  if (phoneUI()) openSheet({ title: '旅行', body: div('ui-travel', content), cardClass: 'qp-travel-card', onClose: closed })
+  else openBox(div('ui-travel', content), { onClose: closed })
 }

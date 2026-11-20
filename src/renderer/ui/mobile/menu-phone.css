@@ -115,7 +115,9 @@ body.qp-phone .qp-menu-shortcuts {
 }
 body.qp-phone .qp-menu-shortcut-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(72px, 1fr));
+  /* Five tiles: at 412 dp each is (372 - 32) / 5 = 68 dp; the 48 dp floor keeps a
+     thumb target on a 320 dp phone (5 * 48 + 4 * 8 + 2 * 20 = 312) with no overflow. */
+  grid-template-columns: repeat(5, minmax(48px, 1fr));
   gap: 8px;
   padding: 4px 20px 10px;
 }
@@ -125,7 +127,7 @@ body.qp-phone .qp-shortcut {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-width: 72px;
+  min-width: 48px;
   min-height: 72px;
   border-radius: 14px;
   background: rgba(241, 149, 29, 0.08);

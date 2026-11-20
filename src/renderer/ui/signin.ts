@@ -9,6 +9,8 @@ import { dayStart } from '../pet/vip'
 import { openBox } from './box'
 import './css/signin.css'
 import { button, div, img } from './dom'
+import { openPhoneSignIn } from './mobile/phone-signin'
+import { phoneUI } from './mobile/sizing'
 import { showResult } from './result'
 import { windowView } from './window-view'
 
@@ -83,6 +85,7 @@ function digit(): { el: HTMLElement; set: (n: number) => void } {
 }
 
 export function openSignIn(): void {
+  if (phoneUI()) return openPhoneSignIn()
   if (open) return
   open = true
   const root = div('ui-signin')

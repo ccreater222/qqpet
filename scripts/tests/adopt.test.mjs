@@ -32,6 +32,8 @@ function fixture(options = {}) {
     },
     setTimeout: callback => tasks.push(callback),
     clearTimeout() {},
+    // The desktop path; the phone branch builds a bottom sheet instead.
+    phoneUI: () => false,
     openBox(_host, options) {
       close = () => {
         assert.equal(inFlash, false, 'the calling Flash instance must not destroy itself')

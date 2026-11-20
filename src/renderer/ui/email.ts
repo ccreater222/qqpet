@@ -11,6 +11,8 @@ import './css/email.css'
 import { formatDate } from './date'
 import { button, div, img } from './dom'
 import { frame } from './frame'
+import { openPhoneEmail } from './mobile/phone-email'
+import { phoneUI } from './mobile/sizing'
 
 const BG = ['bg_01.png', 'bg_02.bmp', 'bg_03.png', 'bg_04.bmp', 'bg_05.bmp', 'bg_06.bmp', 'bg_8.png', 'bg_09.png', 'bg_10.png']
 
@@ -20,6 +22,7 @@ let open = false
 
 /** Mail from the save: the original's, and the welcome, birthday and holiday mails. */
 export function openEmail(): void {
+  if (phoneUI()) return openPhoneEmail()
   if (open) return
   open = true
   const mails = readMails()

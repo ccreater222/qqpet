@@ -104,7 +104,9 @@ function show(frame: HTMLElement, keep?: HTMLElement, onBackdrop?: () => void): 
     cy = (top - bottom) / 2
     // A saved preference only applies on screens that need the choice. Wide or
     // fixed screens always follow their orientation, independently of device kind.
-    const nextSpin = windowDirectionAvailable() && save.settings.windowDirection === 'auto' && turned > flat ? turned : 0
+    // A phone user turns the device, not a quarter-turn inside it: sideways text on a
+    // portrait screen reads worse than a smaller upright window.
+    const nextSpin = !phoneUI() && windowDirectionAvailable() && save.settings.windowDirection === 'auto' && turned > flat ? turned : 0
     if (Boolean(nextSpin) !== Boolean(spin)) cancelPan?.()
     spin = nextSpin
     fit = spin ? `rotate(90deg) scale(${spin})` : `scale(${flat})`
@@ -183,10 +185,7 @@ function show(frame: HTMLElement, keep?: HTMLElement, onBackdrop?: () => void): 
     document.addEventListener('pointermove', move)
     document.addEventListener('pointerup', () => document.removeEventListener('pointermove', move), { once: true })
   })
-  // A phone's back key closes the framed panel like the sheet above it.
-  const releaseBack = phoneUI() ? pushBack(() => remove()) : (): void => {}
   const remove = (): void => {
-    releaseBack()
     stopSettings()
     viewportObserver.disconnect()
     insetObserver.disconnect()
@@ -223,14 +222,17 @@ export function openBox(content: HTMLElement, opts: { vip?: boolean; onClose?: (
   frame.append(row('head', skin.head, closeBtn), body, row('foot', skin.foot))
 
   let hide = (): void => {}
+  let releaseBack = (): void => {}
   let closed = false
   const close = (): void => {
     if (closed) return
     closed = true
+    releaseBack()
     hide()
     opts.onClose?.()
   }
   hide = show(frame, content, () => close())
+  releaseBack = phoneUI() ? pushBack(close) : (): void => {}
   closeBtn.addEventListener('click', close)
   return close
 }
@@ -239,7 +241,7 @@ export function openBox(content: HTMLElement, opts: { vip?: boolean; onClose?: (
  * The original's single-image window ("boxOneImg"): `content` on an optional
  * background image, centered and draggable. Returns a function that removes it.
  */
-export function openFrame(content: HTMLElement, background?: string): () => void {
+export function openFrame(content: HTMLElement, background?: string, onClose?: () => void): () => void {
   const frame = document.createElement('div')
   frame.className = 'boxFrame focusPress'
   const bg = document.createElement('div')
@@ -249,12 +251,22 @@ export function openFrame(content: HTMLElement, background?: string): () => void
   frame.appendChild(bg)
   let stop = (): void => {}
   // Dismiss through the frame's own close control when it has one, so the
-  // panel's close hook (a timer, keyboard focus, ...) runs as well.
-  const remove = show(frame, undefined, () => {
-    const dismiss = frame.querySelector<HTMLElement>('.sclose, .windowViewBut')
-    if (dismiss) dismiss.click()
+  // panel's close hook (a timer, an open latch, keyboard focus, ...) runs as
+  // well — the backdrop and the Android back key share this path.
+  const dismiss = (): void => {
+    const control = frame.querySelector<HTMLElement>('.sclose, .windowViewBut')
+    if (control) control.click()
     else stop()
-  })
-  stop = remove
-  return remove
+  }
+  const remove = show(frame, undefined, dismiss)
+  const releaseBack = phoneUI() ? pushBack(dismiss) : (): void => {}
+  let closed = false
+  stop = () => {
+    if (closed) return
+    closed = true
+    releaseBack()
+    remove()
+    onClose?.()
+  }
+  return stop
 }

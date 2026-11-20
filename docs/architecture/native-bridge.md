@@ -119,7 +119,7 @@ Android 手机与平板共用同一份 WebView，但设计空间由 `AssetClient
 返回键增加一条只影响 Android 的可选通道：
 
 - **原生方法**：`Bridge.setBackHandler(on)` 只改 `backHandler` 标志（`PetService.kt:621-625`）。`dispatchKeyEvent` 遇到 `KEYCODE_BACK` 时，若标志为真则执行页面注册的 `window.__qqpetBack && window.__qqpetBack()` 并消费按键；否则走原来的 `setFocusable(false)` 把焦点还给下层（`PetService.kt:146-156`）。
-- **页面入口**：`src/android/bridge.ts:98-101` 把 `native.setBackHandler?.(on)` 暴露为 `window.__qqpetSetBackHandler`，`Native` 接口里它是可选方法（`src/android/bridge.ts:61-63`）。手机模态共享 `src/renderer/ui/mobile/back.ts` 的栈：`pushBack(close)` 入栈时注册只关闭栈顶的 `window.__qqpetBack`，第一层入栈时调用 `setFocusable(true)`，最后一层释放时清空 `__qqpetBack`、调用 `setBackHandler(false)` 与 `setFocusable(false)`（`back.ts:13-39`）；sheet、box 框和宠物状态卡都复用该栈（`src/renderer/ui/mobile/sheet.ts:149-151`、`src/renderer/ui/box.ts:186-199`、`src/renderer/ui/state.ts:313-314`）。
+- **页面入口**：`src/android/bridge.ts:98-101` 把 `native.setBackHandler?.(on)` 暴露为 `window.__qqpetSetBackHandler`，`Native` 接口里它是可选方法（`src/android/bridge.ts:61-63`）。手机模态共享 `src/renderer/ui/mobile/back.ts` 的栈：`pushBack(close)` 入栈时注册只关闭栈顶的 `window.__qqpetBack`，第一层入栈时调用 `setFocusable(true)`，最后一层释放时清空 `__qqpetBack`、调用 `setBackHandler(false)` 与 `setFocusable(false)`（`back.ts:13-39`）；sheet、box 框和宠物状态卡都复用该栈（`src/renderer/ui/mobile/sheet.ts:151`、`src/renderer/ui/box.ts:227-237`、`src/renderer/ui/state.ts:315`）。入栈的必须是会执行 `onClose`/清理的 close 路径，不能只是移除 DOM，否则面板的 `open` 闩锁不释放（见 [手机 UI 层](mobile-ui.md) §5.3）。
 - **旧壳降级**：没有 `setBackHandler` 的壳上钩子 no-op，`__qqpetBack` 永不触发，面板仍可用遮罩、✕ 或下滑关闭；这是显式能力缺席，不是失败兜底（`src/renderer/ui/mobile/back.ts:13-23`）。
 - **焦点与按键分离**：`setBackHandler` 只控制返回键路由，窗口可聚焦性仍由 `setFocusable` 负责；页面在最后一层模态关闭时统一释放两者（`src/renderer/ui/mobile/back.ts:13-23`），不要在 `__qqpetBack` 里单独切换窗口焦点。
 

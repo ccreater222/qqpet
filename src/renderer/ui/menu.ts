@@ -107,6 +107,14 @@ function togglePaused(): void {
   speak({ c: 'state', s: next ? 'stopGrowth' : 'startGrowth', now: true }, 'speak')
 }
 
+/**
+ * 休息一下: lies down when the pet can, otherwise says why not. One implementation
+ * because both menus (desktop popup and phone sheet) offer the same entry.
+ */
+export function restNow(): void {
+  void (rest() || speak({ s: '[host]，我现在还不想躺下呢~', now: true }, 'speak'))
+}
+
 export function menuItems(adopt: () => void): MenuItem[] {
   const leave = { label: '退出宠物', run: quit, danger: true }
   if (runtimeProjectionMode) {
@@ -174,7 +182,7 @@ export function menuItems(adopt: () => void): MenuItem[] {
       label: '一起玩耍',
       group: 'interact',
       children: [
-        { label: '休息一下', run: () => void (rest() || speak({ s: '[host]，我现在还不想躺下呢~', now: true }, 'speak')) },
+        { label: '休息一下', run: restNow },
         { label: '找朋友玩', run: visitFriend },
         { label: '去朋友家送信', run: sendLetter },
       ],

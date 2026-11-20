@@ -1,5 +1,7 @@
 import { isBuddy, photoUrl, PHOTOS, shots, type Shot } from '../pet/album'
 import { openBox } from './box'
+import { openSheet } from './mobile/sheet'
+import { phoneUI } from './mobile/sizing'
 import './css/album.css'
 import { formatDate } from './date'
 import { button, div, img } from './dom'
@@ -9,13 +11,14 @@ const caption = (s: Shot): string => `${s.city}${isBuddy(s.id) ? ' · 和旅游�
 /** A photo at full size; `id` must be in the album. */
 export function openPhoto(id: string): void {
   const s = shots().find((x) => x.id === id)!
-  openBox(
-    div(
-      'ui-photo fC',
-      img('photoImg', photoUrl(id)),
-      div('photoBar', caption(s)),
-    ),
+  const photo = div(
+    'ui-photo fC',
+    img('photoImg', photoUrl(id)),
+    div('photoBar', caption(s)),
   )
+  // A 500 px photo window is 500 of a 412 dp screen; the sheet scales the image to it.
+  if (phoneUI()) openSheet({ title: '相片', body: photo, cardClass: 'qp-photo-card' })
+  else openBox(photo)
 }
 
 /** Every photo brought back, newest first. */

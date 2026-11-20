@@ -107,6 +107,7 @@ class FakeNode {
     this.listeners = new Map()
     this.style = {}
     this.dataset = {}
+    this.attributes = new Map()
     for (const child of children) this.append(child)
   }
   append(...nodes) {
@@ -120,6 +121,12 @@ class FakeNode {
     const listeners = this.listeners.get(type) ?? []
     listeners.push(listener)
     this.listeners.set(type, listeners)
+  }
+  setAttribute(key, value) {
+    this.attributes.set(key, String(value))
+  }
+  getAttribute(key) {
+    return this.attributes.get(key) ?? null
   }
   removeEventListener(type, listener) {
     const listeners = (this.listeners.get(type) ?? []).filter((entry) => entry !== listener)
@@ -166,6 +173,7 @@ function mountIsland(options = {}) {
   const writes = []
   const logs = []
   const opened = []
+  const sheets = []
   const windowEvents = []
   let projectionListener = null
   let storeEventListener = null
@@ -222,6 +230,21 @@ function mountIsland(options = {}) {
       opened.push(content)
       return () => { opts?.onClose?.() }
     },
+    phoneUI: () => options.phone === true,
+    openSheet: (sheet) => {
+      sheets.push(sheet)
+      const handle = {
+        el: new FakeNode('qp-sheet'),
+        card: new FakeNode('qp-sheet-card'),
+        body: sheet.body,
+        title: new FakeNode('qp-sheet-title'),
+        close: () => {
+          sheet.closed = true
+          sheet.onClose?.()
+        },
+      }
+      return handle
+    },
     openShop: () => opened.push('shop'),
     openGames: () => opened.push('games'),
     console: { log: (...args) => logs.push(args.join(' ')), error: (...args) => logs.push(args.join(' ')) },
@@ -234,6 +257,7 @@ function mountIsland(options = {}) {
     writes,
     logs,
     opened,
+    sheets,
     windowEvents,
     fireProjection: () => projectionListener?.({ gameTimeMs: 86_400_000, timeZone: 'Asia/Shanghai' }, []),
     fireEvent: (event) => storeEventListener?.(event),
@@ -472,6 +496,46 @@ test('the mounted runtime panel reads the projection, dispatches every interacti
     payload: { toNpcId: '莉莉' },
   })
   assert.deepEqual(writes, [], 'mounted runtime island must not use update/setInfo/window.save')
+})
+
+test('a phone gets the same island as a bottom sheet: every command still reachable', async () => {
+  const { island, dispatches, opened, sheets, fireProjection } = mountIsland({ phone: true })
+  island.openIslandRuntime()
+  assert.equal(opened.length, 0, 'a phone must not open the 580 px desktop window')
+  assert.equal(sheets.length, 1, 'a phone mounts one bottom sheet')
+  const sheet = sheets[0]
+  assert.equal(sheet.title, '企鹅岛')
+  assert.equal(sheet.cardClass, 'qp-island-sheet')
+  assert.ok(sheet.footer, 'the five island actions live in the pinned footer')
+  assert.equal(sheet.footer.className, 'qp-island-acts')
+
+  const body = sheet.body
+  for (const heading of ['布袋长老', '岛民与地点', '今日委托', '小艾的心愿', '今日新闻', '岛上的妖怪', '探索地点', '岛民小游戏']) {
+    assert.match(body.textContent, new RegExp(heading), `the phone sheet lost the ${heading} section`)
+  }
+  // The same rows and the same commands as the desktop window, not a subset.
+  assert.ok(rowWithHeading(body, '莉莉'), 'an islander row must render on the phone')
+  buttonWithText(rowWithHeading(body, '莉莉'), '交谈').click()
+  assert.deepEqual(dispatches.at(-1), { type: 'island.talkNpc', payload: { npcId: '莉莉' } })
+  buttonWithText(rowWithHeading(body, '监狱猫'), '查看').click()
+  assert.deepEqual(dispatches.at(-1), { type: 'island.visitSpot', payload: { spotId: 'jycat' } })
+
+  const footer = sheet.footer
+  for (const label of ['领成长礼', '领宝藏碎片', '刷新新闻', '去商店', '玩游戏']) {
+    assert.ok(buttonWithText(footer, label), `the pinned footer lost ${label}`)
+  }
+  buttonWithText(footer, '领成长礼').click()
+  assert.deepEqual(dispatches.at(-1), { type: 'island.claimGrowthReward', payload: {} })
+
+  // A footer shortcut closes the sheet first; the target panel must still open.
+  buttonWithText(footer, '去商店').click()
+  assert.equal(sheet.closed, true, '去商店 must dismiss the island sheet')
+  assert.deepEqual(opened, ['shop'])
+
+  // The sheet redraws from the projection exactly like the desktop panel.
+  fireProjection()
+  await flush()
+  assert.match(body.textContent, /布袋长老/)
 })
 
 test('runtime navigation exposes the converted island while the legacy island panel stays untouched', () => {

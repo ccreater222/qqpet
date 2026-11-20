@@ -2,6 +2,8 @@ import { onProjectionApplied, runtimeProjectionMode, save, setInfo, update } fro
 import type { Sex } from '../../shared/save'
 import { SwfPlayer } from '../swf/player'
 import { openBox } from './box'
+import { openSheet } from './mobile/sheet'
+import { phoneUI } from './mobile/sizing'
 import { button, div } from './dom'
 import { windowView } from './window-view'
 
@@ -41,9 +43,36 @@ function openAdoption(done: () => void, commit: CommitAdoption): void {
   if (open) return
   open = true
   // No pet to replace yet, so unlike the setup page's import this needs no confirmation.
-  const host = div('adopt', button('but_small import', () => void window.qqpet.importSave().catch(() => windowView({ title: '导入存档', msg: '这不是有效的QQ宠物存档~' })), '导入存档'))
-  const close = openBox(host, { onClose: () => (open = false) })
-  void new SwfPlayer(host).load('pet/reset/Adopt.swf')
+  const importSave = (): void => {
+    void window.qqpet.importSave().catch(() => windowView({ title: '导入存档', msg: '这不是有效的QQ宠物存档~' }))
+  }
+  let close: () => void
+  // The element the SWF is mounted in; a callback from a closed window must not adopt.
+  let host: HTMLElement
+  if (phoneUI()) {
+    // The original 800x600 choose window is 607 px wide and lands clipped at 65% on a
+    // phone, with its own 导入存档 button off-screen. Keep the art, give the two choices
+    // 56 dp buttons below it, and make the import a full-width row.
+    const art = div('qp-adopt-art')
+    const body = div(
+      'qp-adopt',
+      art,
+      button('qp-row qp-adopt-import', importSave, '导入存档'),
+    )
+    const footer = div(
+      'qp-footer',
+      button('qp-btn', () => window.ChooseAPI.ChooseSex(0), '企鹅弟弟'),
+      button('qp-btn', () => window.ChooseAPI.ChooseSex(1), '企鹅妹妹'),
+    )
+    const sheet = openSheet({ title: '领养一只企鹅宝宝', body, footer, cardClass: 'qp-adopt-card', onClose: () => (open = false) })
+    close = () => sheet.close()
+    host = art
+    void new SwfPlayer(art).load('pet/reset/Adopt.swf')
+  } else {
+    host = div('adopt', button('but_small import', importSave, '导入存档'))
+    close = openBox(host, { onClose: () => (open = false) })
+    void new SwfPlayer(host).load('pet/reset/Adopt.swf')
+  }
   // Keep this per-window latch set after a choice, even after close; reopening creates a fresh one.
   let choosing = false
   window.ChooseAPI = {
