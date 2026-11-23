@@ -111,6 +111,8 @@
         "scripts/pack-harmony.mjs",
         "scripts/prepare-ios-assets.mjs",
         "scripts/import-assets.mjs",
+        "scripts/build-android-release.mjs",
+        "scripts/lib/release-android.mjs",
         "scripts/app-version.ts",
         "src/main/first-run.ts",
         "ios/build.sh",

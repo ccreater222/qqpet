@@ -6,7 +6,7 @@
 
 代码位置写作 `path:line`。省略前缀的约定：`acceptance-gate.mjs`、`validate-evidence.mjs` 在 `scripts/`；`acceptance-evidence.mjs` 在 `scripts/lib/`；`ci.yml`、`build.yml` 在 `.github/workflows/`；`package.json` 指仓库根。
 
-根 `package.json` 的脚本即事实源（`package.json:10-34`），服务端脚本在 `server/package.json:13-23`。
+根 `package.json` 的脚本即事实源（`package.json:10-39`），服务端脚本在 `server/package.json:13-23`。
 
 | 命令 | 实际执行 | 何时必须 | 退出码 |
 | --- | --- | --- | --- |
@@ -18,6 +18,7 @@
 | `npm run check:docs:range` | 逐提交检查（默认从 doc-map `rangeBaseline` 初始化边界起，缺失回退 `origin/main..HEAD`/`main..HEAD`；可显式传 `<base>..<head>`）的 `require`/`warn`，并用第一父 diff 覆盖 merge commit；触碰冻结证据直接失败；忽略 `DOCS_CHECK=off` | 推送前（`pre-push` 自动执行）、CI root job | 0/1/2 |
 | `npm run build` | `electron-vite build`（主进程/preload/渲染层） | 影响打包、入口、资源、构建配置 | 0/非 0 |
 | `npm run build:android-web` / `build:harmony-web` / `build:ios-web` | 三个平台 Web 产物到 `out/{android,harmony,ios}` | 影响对应平台 | 0/非 0 |
+| `npm run release:android` | Android 生产 release：预检（语义化版本、JDK 17、SDK 的 `apksigner`/`aapt2`、签名材料、`android/gradlew`）→ `typecheck` → `QQPET_VERSION=<版本> build:android-web` → `./gradlew assembleRelease` → `apksigner verify` + `aapt2` 包名/版本校验 → `dist/QQPet-<版本>.apk`、APK 与签名证书的 SHA-256；`--json` 输出 JSON 摘要（脚本化消费加 `npm run --silent`；`package.json:34`） | Android 生产发布、CI android 作业；本地仅 macOS/Linux（Windows 走 CI/WSL） | 0/1 |
 | `npm --prefix server run typecheck` | `tsc -p tsconfig.json`（`noEmit`，含 `src/**`、`test/**`、`../src/shared/**`） | 任何 `server/src/**`、`server/test/**` 改动 | 0/非 0 |
 | `npm --prefix server test` | 先 `build`（`tsc -p tsconfig.build.json` + `fix-esm-imports.mjs`），再 `node --test dist/server/test/*.test.js` | 服务端行为、协议、SQLite、调度改动 | 0/1 |
 | `npm --prefix server run build` | 生成 `server/dist` | 服务端改动、部署验证前 | 0/非 0 |
