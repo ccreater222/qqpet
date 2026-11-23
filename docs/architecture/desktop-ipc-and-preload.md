@@ -73,7 +73,7 @@
 两条必须遵守的暴露规则：
 
 - **订阅器一律「替换」而不是「追加」**：`replaceListener` 先 `removeAllListeners` 再 `on`（`src/preload/renderer-api.ts:46-53`）。preload 生命周期长于页面刷新，追加会跨页面泄漏监听器；`src/preload/index.ts:105` 有同样的注释性约定，`storage`/`packs`/`voice`/`lan` 等订阅器全部照此实现。
-- **平台专有字段用条件展开**：`setHitShape` 仅在 linux 暴露（`src/preload/index.ts:85`），`popupTrayMenu`/`onTrayMenuAction` 仅在 darwin 暴露（`src/preload/index.ts:90-93`）。渲染层据此以 `=== undefined` 判断「该宿主没有这个能力」。
+- **平台专有字段用条件展开**：`setHitShape` 在桌面端仅在 linux 暴露（`src/preload/index.ts:85`；Android 叠加窗的同名能力由 `src/android/bridge.ts` 在原生 `setTouchableRegion` 存在时提供，见[原生桥接契约](native-bridge.md)），`popupTrayMenu`/`onTrayMenuAction` 仅在 darwin 暴露（`src/preload/index.ts:90-93`）。渲染层据此以 `=== undefined` 判断「该宿主没有这个能力」。
 
 `capabilities` 的语义是「只在明确为 `false` 时表示不支持」，未声明即视为可用（渲染层判据见 `src/renderer/ui/setup.ts:104-117`）。移动桥不再一律写 `serverMode: false`：**Android 例外**——原生能力齐备时 `capabilities.serverMode = true` 且新增 `serverModeClientOnly = true`，表示「只能作为服务器宠物客户端，不能上传本机宠物或做权威交接」（`src/android/bridge.ts:364-370`、`src/shared/ipc.ts:285` 的 `QQPetApi.capabilities.serverModeClientOnly`）；原生能力缺失时两者都回到 `false` 并给出原因，本机模式不受影响。iOS/HarmonyOS 仍显式 `serverMode: false`（`src/ios/bridge.ts:73-83`）。桌面 preload 不声明 `localRepositoryV2`，因为渲染层优先用 `runtimeInfo()` 的真实返回值，只有该调用失败时才回落到 `capabilities.localRepositoryV2`（`src/renderer/bootstrap.ts:8-17`）。
 

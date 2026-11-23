@@ -1,7 +1,8 @@
 // window.qqpet on Android. The page runs in a WebView that fills the screen but
 // sits inside an overlay window cut down to the visible content: Android cannot
 // pass touches through transparent pixels, so everything outside the window
-// reaches the apps below.
+// reaches the apps below. Shells that expose setTouchableRegion also narrow the
+// touches inside the window to the page's currently drawn pixels.
 import { aiChat, aiModels } from '../shared/ai'
 import { webSearch } from '../shared/websearch'
 import { calendar } from '../shared/calendar'
@@ -10,6 +11,7 @@ import { normalizeUpstreamUrl } from '../shared/upstream'
 import { nextBounds } from '../mobile/bounds'
 import { cover } from '../mobile/overlay'
 import type { Fetch, Point, QQPetApi, TrayClick, TrayState } from '../shared/ipc'
+import type { ShapeRect } from '../shared/hit-shape'
 import { legacyRendererStatus, type RendererProjection } from '../shared/renderer-api'
 import type { OrderedEvent } from '../shared/pet-runtime/events'
 import type { SaveData } from '../shared/save'
@@ -70,6 +72,12 @@ interface Native {
   setHidden?(on: boolean): void
   /** The overlay window's rectangle, in CSS pixels of a page `viewport` pixels wide. */
   setBounds(x: number, y: number, w: number, h: number, viewport: number): void
+  /**
+   * The window's touchable sub-rectangles as JSON `[{x,y,width,height}]`, in CSS pixels of a page `viewport` pixels
+   * wide. The window stays the conservative visual crop; only these rectangles take touches. Absent on older shells,
+   * which keep the whole window touchable.
+   */
+  setTouchableRegion?(rects: string, viewport: number): void
   /** "left,top,right,bottom" of the system bars and cutout, in CSS pixels of a page `viewport` pixels wide. */
   safeArea(viewport: number): string
 }
@@ -96,6 +104,8 @@ declare global {
 }
 
 const native = window.QQPetNative
+/** Absent on older shells: without it the page never defines setHitShape, so the whole window stays touchable. */
+const setTouchableRegion = typeof native.setTouchableRegion === 'function' ? native.setTouchableRegion.bind(native) : null
 /** A down delayed for cloud start must finish before its up, or a quick tap could leave a key held. */
 const pendingGameDown = new Map<string, Promise<boolean>>()
 
@@ -505,6 +515,9 @@ const api: QQPetApi = {
   openUrl: (url) => native.openUrl(url),
   // The overlay window follows the content instead.
   setClickThrough() {},
+  // Android: the window keeps its conservative visual crop, but only the pet's current pixels and the panels take
+  // touches; the rest of the window passes them through. Old shells lack the native method and keep the whole window.
+  ...(setTouchableRegion === null ? {} : { setHitShape: (rects: ShapeRect[]) => setTouchableRegion(JSON.stringify(rects), innerWidth) }),
   // Overlay windows are always on top.
   setAlwaysOnTop() {},
   setFocusable: (on) => native.setFocusable(on),

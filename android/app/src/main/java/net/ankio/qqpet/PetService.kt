@@ -20,6 +20,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.drawable.Icon
 import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.graphics.RectF
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
@@ -37,6 +39,7 @@ import android.view.WindowManager.LayoutParams
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.widget.FrameLayout
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileNotFoundException
@@ -64,9 +67,15 @@ private const val REMOTE_TOKEN_TRANSFORMATION = "AES/GCM/NoPadding"
 private const val REMOTE_TOKEN_VERSION = 1
 
 /**
- * Hosts the pet page in an overlay window. The WebView keeps the screen's size
- * and is shifted inside a window cut down to the rectangle the page reports
- * (bridge.ts), so touches elsewhere reach the apps below.
+ * Hosts the pet page in a cropped render window and shapes its touch area with portals.
+ *
+ * The WebView lives in a [TYPE_APPLICATION_ATTACHED_DIALOG] child of a 1x1 overlay window: the dialog type is not a
+ * system alert window, so Android keeps its alpha at 1.0 while it is NOT_TOUCHABLE (a plain overlay with the same
+ * flag is dimmed to 0.8 by DisplayPolicy). The child is cropped to the page's currently visible pixels plus a small
+ * margin, because a NOT_TOUCHABLE window still occludes untrusted windows below it (BLOCK_UNTRUSTED touch occlusion);
+ * the WebView is translated by the window origin so the page stays anchored to the display. The page reports those
+ * pixels through [Bridge.setTouchableRegion]; one transparent overlay portal per merged rectangle forwards its
+ * touches into the WebView and every other pixel reaches the app below. [setBounds] is kept as a no-op.
  */
 class PetService : Service() {
     companion object {
@@ -75,10 +84,19 @@ class PetService : Service() {
             private set
 
         private const val NOTIFICATION_ID = 1
-        /** A window move this far (px) is hidden until the page is drawn at the new origin. */
-        private const val JUMP_PX = 4
-        private const val REVEAL_MS = 200L
         private const val TRAY_ICON_PX = 96
+        /** An empty visible-pixel report is kept this long before the render window collapses to 1x1. */
+        private const val EMPTY_SHRINK_MS = 800L
+        /** Width/height change above this (px) counts as a resize worth hiding the window for. */
+        private const val BIG_RESIZE_PX = 200
+        /** Uptime after which a still-hidden render window is forced visible (a lost reveal is worse than a flash). */
+        private const val HIDDEN_WATCHDOG_MS = 300L
+        /** How long the render window stays hidden across a big resize so the first visible frame has content. */
+        private const val REVEAL_DELAY_MS = 100L
+        /** Hard fallback beyond the reveal delay (e.g. a handler hiccup). */
+        private const val REVEAL_TIMEOUT_MS = 300L
+        /** Short hide for changes that only move the pet (drags); hiding it longer would be visible. */
+        private const val REVEAL_SHORT_MS = 32L
     }
 
     private lateinit var wm: WindowManager
@@ -87,25 +105,50 @@ class PetService : Service() {
     private val net = Executors.newCachedThreadPool()
     private val prefs by lazy { getSharedPreferences("qqpet", MODE_PRIVATE) }
 
-    private val params = LayoutParams(
+    /** The render window, added as the dialog child of [host] once the host has a window token. */
+    private var rootParams: LayoutParams? = null
+
+    /** Slack (px) kept around the page's visible rectangles in the render window. */
+    private val childMargin = 6
+
+    /**
+     * The render window is cropped to the visible rectangles, not the whole display: a NOT_TOUCHABLE attached
+     * dialog still uses BLOCK_UNTRUSTED touch occlusion, so a full-screen one would stop touches from reaching
+     * untrusted windows below (the launcher) even where the page draws nothing. Null until the page reports.
+     */
+    private var childRect: Rect? = null
+
+    /** The last crop was the 1x1 "nothing visible" window; the next content must not be unioned with it. */
+    private var childWasEmpty = false
+
+    /** When the page first reported no visible pixels; transient empty animation frames must not collapse the window. */
+    private var emptySince = 0L
+
+    /** Bumped on every hide so a late reveal from an older resize cannot show a half-drawn frame. */
+    private var revealToken = 0
+
+    /** Uptime of the last 1->0 hide; the watchdog force-shows the window if a reveal was lost. */
+    private var hiddenAt = 0L
+
+    /**
+     * 1x1 transparent overlay that only exists to own a window token: the real render window is added as its
+     * TYPE_APPLICATION_ATTACHED_DIALOG child, a type that is not a system-alert window and therefore keeps
+     * alpha 1.0 when it is NOT_TOUCHABLE (DisplayPolicy caps system alert windows at 0.8).
+     */
+    private lateinit var host: View
+    private val hostParams = LayoutParams(
         1, 1, LayoutParams.TYPE_APPLICATION_OVERLAY,
-        LayoutParams.FLAG_NOT_FOCUSABLE or LayoutParams.FLAG_NOT_TOUCH_MODAL or LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
-            LayoutParams.FLAG_LAYOUT_IN_SCREEN or LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+        LayoutParams.FLAG_NOT_FOCUSABLE or LayoutParams.FLAG_NOT_TOUCHABLE or LayoutParams.FLAG_LAYOUT_IN_SCREEN,
         PixelFormat.TRANSLUCENT,
     ).apply {
         gravity = Gravity.TOP or Gravity.START
-        layoutInDisplayCutoutMode = LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-        fitInsetsTypes = 0
-        // The system slides a window to its new origin over a few frames, while the page is already shifted by the
-        // whole move: shrinking the window from the left (the menu closing) showed the pet far left, sliding back.
-        // PRIVATE_FLAG_NO_MOVE_ANIMATION makes the move instant; hidden API, so a failure just keeps the slide.
-        try {
-            val f = LayoutParams::class.java.getField("privateFlags")
-            f.setInt(this, f.getInt(this) or 0x40)
-        } catch (e: Throwable) {
-            Log.w("QQPet", "no-move-animation flag unavailable", e)
-        }
+        x = 0
+        y = 0
+        title = "QQPet touch host"
     }
+
+    /** True once the render window is attached (it may be delayed until [host] has a window token). */
+    private var rootAdded = false
 
     /** The page has a bottom sheet open and expects the back key (see [Bridge.setBackHandler]). */
     @Volatile
@@ -166,17 +209,6 @@ class PetService : Service() {
             }
         }
         root.addView(web, screenSize())
-        // The system may place the window elsewhere than asked (e.g. clear of the status bar),
-        // so the page is shifted by where the window really is, in the same frame it moved.
-        val at = IntArray(2)
-        root.viewTreeObserver.addOnPreDrawListener {
-            root.getLocationOnScreen(at)
-            if (web.translationX != -at[0].toFloat()) web.translationX = -at[0].toFloat()
-            if (web.translationY != -at[1].toFloat()) web.translationY = -at[1].toFloat()
-            reveal?.let { if (it[0] == at[0] && it[1] == at[1]) { reveal = null; web.alpha = 1f } }
-            true
-        }
-        wm.addView(root, params)
         // A hidden window gets no insets, so a separate always-shown pixel watches the status bar.
         probe = View(this)
         probe.setOnApplyWindowInsetsListener { _, insets ->
@@ -185,7 +217,10 @@ class PetService : Service() {
             insets
         }
         wm.addView(probe, probeParams)
-        web.loadUrl("$ORIGIN/index.html")
+        host = View(this).apply { setBackgroundColor(Color.TRANSPARENT) }
+        wm.addView(host, hostParams)
+        // The child window needs the host's window token, which only exists once it is attached.
+        host.post { attachRenderWindow() }
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
@@ -223,16 +258,79 @@ class PetService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         web.layoutParams = screenSize()
+        val p = rootParams ?: return
+        val display = wm.maximumWindowMetrics.bounds
+        // The old crop belongs to the old display; start full-size and let the next page report crop it again.
+        hideChildForResize("rotation")
+        childRect = null
+        web.translationX = 0f
+        web.translationY = 0f
+        p.x = 0
+        p.y = 0
+        p.width = display.width()
+        p.height = display.height()
+        if (rootAdded) wm.updateViewLayout(root, p)
+        web.invalidate()
+        revealChildAfterResize(REVEAL_DELAY_MS)
     }
 
     override fun onDestroy() {
         instance = null
         unregisterReceiver(screen)
-        wm.removeView(root)
+        clearPortals()
+        if (rootAdded) wm.removeView(root)
         wm.removeView(probe)
+        wm.removeView(host)
         web.destroy()
         net.shutdownNow()
         super.onDestroy()
+    }
+
+    /**
+     * Attaches the WebView window as an attached dialog of [host]. The dialog type is not a system alert window, so
+     * Android keeps alpha 1.0 while the window is NOT_TOUCHABLE (DisplayPolicy caps system alert windows at 0.8).
+     * It starts at full display size and [applyChildBounds] crops it to the page's visible rectangles: the frame is
+     * also the occlusion area of a BLOCK_UNTRUSTED window, so it must not cover pixels the page does not draw.
+     * The WebView stays display-anchored through translation while the window moves under it.
+     * A ROM that refuses dialog children falls back to the overlay type (still NOT_TOUCHABLE, but dimmed) and
+     * says so in logcat instead of failing silently.
+     */
+    private fun attachRenderWindow() {
+        val display = wm.maximumWindowMetrics.bounds
+        val p = LayoutParams(
+            1, 1, LayoutParams.TYPE_APPLICATION_ATTACHED_DIALOG,
+            LayoutParams.FLAG_NOT_FOCUSABLE or LayoutParams.FLAG_NOT_TOUCHABLE or LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                LayoutParams.FLAG_LAYOUT_IN_SCREEN or LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+            token = host.windowToken
+            fitInsetsTypes = 0
+            layoutInDisplayCutoutMode = LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            alpha = 1f
+            title = "QQPet render"
+        }
+        noMoveAnimation(p)
+        web.translationX = 0f
+        web.translationY = 0f
+        try {
+            wm.addView(root, p)
+        } catch (e: Throwable) {
+            Log.e("QQPet", "attached dialog render window unavailable; falling back to the overlay type", e)
+            p.type = LayoutParams.TYPE_APPLICATION_OVERLAY
+            p.token = null
+            try {
+                wm.addView(root, p)
+            } catch (e2: Throwable) {
+                Log.e("QQPet", "render window unavailable", e2)
+                return
+            }
+        }
+        rootParams = p
+        rootAdded = true
+        web.loadUrl("$ORIGIN/index.html")
     }
 
     private fun screenSize(): FrameLayout.LayoutParams {
@@ -322,56 +420,19 @@ class PetService : Service() {
 
     private fun setFocusable(on: Boolean) {
         if (!on) releaseGameKeys()
-        params.flags = if (on) params.flags and LayoutParams.FLAG_NOT_FOCUSABLE.inv() else params.flags or LayoutParams.FLAG_NOT_FOCUSABLE
-        wm.updateViewLayout(root, params)
+        val p = rootParams ?: return
+        p.flags = if (on) p.flags and LayoutParams.FLAG_NOT_FOCUSABLE.inv() else p.flags or LayoutParams.FLAG_NOT_FOCUSABLE
+        if (rootAdded) wm.updateViewLayout(root, p)
     }
 
-    /** Moves the window onto CSS rectangle (x, y, w, h) of the page, keeping the page in place on screen. */
+    /**
+     * The render window is cropped from the touch portal rectangles instead of this legacy contract: the page reports
+     * its visible pixels through [Bridge.setTouchableRegion], and the window only has to cover them. The method stays
+     * because the page still calls it (and older pages expect it).
+     */
+    @Suppress("UNUSED_PARAMETER")
     private fun setBounds(x: Double, y: Double, w: Double, h: Double, viewport: Double) {
-        val scale = web.layoutParams.width / viewport
-        val nx = floor(x * scale).toInt()
-        val ny = floor(y * scale).toInt()
-        val touchable = w != 0.0 && h != 0.0
-        val to = intArrayOf(nx, ny, maxOf(ceil(w * scale).toInt(), 1), maxOf(ceil(h * scale).toInt(), 1), if (touchable) 1 else 0)
-        // Until the app draws again the system shows the window's last frame at its new origin, so a far move showed
-        // the pet at a wrong place for a frame (#18: drag start and end, menus). The page itself is made transparent
-        // and drawn so first (no relayout, unlike the window alpha that blanked it for half a second), then the window
-        // moves, and the pre-draw listener shows the page again once the window really is there.
-        val far = abs(nx - params.x) > JUMP_PX || abs(ny - params.y) > JUMP_PX
-        if (target != null || far && web.alpha != 0f) {
-            val first = target == null
-            target = to
-            if (first) {
-                web.alpha = 0f
-                root.viewTreeObserver.registerFrameCommitCallback { web.post { target?.let { target = null; place(it, true) } } }
-                web.invalidate()
-            }
-            return
-        }
-        place(to, false)
-    }
-
-    /** Window origin awaiting the transparent frame; null when none. */
-    private var target: IntArray? = null
-    /** The origin the hidden page is shown again at. */
-    private var reveal: IntArray? = null
-
-    private fun place(to: IntArray, hidden: Boolean) {
-        web.translationX = -to[0].toFloat()
-        web.translationY = -to[1].toFloat()
-        params.x = to[0]
-        params.y = to[1]
-        params.width = to[2]
-        params.height = to[3]
-        params.flags = if (to[4] == 0) params.flags or LayoutParams.FLAG_NOT_TOUCHABLE else params.flags and LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-        wm.updateViewLayout(root, params)
-        if (hidden) {
-            reveal = intArrayOf(to[0], to[1])
-            // The system may keep the window elsewhere than asked (pre-draw listener); never leave the pet hidden.
-            web.postDelayed({ if (reveal != null && target == null) { reveal = null; web.alpha = 1f } }, REVEAL_MS)
-        }
-        // Chromium rasters only the visible rect; without this, static content uncovered by a bigger window stays blank.
-        web.invalidate()
+        // No-op by design: portals own the touch area and the visible-pixel union owns the render crop.
     }
 
     private fun http(id: Int, method: String, url: String, headers: String, body: String?) = net.execute {
@@ -394,6 +455,358 @@ class PetService : Service() {
         }
     }
 
+    /** One transparent overlay window per page-reported visible rectangle; it forwards its touches into [web]. */
+    private class Portal(val view: View, var params: LayoutParams)
+
+    /** Page rectangles in CSS px and the innerWidth they were measured at; null until the first report. */
+    private var touchRects: List<RectF>? = null
+    private var touchViewport = 0.0
+
+    /** Portals with a forwarded gesture in flight: moving or removing one would cut its touch stream. */
+    private val touchActive = mutableSetOf<View>()
+    private var touchDeferred = false
+
+    /**
+     * Portals are unavailable on this build. The service stays fail-closed: the render window is NOT made touchable
+     * again, because a touchable window would swallow every touch meant for the apps below (the pet is unreachable
+     * until restart, which logcat makes visible). Portal problems must never escalate like that.
+     */
+    private var touchPortalsFailed = false
+
+    private val portals = mutableListOf<Portal>()
+
+    /**
+     * Places the touch portals from the page's currently visible pixels. The render window is NOT_TOUCHABLE from
+     * the moment it is attached, so every touch inside these rectangles is forwarded into [web] and everything else
+     * reaches the app below; the render window itself is cropped to the union of these rectangles. The page reports
+     * {@code rects} as a JSON array
+     * of {x,y,width,height} in CSS pixels of a [viewport]-wide page; an empty or unreadable array removes every
+     * portal (the pet becomes untouchable, as when it is hidden). Public APIs only: the hidden internal-insets
+     * touchable-region API is filtered by the hidden-API policy. {@code setBounds} is a no-op for this window.
+     */
+    private fun setTouchableRegion(rects: String, viewport: Double) {
+        val parsed = try {
+            val array = JSONArray(rects)
+            (0 until array.length()).map { i ->
+                val r = array.getJSONObject(i)
+                val x = r.getDouble("x")
+                val y = r.getDouble("y")
+                RectF(x.toFloat(), y.toFloat(), (x + r.getDouble("width")).toFloat(), (y + r.getDouble("height")).toFloat())
+            }
+        } catch (e: Exception) {
+            Log.w("QQPet", "setTouchableRegion: unreadable rects, window left untouchable", e)
+            emptyList()
+        }
+        touchRects = parsed
+        touchViewport = if (viewport.isFinite() && viewport > 0.0) viewport else 0.0
+        if (touchPortalsFailed) return
+        if (touchViewport == 0.0) Log.w("QQPet", "setTouchableRegion: bad viewport $viewport, no touchable area")
+        syncPortals()
+    }
+
+    /**
+     * Makes the portal windows match the last reported rectangles. The WebView covers the whole display at (0,0), so
+     * page px * scale is already the display position a touch lands at. Portals are reused by index: an animation
+     * that nudges the pet only updates its portal bounds, no window churn.
+     */
+    private fun syncPortals() {
+        try {
+            syncPortalsUnchecked()
+        } catch (e: Throwable) {
+            // A touchable render window would block the apps below, so the pet gives up touch instead:
+            // clear the portals and make the failure visible in logcat.
+            Log.e("QQPet", "touch portals unavailable; the pet stays untouchable", e)
+            clearPortals()
+            touchPortalsFailed = true
+        }
+    }
+
+    private fun syncPortalsUnchecked() {
+        val rects = touchRects ?: return
+        if (root.visibility != View.VISIBLE) return
+        val scale = if (touchViewport > 0.0) web.layoutParams.width / touchViewport else 0.0
+        if (scale <= 0.0) {
+            Log.w("QQPet", "setTouchableRegion: bad viewport $touchViewport, no touchable area")
+            clearPortals()
+            return
+        }
+        val display = wm.maximumWindowMetrics.bounds
+        val wanted = rects.mapNotNull { r ->
+            val box = Rect(
+                floor(r.left.toDouble() * scale).toInt(),
+                floor(r.top.toDouble() * scale).toInt(),
+                ceil(r.right.toDouble() * scale).toInt(),
+                ceil(r.bottom.toDouble() * scale).toInt(),
+            )
+            // Clipping is a safety net only: the page reports inside its own viewport.
+            if (box.intersect(0, 0, display.width(), display.height())) box else null
+        }.filter { it.width() > 0 && it.height() > 0 }
+        val boxes = mergeRects(wanted)
+        // The render window is NOT_TOUCHABLE, so it may follow the page during a gesture without cutting the touch
+        // stream; otherwise a dragged pet leaves its old crop and disappears until ACTION_UP.
+        applyChildBounds(boxes)
+        if (touchActive.isNotEmpty()) {
+            // Portals stay put until ACTION_UP/CANCEL: moving the touch windows under the finger would drop it.
+            touchDeferred = true
+            return
+        }
+        while (portals.size > boxes.size) removePortal(portals.removeAt(portals.size - 1))
+        for (i in boxes.indices) {
+            val portal = portals.getOrNull(i)
+            if (portal == null) portals.add(addPortal(boxes[i])) else movePortal(portal, boxes[i])
+        }
+        // Hidden by away/fullscreen earlier; the pet is shown again.
+        for (portal in portals) if (portal.view.visibility != View.VISIBLE) portal.view.visibility = View.VISIBLE
+    }
+
+    /**
+     * Drops rectangles contained in another and unions intersecting ones: the page reports a [data-hit] root plus
+     * its children, so one panel can arrive as dozens of nested rectangles. Usually one to three boxes remain.
+     */
+    private fun mergeRects(rects: List<Rect>): List<Rect> {
+        val out = mutableListOf<Rect>()
+        for (r in rects) {
+            val box = Rect(r)
+            var i = 0
+            while (i < out.size) {
+                if (Rect.intersects(box, out[i])) {
+                    box.union(out[i])
+                    out.removeAt(i)
+                    i = 0
+                } else i++
+            }
+            out.add(box)
+        }
+        return out
+    }
+
+    /**
+     * Crops the render window to the union of [boxes] plus [childMargin], keeping the WebView anchored to the
+     * display by translating it by the window origin (the page must not slide when the window moves). The window
+     * only grows/shrinks when the union leaves the current frame or leaves more than two margins of slack, so
+     * small animation nudges do not churn it. A transient empty report (an animation frame with nothing drawn) keeps
+     * the window; only an empty report that persists for [EMPTY_SHRINK_MS] collapses it to 1x1, where the page draws
+     * nothing and must occlude nothing.
+     */
+    private fun applyChildBounds(boxes: List<Rect>) {
+        val p = rootParams ?: return
+        val displayBounds = wm.maximumWindowMetrics.bounds
+        val display = Rect(0, 0, displayBounds.width(), displayBounds.height())
+        if (boxes.isEmpty()) {
+            val now = SystemClock.uptimeMillis()
+            if (emptySince == 0L) {
+                emptySince = now
+                root.postDelayed({
+                    if (emptySince != 0L && touchRects?.isEmpty() == true) applyChildBounds(emptyList())
+                }, EMPTY_SHRINK_MS)
+                return
+            }
+            if (now - emptySince < EMPTY_SHRINK_MS) return
+        } else {
+            emptySince = 0L
+        }
+        val union = if (boxes.isEmpty()) Rect(0, 0, 1, 1) else {
+            val u = Rect(boxes.first())
+            for (b in boxes.drop(1)) u.union(b)
+            u.inset(-childMargin, -childMargin)
+            u.intersect(display)
+            u
+        }
+        val current = childRect
+        if (boxes.isNotEmpty() && current != null) {
+            if (current == union) return
+            if (current.contains(union)) {
+                val slack = maxOf(union.left - current.left, union.top - current.top, current.right - union.right, current.bottom - union.bottom)
+                // Keep the window while it only carries a thin ring around the content; this damps window churn.
+                if (slack <= childMargin * 2) return
+            }
+        }
+        val next = Rect(union)
+        if (boxes.isNotEmpty() && current != null && !childWasEmpty && !current.contains(union)) {
+            // Content left the frame: cover both. Moving the frame only changes clipping (the page stays anchored).
+            next.union(current)
+            next.intersect(display)
+        }
+        // A surface resize can show a white/background-only buffer for a frame. Only a real SIZE change hides the
+        // window: the pet animation moves the frame every tick, and hiding on position changes kept it invisible.
+        val big = current == null || bigResize(current, next)
+        val expanding = current == null || next.width() * next.height() > current.width() * current.height() * 1.3f
+        if (big) hideChildForResize(if (expanding) "expand" else "shrink")
+        childWasEmpty = boxes.isEmpty()
+        childRect = next
+        web.translationX = -next.left.toFloat()
+        web.translationY = -next.top.toFloat()
+        p.x = next.left
+        p.y = next.top
+        p.width = next.width()
+        p.height = next.height()
+        if (rootAdded) wm.updateViewLayout(root, p)
+        // Chromium rasters only the visible rect; without this, content uncovered by a bigger window stays blank.
+        web.invalidate()
+        // A sheet opening draws a large flat background: the first committed frame can still be that background
+        // without content, so wait long enough. A drag only draws the pet, and hiding it would be visible, so keep
+        // that path short.
+        if (big) revealChildAfterResize(if (expanding && touchActive.isEmpty()) REVEAL_DELAY_MS else REVEAL_SHORT_MS)
+    }
+
+    /** True when the window change is large enough to hide across (size only; position moves are free). */
+    private fun bigResize(current: Rect, next: Rect): Boolean {
+        val dw = abs(next.width() - current.width())
+        val dh = abs(next.height() - current.height())
+        if (dw > BIG_RESIZE_PX || dh > BIG_RESIZE_PX) return true
+        if (dw * 4 > current.width() || dh * 4 > current.height()) return true
+        val area = current.width().toLong() * current.height()
+        val nextArea = next.width().toLong() * next.height()
+        if (area <= 0L) return true
+        return nextArea > area * 2 || area > nextArea * 2
+    }
+
+    /**
+     * Hides the whole render window while its surface changes size. Hiding only the WebView is not enough: the
+     * white background of the child window's own surface is what shows when the window grows/shrinks before
+     * Chromium has drawn the new size. A second call while already hidden keeps the pending reveal (it must not
+     * cancel it, or an animated pet would keep the window hidden forever).
+     */
+    private fun hideChildForResize(reason: String) {
+        val p = rootParams ?: return
+        if (p.alpha == 0f) return
+        revealToken++
+        hiddenAt = SystemClock.uptimeMillis()
+        p.alpha = 0f
+        if (rootAdded) wm.updateViewLayout(root, p)
+        Log.i("QQPet", "child hidden for $reason")
+        web.postDelayed({
+            if (rootParams?.alpha == 0f) {
+                Log.w("QQPet", "child stayed hidden ${SystemClock.uptimeMillis() - hiddenAt}ms; forcing it visible")
+                showChildNow()
+            }
+        }, HIDDEN_WATCHDOG_MS)
+    }
+
+    /** Forces the render window visible; also drops any pending reveal from an older resize. */
+    private fun showChildNow() {
+        revealToken++
+        hiddenAt = 0L
+        val p = rootParams ?: return
+        if (p.alpha != 1f) {
+            p.alpha = 1f
+            if (rootAdded) wm.updateViewLayout(root, p)
+            web.invalidate()
+        }
+    }
+
+    /**
+     * Shows the render window again only after the WebView has had time to raster the new size. The first committed
+     * frame after a resize can still be the white surface or the sheet's flat background without content, so the
+     * window stays hidden for [delayMs] (100 ms for a sheet expansion, 32 ms when only the pet moves) and
+     * [revealToken] drops stale reveals from an older resize. A second, later call is the safety net.
+     */
+    private fun revealChildAfterResize(delayMs: Long) {
+        val token = revealToken
+        fun reveal() {
+            if (token != revealToken) return
+            showChildNow()
+        }
+        web.invalidate()
+        // The first committed frame(s) after a resize can still be the background-only sheet (a large blank
+        // rectangle). Wait long enough for the renderer to raster the content, then show the window.
+        web.postDelayed({ reveal() }, delayMs)
+        web.postDelayed({ reveal() }, delayMs + REVEAL_TIMEOUT_MS)
+    }
+
+    private fun addPortal(box: Rect): Portal {
+        val view = object : View(this) {
+            override fun onTouchEvent(e: MotionEvent): Boolean {
+                forwardTouch(this, e)
+                return true
+            }
+        }.apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+        val portalParams = LayoutParams(box.width(), box.height(), LayoutParams.TYPE_APPLICATION_OVERLAY, portalFlags(), PixelFormat.TRANSLUCENT).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = box.left
+            y = box.top
+            layoutInDisplayCutoutMode = LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            fitInsetsTypes = 0
+            title = "QQPet touch portal"
+        }
+        noMoveAnimation(portalParams)
+        wm.addView(view, portalParams)
+        return Portal(view, portalParams)
+    }
+
+    /** The portal only forwards touches; the pet window keeps focus, IME and key handling. */
+    private fun portalFlags(): Int = LayoutParams.FLAG_NOT_FOCUSABLE or LayoutParams.FLAG_NOT_TOUCH_MODAL or
+        LayoutParams.FLAG_LAYOUT_IN_SCREEN or LayoutParams.FLAG_LAYOUT_NO_LIMITS
+
+    /** PRIVATE_FLAG_NO_MOVE_ANIMATION, so a portal jumps with the pet instead of sliding (hidden API, best effort). */
+    private fun noMoveAnimation(p: LayoutParams) {
+        try {
+            val f = LayoutParams::class.java.getField("privateFlags")
+            f.setInt(p, f.getInt(p) or 0x40)
+        } catch (e: Throwable) {
+            Log.w("QQPet", "no-move-animation flag unavailable", e)
+        }
+    }
+
+    private fun movePortal(portal: Portal, box: Rect) {
+        val p = portal.params
+        if (p.x == box.left && p.y == box.top && p.width == box.width() && p.height == box.height()) return
+        p.x = box.left
+        p.y = box.top
+        p.width = box.width()
+        p.height = box.height()
+        wm.updateViewLayout(portal.view, p)
+    }
+
+    private fun removePortal(portal: Portal) {
+        touchActive.remove(portal.view)
+        try {
+            wm.removeView(portal.view)
+        } catch (e: Exception) {
+            Log.w("QQPet", "touch portal removal failed", e)
+        }
+    }
+
+    private fun clearPortals() {
+        touchActive.clear()
+        touchDeferred = false
+        for (portal in portals) removePortal(portal)
+        portals.clear()
+    }
+
+    /**
+     * Forwards one touch stream into the WebView, shifted from the portal's screen origin to the WebView's (which
+     * covers the display, so a screen point is the WebView-local point). The stream must end before portals move:
+     * see [touchDeferred].
+     */
+    private fun forwardTouch(view: View, e: MotionEvent) {
+        if (e.actionMasked == MotionEvent.ACTION_DOWN) touchActive.add(view)
+        try {
+            val from = IntArray(2)
+            view.getLocationOnScreen(from)
+            val to = IntArray(2)
+            web.getLocationOnScreen(to)
+            // Event coordinates are portal-local; moving them by (portal origin - WebView origin) makes them
+            // WebView-local (the WebView covers the display, so this is screen-first).
+            val copy = MotionEvent.obtain(e)
+            copy.offsetLocation((from[0] - to[0]).toFloat(), (from[1] - to[1]).toFloat())
+            try {
+                web.dispatchTouchEvent(copy)
+            } finally {
+                copy.recycle()
+            }
+        } catch (e: Throwable) {
+            Log.w("QQPet", "touch portal forwarding failed", e)
+        }
+        if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) {
+            touchActive.remove(view)
+            if (touchActive.isEmpty() && touchDeferred) {
+                touchDeferred = false
+                syncPortals()
+            }
+        }
+    }
+
     /** One of ours (a file picker, a game) is in front. */
     private var away = false
 
@@ -403,6 +816,13 @@ class PetService : Service() {
     /** The overlay stays above every app; it steps aside while [away] or [fullscreen]. */
     private fun applyShown() {
         root.visibility = if (away || fullscreen) View.GONE else View.VISIBLE
+        // A game or app in front must not get its touches forwarded into a hidden page.
+        if (away || fullscreen) {
+            clearPortals()
+        } else {
+            syncPortals()
+            if (rootParams?.alpha == 0f) showChildNow()
+        }
     }
 
     fun setShown(on: Boolean) = web.post {
@@ -678,7 +1098,7 @@ class PetService : Service() {
             }
             web.post {
                 try {
-                    if ((params.flags and LayoutParams.FLAG_NOT_FOCUSABLE) != 0) setFocusable(true)
+                    if (((rootParams?.flags ?: 0) and LayoutParams.FLAG_NOT_FOCUSABLE) != 0) setFocusable(true)
                     web.isFocusable = true
                     root.requestFocus()
                     web.requestFocus()
@@ -714,6 +1134,13 @@ class PetService : Service() {
 
         @JavascriptInterface
         fun setBounds(x: Double, y: Double, w: Double, h: Double, viewport: Double) = web.post { this@PetService.setBounds(x, y, w, h, viewport) }
+
+        /**
+         * Optional contract: the page's current visible pixels in CSS px ({x,y,width,height} JSON array) and its
+         * innerWidth. Older shells lack it, so the page only uses it when present (src/android/bridge.ts).
+         */
+        @JavascriptInterface
+        fun setTouchableRegion(rects: String, viewport: Double) = web.post { this@PetService.setTouchableRegion(rects, viewport) }
 
         /** "left,top,right,bottom" of the system bars and cutout, in CSS pixels of a page [viewport] pixels wide. Hidden bars count: a swipe brings them back. */
         @JavascriptInterface

@@ -243,7 +243,6 @@ body.qp-sheet-open #pet {
 @keyframes qp-rise {
   from {
     transform: translateY(28px);
-    opacity: 0.4;
   }
 }
 @keyframes qp-fade {

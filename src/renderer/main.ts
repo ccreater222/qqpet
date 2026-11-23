@@ -214,6 +214,31 @@ function petHitBoxes(): Box[] {
   return [petEl, ...petEl.querySelectorAll('ruffle-player')].map((el) => hitCover(el)).filter((box): box is Box => box !== null)
 }
 const overPet = (x: number, y: number): boolean => petHitBoxes().some((r) => x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+/**
+ * The pixels a touch host may take: the window stays the conservative visual crop, but only what is drawn now
+ * (and the panels' DOM rects added later) should receive touches, so the transparent window margin passes through.
+ * `petHitBoxes` keeps the whole box for a standing pet on purpose (desktop hover needs it); the touch region cannot.
+ */
+function visiblePetBoxes(): Box[] {
+  if (petEl.hidden || save.settings.hidden) return []
+  const boxes: Box[] = []
+  // An equipped scene is a background image on #pet > .petBg and covers the whole pet box. Older builds put it on #pet.
+  const layer = typeof petEl.querySelector === 'function'
+    ? (petEl.querySelector(':scope > .petBg') as HTMLElement | null)
+    : null
+  const image = layer?.style.backgroundImage || petEl.style.backgroundImage
+  if (image && !layer?.classList.contains('hide')) {
+    boxes.push({ left: info.lastX, top: info.lastY, right: info.lastX + size, bottom: info.lastY + size })
+  }
+  // hitCover returns null when the player is invisible or draws nothing; a failed readback keeps its last hit box.
+  if (typeof petEl.querySelectorAll === 'function') {
+    for (const player of petEl.querySelectorAll('ruffle-player')) {
+      const box = hitCover(player)
+      if (box) boxes.push(box)
+    }
+  }
+  return boxes
+}
 
 const syncDesktop = (p: DesktopCursor): boolean => {
   const area = p.desktop
@@ -270,6 +295,18 @@ window.qqpet.onCursor(updateCursor)
 
 // Linux: the window takes the mouse only over the pet and the [data-hit] panels (#45). A hit root may be a
 // zero-sized anchor with overflowing children (the pet toolbar), so the children count too.
+/**
+ * Element.checkVisibility is Chrome 105+; the Android WebView is older and runs this same page. A missing method
+ * must not abort the whole hit-shape tick, so fall back to the plain style reads the gate actually needs.
+ */
+function hitTargetVisible(el: Element): boolean {
+  if (typeof el.checkVisibility === 'function') return el.checkVisibility({ visibilityProperty: true })
+  const style = getComputedStyle(el)
+  return style.display !== 'none'
+    && style.visibility !== 'hidden'
+    && style.visibility !== 'collapse'
+    && Number(style.opacity) !== 0
+}
 const setHitShape = window.qqpet.setHitShape
 if (setHitShape || window.qqpet.setDragging) {
   let sent = ''
@@ -277,17 +314,29 @@ if (setHitShape || window.qqpet.setDragging) {
     // Nothing to hit while hidden or paused (#119); the hidden-change listener refreshes the cursor state.
     if (save.settings.hidden && !dragging && (!setHitShape || sent === '[]')) return
     // The movie can retract under a stationary cursor; native cursor IPC only sends changes.
-    if (!dragging) updateCursor(cursor)
+    // A touch host has no hover: its pointer events already update the cursor, and replaying the last touch every
+    // tick could close a panel that opened from the notification against a point the finger is not on.
+    if (!dragging && !touch) updateCursor(cursor)
     if (!setHitShape) return
     const rects: { x: number; y: number; width: number; height: number }[] = []
     if (dragging) rects.push({ x: 0, y: 0, width: innerWidth, height: innerHeight })
     else if (!save.settings.hidden) {
-      for (const r of petHitBoxes()) rects.push({ x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top })
+      // A touch host takes the pet's pixels drawn now; a desktop keeps petHitBoxes (hover needs the whole box).
+      for (const r of touch ? visiblePetBoxes() : petHitBoxes()) rects.push({ x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top })
       for (const el of document.querySelectorAll('#pet, [data-hit], [data-hit] *')) {
         if (el.closest('#pet') && !el.matches('.point')) continue
-        if (!el.checkVisibility({ visibilityProperty: true }) || getComputedStyle(el).pointerEvents === 'none') continue
+        // The phone sheet is pointer-events:none only for the tap that opened it; its full-page layer must still
+        // count, or the render window keeps the pet's size until the opening animation is over.
+        const ignoresInput = getComputedStyle(el).pointerEvents === 'none'
+        if (!hitTargetVisible(el) || (ignoresInput && !el.matches('.qp-sheet'))) continue
         const r = el.getBoundingClientRect()
         if (r.width > 0 && r.height > 0) rects.push({ x: r.x, y: r.y, width: r.width, height: r.height })
+      }
+      // A tablet's desktop-style popup menu (`.ui-menu`) must catch a tap outside itself: the Android render window is
+      // no longer touchable and gets no ACTION_OUTSIDE, so the whole page is one target while the menu is open.
+      // Touch hosts only: the Linux desktop keeps its click-through shape and closes the menu on hover.
+      if (touch && document.querySelector('.ui-menu') !== null) {
+        rects.push({ x: 0, y: 0, width: innerWidth, height: innerHeight })
       }
     }
     const key = JSON.stringify(rects)

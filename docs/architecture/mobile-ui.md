@@ -68,7 +68,7 @@ scale = max(1, min(displayMetrics.widthPixels, heightPixels) / density / 480)
 ### 2.3 不变量
 
 - 手机模式下 1 CSS px 就是 1 dp，不再乘宿主缩放系数；新样式直接按手指尺寸写数值。
-- 宠物盒尺寸不变：412 dp 手机上 167 dp，可见企鹅约 83×117 dp；本次只改手势和安全区位置（§3）。
+- 宠物盒尺寸不变：412 dp 手机上 167 dp，可见企鹅约 83×117 dp；触控区只覆盖当前可见像素（§3.3），渲染子窗裁剪到可见内容并集 + 6px 边距；页面 `cover()` 的 24 dp 收敛不再决定渲染/触控。
 - 手机 surface 的样式必须挂在 `body.qp-phone` 下；`mobile.css` 的 `.qp-sheet*` 是例外，它们只在 `openSheet()` 创建的节点上出现，桌面不会创建这些节点。
 
 ## 3. 交互模型
@@ -93,6 +93,34 @@ scale = max(1, min(displayMetrics.widthPixels, heightPixels) / density / 480)
 ### 3.2 位置与安全区
 
 `clampOnScreen()` 在手机模式把宠物纵坐标限制在 `[--safe-top, 视口高 - --safe-bottom - 宠物体积]`（`main.ts:88-104`），旋转、贴边和拖动释放路径同样调用该钳制（`main.ts:115,129,144`）。横向仍保持 `0..视口宽-体积`，没有按左右安全区钳制（见 §7）。
+
+### 3.3 Android 触控区只覆盖可见像素
+
+Android 叠加窗的透明像素不会让触摸穿透，所以窗口矩形必须和触控区解耦。页面（`main.ts` 的 50 ms
+`setHitShape` 循环）把**当前可见内容**上报给原生：触屏宿主用 `visiblePetBoxes()`（每个可见
+`ruffle-player` 的 `hitCover` 当前帧 alpha 包围盒；`.petBg` 有可见背景图时整盒），桌面宿主仍用
+`petHitBoxes()` 整盒；`[data-hit]` 根及子元素、`.point` 照旧按 DOM 矩形加入；拖动中整页、隐藏时 `[]`。
+Android 桥仅在原生有 `setTouchableRegion` 时提供 `setHitShape`，旧壳不定义、整窗保持现状。
+
+原生把渲染窗做成 `TYPE_APPLICATION_ATTACHED_DIALOG` 子窗口并设 `FLAG_NOT_TOUCHABLE`，**裁剪到上报矩形并集 +
+6px 边距**（全屏只在 sheet 打开、并集覆盖全屏时），每个上报矩形对应一个透明 overlay 触控门户（portal），
+portal 把 MotionEvent 平移后转发给 WebView；详见[原生桥接契约](native-bridge.md) §4.4。子窗裁剪是必要的：
+1003 子窗的 `BLOCK_UNTRUSTED` 触摸遮挡会挡住 launcher；裁剪后 child 外透明区可穿透，child 内 portal 外只有
+边距/并集间隙的有界死区。附带的行为变化：渲染窗不再产生 `ACTION_OUTSIDE`，手机 sheet 用页面内全屏遮罩
+（全屏 portal）；平板桌面式菜单存在 `.ui-menu` 时页面额外上报全屏 catch-all，点外面仍能关闭。
+`hitCover` 采样间隔 150 ms，触控区最多滞后 150 ms；拖动中整页可触。
+
+开手机菜单时 `openPhoneMenu` 会给整页 sheet 层 `pointer-events:none` 220ms，防止开屏那次点击落到菜单第一行；
+这个**输入锁不能把该层从触控上报里过滤掉**。`main.ts` 的 50ms hit-shape 循环对 `.qp-sheet` 豁免
+`pointer-events` 过滤，sheet 的整页矩形在开屏后 ≤50ms 到达原生，原生渲染窗在 sheet 动画开始时已经扩到全页；
+否则窗口停在宠物大小，sheet 的 cream 背景会先在小窗里滚出、随后原生才做大 resize（用户看到的“点击后先出菜单
+背景色”）。sheet 的 rise 动画只做位移、不做透明度淡入，首帧就带内容。完整坑点与调试方法见
+[Android 叠加窗触控区：坑点与最佳实践](../guides/android-overlay-touch.md)。
+拖动期间原生 child 即时跟随整页矩形（只 portal 延迟到抬手），否则宠物拖出旧裁剪框会暂时消失；child 尺寸
+大幅变化时隐藏整个渲染子窗 100ms（sheet/旋转）/32ms（拖动/收缩），避免 child 窗口自身的白 surface 或
+sheet 平铺背景被看到；位置移动不隐藏，300ms 看门狗防 alpha 卡死。
+
+
 
 ## 4. 手机菜单（底部动作面板）
 

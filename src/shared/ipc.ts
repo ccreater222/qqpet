@@ -349,8 +349,10 @@ export interface QQPetApi {
   openUrl(url: string): void
   setClickThrough(enabled: boolean): void
   /**
-   * Linux only: the page rectangles (CSS px) that take the mouse; the rest of the window lets it through.
-   * A click-through window there never learns where the cursor is (#45), so hit testing cannot wait for it.
+   * The page rectangles (CSS px) that take input; the rest of the window lets it through. Linux uses it because a
+   * click-through window never learns where the cursor is (#45); Android uses it to keep the overlay's transparent
+   * anti-shake margin pass-through, with the native bridge forwarding each portal's touches into the page. Hosts
+   * without the capability omit the method, so callers must treat undefined as "the whole window takes input".
    */
   setHitShape?(rects: ShapeRect[]): void
   setAlwaysOnTop(enabled: boolean): void
