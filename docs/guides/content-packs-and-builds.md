@@ -85,6 +85,13 @@ npm run android   # = typecheck + build:android-web + cd android && ./gradlew as
 
 `vite.android.config.ts` 输出到 `out/android`，`base: './'`、`publicDir: false`，并在 `index.html` 的 `bootstrap.ts` 之前注入 `../android/bridge.ts`（`vite.android.config.ts:7-30`）。`resources/pet` 不进 Web 产物，而由 Gradle 作为 APK assets 打入。
 
+#### 生产 release 签名（net.ankio.qqpet）
+
+- **本地签名材料**：release keystore 与本机环境放在 `~/.qqpet-release/`（`qqpet-release.jks`、`release.env`，`chmod 600`）；`android/keystore.properties`（`storeFile/storePassword/keyAlias/keyPassword`，gitignored）也可作为本地后备。环境变量 `ANDROID_KEYSTORE` 等优先于 properties；CI 使用 `ANDROID_KEYSTORE_BASE64`（base64 的 jks）加 `ANDROID_KEYSTORE_PASSWORD`/`ANDROID_KEY_ALIAS`/`ANDROID_KEY_PASSWORD`。
+- **构建**：`scripts/build-android-release.sh` 自动加载 `~/.qqpet-release/release.env`、选择 JDK 17 与 Android SDK、写 `android/local.properties` 的 `sdk.dir`，执行 `npm run build:android-web` 与 `./gradlew assembleRelease`，再用 `apksigner` 打印证书、`shasum` 打印 APK sha256；产物是 `android/app/build/outputs/apk/release/app-release.apk`（`net.ankio.qqpet`）。脚本不上传任何构建产物。
+- **签名一致性**：生产 APK 必须与设备上已安装的 `net.ankio.qqpet` 使用同一 keystore，否则 `adb install -r` 会报签名不匹配；更换签名（例如 0.20.0 新 keystore）只能卸载旧包（会丢本地数据）或换新设备/新 applicationId，不能静默覆盖。
+- **备份/CI**：keystore 与 env 必须离线备份；丢失后无法升级同一签名。GitHub Actions 的 release 作业读取上述 secrets；tag 只发布源码/tag，构建产物本地生成，不推送到仓库或 release。
+
 ### 5.3 HarmonyOS
 
 ```bash

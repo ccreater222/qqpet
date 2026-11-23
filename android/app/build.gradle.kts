@@ -1,4 +1,5 @@
 import groovy.json.JsonSlurper
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -7,7 +8,14 @@ plugins {
 
 val pkg = JsonSlurper().parse(rootDir.resolve("../package.json")) as Map<*, *>
 val version = pkg["version"] as String
-val keystore: String? = System.getenv("ANDROID_KEYSTORE")
+// Release signing: CI uses the ANDROID_* environment; a local developer can keep the
+// same values in android/keystore.properties (gitignored, chmod 600) and run Gradle
+// directly. Environment variables win when both are present.
+val keystoreProps = Properties()
+val keystorePropsFile = rootProject.file("keystore.properties")
+if (keystorePropsFile.isFile) keystorePropsFile.inputStream().use { keystoreProps.load(it) }
+fun credential(env: String, key: String): String? = System.getenv(env) ?: keystoreProps.getProperty(key)
+val keystore: String? = credential("ANDROID_KEYSTORE", "storeFile")
 
 android {
     namespace = "net.ankio.qqpet"
@@ -36,9 +44,9 @@ android {
             // Without ANDROID_KEYSTORE the APK is unsigned and will not install.
             if (keystore != null) signingConfig = signingConfigs.create("release") {
                 storeFile = file(keystore)
-                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
-                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+                storePassword = credential("ANDROID_KEYSTORE_PASSWORD", "storePassword")
+                keyAlias = credential("ANDROID_KEY_ALIAS", "keyAlias")
+                keyPassword = credential("ANDROID_KEY_PASSWORD", "keyPassword")
             }
         }
     }

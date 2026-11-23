@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "rangeBaseline": "b23109a2bd468a8d30c08ed066b8ffb96469915a",
+  "rangeBaseline": "9fc7bea9fe3928cefc0509dc902a9904881397d0",
   "rules": [
     {
       "include": [
@@ -172,6 +172,20 @@
       ],
       "mode": "warn",
       "reason": "验收门禁、证据格式与 CI 作业定义质量门禁和文档证据规则；变化应同步文档规范与质量门禁指南。"
+    },
+    {
+      "include": [
+        "src/renderer/ui/smallgame.ts",
+        "src/renderer/ui/smallgame-geometry.ts",
+        "src/renderer/ui/gamepad.ts",
+        "src/renderer/ui/mobile/phone-games.ts"
+      ],
+      "exclude": [],
+      "docs": [
+        "docs/standards/mini-game.md"
+      ],
+      "mode": "require",
+      "reason": "小游戏窗口池/预算/Show 语义/Canvas2D/root clamp/原生键桥/输入契约决定移动端可玩性与内存上限；改动必须同步小游戏规范。"
     }
   ]
 }

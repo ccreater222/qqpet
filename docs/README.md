@@ -47,6 +47,7 @@
 |---|---|
 | [后端规范](standards/backend.md) | 服务端权威、协议/数据不变量、SQLite 与恢复、失败策略、验证命令 |
 | [前端规范](standards/frontend.md) | Electron 三层结构、`window.qqpet` 契约、投影/本地状态、跨端约束 |
+| [小游戏规范](standards/mini-game.md) | Ruffle 0.6 窗口预算/池化/Canvas2D/Show 语义/原生键桥/六游戏验收 |
 
 ## 运维
 
