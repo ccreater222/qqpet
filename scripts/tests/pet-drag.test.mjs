@@ -30,13 +30,40 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
   pet.closest = selector => selector === '#pet' || selector === '[data-hit]' ? pet : null
   pet.getRootNode = () => null
   pet.matches = () => false
-  pet.checkVisibility = () => !pet.hidden
-  const front = { closest: pet.closest, matches: () => false, checkVisibility: () => true }
+  if (initial.noCheckVisibility !== true) pet.checkVisibility = () => !pet.hidden
+  const front = {
+    closest: pet.closest,
+    matches: () => false,
+    ...(initial.noCheckVisibility === true ? {} : { checkVisibility: () => true }),
+  }
+  front.getBoundingClientRect = () => ({ x: 100, y: 100, width: 10, height: 10 })
+  if (initial.point === true) {
+    // A face hotspot inside #pet reaches the visibility gate; old shells lack Element.checkVisibility.
+    front.matches = selector => selector === '.point'
+    front.closest = selector => (selector === '#pet' ? pet : null)
+  }
   pet.querySelectorAll = () => [front]
+  // Only an equipped scene adds a .petBg layer; a bare fixture has no querySelector, like older test doubles.
+  if (initial.petBg !== undefined) {
+    const layer = {
+      style: { backgroundImage: initial.petBg },
+      classList: { contains: name => name === 'hide' && initial.petBgHidden === true },
+    }
+    pet.querySelector = selector => (selector === ':scope > .petBg' ? layer : null)
+  }
   pet.setPointerCapture = id => captured.add(id)
   pet.hasPointerCapture = id => captured.has(id)
   pet.releasePointerCapture = id => captured.delete(id)
   const info = { lastX: initial.x ?? 500, lastY: initial.y ?? 300 }
+  const menu = initial.menu === true ? { className: 'ui-menu' } : null
+  // The phone menu layer: [data-hit], full page, and input-disabled while its opening animation must not take the tap.
+  const sheet = initial.sheet === true ? {
+    className: 'qp-sheet',
+    closest: () => null,
+    matches: selector => selector === '.qp-sheet',
+    ...(initial.noCheckVisibility === true ? {} : { checkVisibility: () => true }),
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: initial.area?.width ?? 1920, height: initial.area?.height ?? 1080 }),
+  } : null
   const listeners = []
   const poses = []
   const releases = []
@@ -87,11 +114,15 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
     applyEdge: () => null,
     pageX: event => event.clientX + crop.x,
     pageY: event => event.clientY + crop.y,
-    touch: false,
+    touch: initial.touch === true,
     document: {
       getElementById: () => pet,
+      // A touch host installs long-press listeners; no test dispatches document-level events.
+      addEventListener: noop,
+      removeEventListener: noop,
       elementFromPoint: (x, y) => hitAt?.(x, y) ? { getRootNode: () => null, closest: selector => selector === '[data-hit]' ? {} : null } : initial.petDOM ? pet : null,
-      querySelectorAll: () => [pet, front],
+      querySelectorAll: () => (sheet ? [pet, front, sheet] : [pet, front]),
+      querySelector: selector => (selector === '.ui-menu' ? menu : selector === '.qp-sheet' ? sheet : null),
       documentElement: { dataset: { cropX: String(crop.x), cropY: String(crop.y) } },
     },
     window: {
@@ -102,7 +133,7 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
         onPresence: noop, onFront: noop,
         setClickThrough: on => clickThrough.push(on),
         ...(native ? { setDragging: native } : {}),
-        ...(initial.linux ? { setHitShape: rects => shapes.push(rects) } : {}),
+        ...(initial.linux || initial.hitShape ? { setHitShape: rects => shapes.push(rects) } : {}),
       },
     },
     performance: { now: () => clock },
@@ -120,7 +151,9 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
       disconnect() { observers.delete(this) }
     },
     setInterval: callback => intervals.push(callback),
-    getComputedStyle: () => ({ pointerEvents: 'auto' }),
+    getComputedStyle: el => ({ pointerEvents: el === sheet ? 'none' : 'auto', display: 'block', visibility: 'visible', opacity: '1', ...(initial.style ?? {}) }),
+    // A touch host builds an empty long-press tooltip at startup; its content is only used on demand.
+    div: className => ({ className, style: {}, textContent: '', isConnected: false, remove: noop }),
     setTimeout: callback => { timers.set(++nextTimer, callback); return nextTimer },
     clearTimeout: id => timers.delete(id),
     adopt: noop,
@@ -549,6 +582,157 @@ test('a panel remains interactive beside a peeking pet (#74)', () => {
   app.hitAt((x, y) => x === 550 && y === 340)
   app.cursor({ x: 550, y: 340 })
   assert.deepEqual(app.clickThrough, [false])
+})
+
+// ---- phone hit shape: Android windows take touches only over the pixels drawn now ----------
+// The overlay window stays the conservative crop (margin + animation history); the touchable
+// region inside it follows the current frame, so transparent window pixels can pass through.
+
+const rects = app => JSON.parse(JSON.stringify(app.shapes.at(-1)))
+
+test('a touch host reports the peeking pet pixels, not its conservative box', () => {
+  const app = renderer(160, undefined, null, 'Adult', {
+    x: 1760, y: 100, pose: 'hideright', touch: true, hitShape: true,
+    peek: { left: 0.8, top: 0.3, right: 1, bottom: 0.9 },
+  })
+  app.runIntervals()
+  assert.deepEqual(rects(app), [{ x: 1888, y: 148, width: 32, height: 96 }])
+})
+
+test('a touch host follows the current frame even in a plain standing pose', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, touch: true, hitShape: true,
+    peek: { left: 0.25, top: 0.25, right: 0.75, bottom: 0.75 },
+  })
+  app.runIntervals()
+  assert.deepEqual(rects(app), [{ x: 540, y: 340, width: 80, height: 80 }])
+})
+
+test('a desktop host still reports the whole pet box for a standing pet', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, hitShape: true,
+    peek: { left: 0.25, top: 0.25, right: 0.75, bottom: 0.75 },
+  })
+  app.runIntervals()
+  assert.deepEqual(rects(app), [{ x: 500, y: 300, width: 160, height: 160 }])
+})
+
+test('an equipped scene keeps the whole pet box touchable on a touch host', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, pose: 'hideright', touch: true, hitShape: true,
+    petBg: 'url(scene.gif)', peek: { left: 0.8, top: 0.3, right: 1, bottom: 0.9 },
+  })
+  app.runIntervals()
+  // The whole box (the scene bitmap) plus the player's own pixels: the union is still the pet box.
+  assert.deepEqual(rects(app), [
+    { x: 500, y: 300, width: 160, height: 160 },
+    { x: 628, y: 348, width: 32, height: 96 },
+  ])
+})
+
+test('a hidden scene layer falls back to the player pixels on a touch host', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, touch: true, hitShape: true,
+    petBg: 'url(scene.gif)', petBgHidden: true, peek: { left: 0.25, top: 0.25, right: 0.75, bottom: 0.75 },
+  })
+  app.runIntervals()
+  assert.deepEqual(rects(app), [{ x: 540, y: 340, width: 80, height: 80 }])
+})
+
+test('a tablet popup menu adds a full-page catch-all target on a touch host', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, touch: true, hitShape: true, menu: true,
+    peek: { left: 0.25, top: 0.25, right: 0.75, bottom: 0.75 },
+  })
+  app.runIntervals()
+  // The pet pixels first, then the catch-all a tap outside the menu must land on.
+  assert.deepEqual(rects(app), [
+    { x: 540, y: 340, width: 80, height: 80 },
+    { x: 0, y: 0, width: 1920, height: 1080 },
+  ])
+})
+
+test('without a popup menu a touch host adds no full-page target', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, touch: true, hitShape: true,
+    peek: { left: 0.25, top: 0.25, right: 0.75, bottom: 0.75 },
+  })
+  app.runIntervals()
+  assert.deepEqual(rects(app), [{ x: 540, y: 340, width: 80, height: 80 }])
+})
+
+test('a desktop popup menu keeps its old Linux hit shape', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, hitShape: true, menu: true,
+    peek: { left: 0.25, top: 0.25, right: 0.75, bottom: 0.75 },
+  })
+  app.runIntervals()
+  assert.deepEqual(rects(app), [{ x: 500, y: 300, width: 160, height: 160 }])
+})
+
+test('a hidden pet reports no touchable pixels to a touch host', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', { x: 500, y: 300, touch: true, hitShape: true })
+  app.save.settings.hidden = true
+  app.runIntervals()
+  assert.deepEqual(rects(app), [])
+})
+
+test('a touch host does not re-run hover hit testing from a stale point', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', { x: 500, y: 300, touch: true, hitShape: true })
+  // Enabling setHitShape starts the shape tick on Android too; it must not close a panel opened elsewhere.
+  app.runIntervals()
+  app.runTimers()
+  assert.equal(app.menuCloses(), 0)
+})
+
+test('a WebView without Element.checkVisibility still reports the visible pet pixels', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, touch: true, hitShape: true, noCheckVisibility: true,
+    peek: { left: 0.25, top: 0.25, right: 0.75, bottom: 0.75 },
+  })
+  app.runIntervals()
+  assert.deepEqual(rects(app), [{ x: 540, y: 340, width: 80, height: 80 }])
+})
+
+test('a WebView without Element.checkVisibility still reports panel pixels', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, hitShape: true, point: true, noCheckVisibility: true,
+  })
+  // Pre-Chrome-105 Android WebViews throw here, which used to abort the whole setHitShape tick.
+  app.runIntervals()
+  assert.ok(rects(app).some(r => r.x === 100 && r.y === 100 && r.width === 10 && r.height === 10), JSON.stringify(rects(app)))
+})
+
+for (const [name, style] of [
+  ['display: none', { display: 'none' }],
+  ['visibility: hidden', { visibility: 'hidden' }],
+  ['opacity: 0', { opacity: '0' }],
+]) test(`the checkVisibility fallback drops an element with ${name}`, () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, hitShape: true, point: true, noCheckVisibility: true, style,
+  })
+  app.runIntervals()
+  assert.deepEqual(rects(app), [{ x: 500, y: 300, width: 160, height: 160 }])
+})
+
+test('a touch host reports the opening sheet layer even while it ignores input', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, touch: true, hitShape: true, sheet: true,
+  })
+  // openPhoneMenu disables the layer for 220ms; its full-page rect must still reach the native window.
+  app.runIntervals()
+  assert.deepEqual(rects(app), [
+    { x: 500, y: 300, width: 160, height: 160 },
+    { x: 0, y: 0, width: 1920, height: 1080 },
+  ])
+})
+
+test('a touch host keeps the whole page touchable while a finger drags the pet', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', { x: 500, y: 300, touch: true, hitShape: true })
+  app.pointer('pointerdown', 550, 340)
+  app.pointer('pointermove', 600, 340)
+  app.runIntervals()
+  assert.deepEqual(rects(app), [{ x: 0, y: 0, width: 1920, height: 1080 }])
 })
 
 // ---- phone pet: tap opens the menu, drag moves it, system bars are edges -----------------

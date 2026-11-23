@@ -69,7 +69,8 @@ iOS 没有 `QQPetNative`：桥用 WKScriptMessageHandler，handler 名固定 `qq
 | HTTP | `http(id,method,url,headers,body)`（`:579`） | 同名，body 用空串而非 null（`Native.ets:124-153`） | `op: "http"`（`:609-623`） |
 | 导出/导入存档 | `exportSave(id,name,text)` / `importSave(id)`（`:582`、`:595`） | 同名（`Native.ets:155-189`） | `op: "exportSave"` / `"importSave"`（`:759-768`） |
 | Keystore token | `saveRemoteToken(token)` / `loadRemoteToken()` / `clearRemoteToken()`（`:526`、`:546`、`:567`） | 无 | 无 |
-| 窗口矩形 | `setBounds(x,y,w,h,viewport)`（`:637`） | `setBounds("x,y,w,h,viewport")` 单字符串（`Native.ets:228-231`） | `op: "setGeometry"` + `bounds` 字典（`QPHostController.m:625-639`） |
+| 窗口矩形 | `setBounds(x,y,w,h,viewport)`（`:637`；渲染窗全屏后为 no-op） | `setBounds("x,y,w,h,viewport")` 单字符串（`Native.ets:228-231`） | `op: "setGeometry"` + `bounds` 字典（`QPHostController.m:625-639`） |
+| 触控子区域 | `setTouchableRegion(rects,viewport)`，可选；透明 portal 逐矩形转发（`:436`） | 无 | 无（`dragPlane` 用 `dragRegions/interactiveRegions`） |
 | 小游戏方向键 | `sendGameKey(code,phase)` → `Boolean`，仅 37/39（`:651`） | 无 | 无 |
 | 安全区 | `safeArea(viewport)` → `"l,t,r,b"`（`:641`） | 同名同格式（`Native.ets:233-235`） | `op: "safeArea"` → 对象（`:652-692`） |
 | 托盘/通知 | `setTray(icon, tip?)`（`:631`） | `setTray(icon, tip)`，`'null'` 归一成空串（`Native.ets:220-222`） | `op: "setTray"`（`:696`） |
@@ -135,6 +136,63 @@ Android 手机与平板共用同一份 WebView，但设计空间由 `AssetClient
 - 直接 API 调用（verifier 的 `sendGameKey` 探针）不经过 D-pad 的 press handler，所以 Android 页面桥在注入前先调用页面暴露的 `window.__qqpetSmallGameKeyPrepare()`：focus cloud iframe/Ruffle player 并向 cloud 的 canvas 派发 pointer/mouse 点击，让 `CloudControl.startGame` 安装 KEY_DOWN；down 再延迟 80ms 注入，给 Ruffle 处理 click 的时间，up 不延迟。
 - 排障：页面把非敏感计数挂在 `window.__qqpetSmallGameKeys`（`active/cloudFocus/cloudClicks/nativeDown/nativeUp/nativeTrue/nativeFalse/fallbackDown/playerHidden`），verifier 可据此区分“云未启动（playerHidden=true、cloudClicks>0）/焦点未到/native 返回 false”；原生注入异常仍写 logcat `small-game key injection failed`。
 
+### 4.4 Android 触控区：附随对话框渲染窗 + 触控门户
+
+Android 叠加窗的窗口矩形不再等于触控区：渲染窗是 1x1 `TYPE_APPLICATION_OVERLAY` token 父窗下的
+`TYPE_APPLICATION_ATTACHED_DIALOG(1003)` 子窗口（`FLAG_NOT_TOUCHABLE`、alpha=1.0），**裁剪到页面可见矩形并集 +
+6px 边距**；页面通过可选 `setTouchableRegion(rects, viewport)` 上报当前可见像素矩形，原生为每个（合并后的）
+矩形创建一个透明 overlay 触控门户，把 MotionEvent 平移后 `web.dispatchTouchEvent` 转发给页面。WebView 全屏放在
+子窗内，用 `translationX/Y = -childOrigin` 保持页面屏幕锚定。
+
+为什么不是另外两条路：
+
+- Android 10+ 的 `DisplayPolicy.adjustWindowParamsLw` 对 system alert window 在
+  `FLAG_NOT_TOUCHABLE` 且 alpha > 0.8 时强制把窗口压到 0.8（防点击劫持）；实测页面白色 255 在设备合成图上
+  变成 207，sheet 只有 80% 不透明。1003 子窗口不是 system alert window，不触发该策略。
+- `ViewTreeObserver$InternalInsetsInfo.touchableRegion` 是 @hide，默认 hidden-API 策略下对 targetSdk 35
+  取不到（`NoSuchFieldException`），不能作为交付路径。
+
+实现与约束：
+
+- `setBounds` 保留 JS 签名但 no-op（`PetService.kt` 的 `setBounds`）：渲染子窗的裁剪改由
+  `setTouchableRegion` 的矩形并集决定；页面不会被 `cover()` 的 24dp 收敛再裁剪。
+- **子窗不能全屏**：AOSP `WindowState.getTouchOcclusionMode()` 只对 system alert window 返回 `USE_OPACITY`，
+  其余（含 1003）是 `BLOCK_UNTRUSTED`；全屏的 NOT_TOUCHABLE 子窗仍会挡住 launcher 等 untrusted 下层窗口。
+  裁剪到可见内容并集 + 6px 边距后，child 外的透明区触摸可穿透到下层，child 内 portal 外只剩有界死区
+  （边距 + 并集间隙）。sheet 打开时页面上报全屏遮罩，并集覆盖全屏，child 才扩到全屏——modal 下全屏遮挡是正确语义。
+- `attachRenderWindow` 在 `host.post` 后取 `host.windowToken` 加子窗口；ROM 拒绝 1003 时 `Log.e` 回退 overlay
+  类型（仍可运行，但会有 0.8 dim），不静默。
+- `applyChildBounds` 把子窗裁剪到合并后的触控矩形并集 + 6px，带滞回（内容在窗内且四边空隙 ≤12px 保持），
+  移动/收缩时**不得**把旧窗与新窗求并后一直变大，否则宠物走过路径会全部变成死区；空矩形收缩为 1x1。
+- 页面开 sheet 时的输入锁（`pointer-events:none` 220ms，防开屏点击落到第一行）**不改变**它上报的矩形；
+  页面循环对 `.qp-sheet` 豁免该过滤，整页矩形在开屏后 ≤50ms 送达，child 在 sheet 动画开始前已扩到全页。
+  若把输入锁误当“不可见”过滤，child 会停在宠物大小，sheet 的 cream 背景先在小窗里出现，随后才 resize。
+- 手势期间 child 仍即时跟随（`applyChildBounds` 在 `touchActive` 早退之前执行）：child 是 NOT_TOUCHABLE，
+  移动/缩放不会切断手势流；只有 portal 窗口要等 ACTION_UP 才移动，否则会把手指下的目标窗换掉。
+- 大幅 child 变化**只按尺寸**判定（宽/高 >200px 或 >25%、面积比 >2）：位置移动/宠物动画不隐藏，只更新
+  x/y + translation；否则页面每 50ms 的 setHitShape 会让窗口反复隐藏（实测过 alpha 卡死、宠物不可见）。
+  初始 1x1→内容、tap 打开 sheet 全屏、drag 全屏、松手收缩、旋转命中尺寸规则。隐藏的是**整个渲染子窗**
+  （`rootParams.alpha=0`），不是只隐藏 WebView：白色/平铺 sheet 背景来自 child 窗口自己的 surface。显示延迟
+  100ms（sheet/旋转/初始）或 32ms（拖动/收缩）；alpha 已 0 时再次 hide 不重置 reveal；300ms 看门狗强制
+  显示，`revealToken` 丢弃旧回调。
+- `setTouchableRegion`（`PetService.kt:436`）解析 CSS 矩形，`scale = web.layoutParams.width / viewport`，
+  floor/ceil 转屏幕像素后与屏幕求交；先丢弃被包含矩形并合并相交矩形，再按 index 复用 portal；
+  手势进行中锁住 active portal，UP/CANCEL 后才应用新矩形（否则会中断 WebView 手势）。
+- portal 转发：`MotionEvent.obtain` → `offsetLocation(portalScreen − webScreen)` → `web.dispatchTouchEvent`
+  → recycle；页面 CSS 坐标 = 屏幕像素 / scale。
+- `setFocusable` 切换子窗 `FLAG_NOT_FOCUSABLE`（IME/返回键仍由 root 的 `dispatchKeyEvent` 处理）；
+  `applyShown` 隐藏子窗并清 portal；旋转时更新子窗口尺寸；空数组清空 portal。
+- 行为变化：渲染窗 NOT_TOUCHABLE 后页面不再收到 `ACTION_OUTSIDE`；手机 sheet 用页面内全屏遮罩
+  （全屏 portal）不受影响；平板桌面式菜单由页面在 `.ui-menu` 存在时补一个全屏 catch-all 矩形
+  （`src/renderer/main.ts`），点外面仍关闭菜单，但该次点击不再传给下层应用。
+- 限制：portal 不可用时不会把全屏子窗改成可触（会挡住所有下层应用），宠物保持不可触并 `Log.e`；
+  多指跨不同 portal 是两条独立系统手势流；`hitCover` 采样间隔 150 ms，触控区最多滞后 150 ms
+  （拖动中整页可触，不受影响）。
+- 回归测试：`scripts/tests/android-overlay.test.mjs`（结构）与 `scripts/tests/pet-drag.test.mjs`
+  （页面矩形）；模拟器验收要求 portal frame 与页面可见像素一致、sheet 不透明、tap/拖动/穿透/back 不回归。
+  本轮踩过的 alpha cap、BLOCK_UNTRUSTED、child resize、hit-shape 过滤、sheet 背景色、pointerdown 预扩等坑与
+  调试 checklist 见 [Android 叠加窗触控区：坑点与最佳实践](../guides/android-overlay-touch.md)。
+
 ## 5. 同步返回值 vs 异步 resolve 的判据
 
 新增方法时按以下判据决定形态，规则来自现有实现的分工：
@@ -150,7 +208,7 @@ Android 手机与平板共用同一份 WebView，但设计空间由 `AssetClient
 
 - Android 的 `emit` 定义在 `PetService.kt:289`，拼 `__qqpet.emit('type', payload)` 注入页面；`PetHost.emit` 同构（`harmony/entry/src/main/ets/pet/PetHost.ets:112-114`）。
 - 推送的值是 JSON 字面量文本，页面侧按事件类型解析；`presence` 在 Harmony 上是 `'true'`/`'false'` 字符串（`harmony/entry/src/main/ets/pet/PetHost.ets:101`）。
-- `outside` 事件在页面侧被翻译成「视口四角之一」的 cursor 位置，前提是该角不在当前窗口矩形内（`src/android/bridge.ts:358-368`）。窗口矩形与触摸事件必须来自同一坐标系（CSS 像素、页面宽度为 `innerWidth`）。
+- `outside` 事件在页面侧被翻译成「视口四角之一」的 cursor 位置，前提是该角不在当前窗口矩形内（`src/android/bridge.ts:358-368`）。窗口矩形与触摸事件必须来自同一坐标系（CSS 像素、页面宽度为 `innerWidth`）。Android 的渲染子窗口是 NOT_TOUCHABLE 后不会再产生 `ACTION_OUTSIDE`；手机 sheet 由页面内全屏遮罩接管，平板桌面菜单由页面补全屏 catch-all（§4.4）。
 
 ## 7. 不变量清单
 
@@ -159,7 +217,7 @@ Android 手机与平板共用同一份 WebView，但设计空间由 `AssetClient
 3. 异步调用必须成对：登记 `pending` → 原生 `resolve` 或 reject；未知 id 不得抛异常（`src/android/bridge.ts:203-213` 与 `src/ios/rpc.ts:84-85` 都做了存在性检查）。
 4. iOS 回执必须匹配 `page`，否则丢弃；页面销毁后旧回执不能结算新请求。
 5. 缺能力时必须显式降级并给出原因字符串，不允许静默假设可用。
-6. `safeArea` 与 `setBounds` 在所有端使用同一单位（CSS 像素，基于调用时的 `viewport` 宽度换算），不一致会导致浮窗与内容错位。
+6. `safeArea` 与 `setBounds` 在所有端使用同一单位（CSS 像素，基于调用时的 `viewport` 宽度换算），不一致会导致浮窗与内容错位；Android 的 `setBounds` 现为 no-op，但参数形状与单位仍是契约。
 7. 只有 `cancellable` 集合内（iOS）或可被 retry 的请求允许在页面销毁时取消；存档写入必须跑完。
 8. Android 状态文件必须按**精确名字**白名单放行（`PetService.kt:420-427`）：页面不能借 `read/writeAtomic/removeStateFile` 触达 `remote-token.bin`、`save.json` 或任意 `filesDir` 路径。
 9. 设备 token 只允许经 Keystore 三方法进出（`PetService.kt:526-575`）；封装失败一律返回失败，不允许明文回退，也不允许把 token 写进日志、URL、配对码参数或投影缓存。

@@ -40,6 +40,7 @@
 | [内容包与构建](guides/content-packs-and-builds.md) | 内容包 manifest/base-deletes/minShell、打包、各平台构建与 CI 产物 |
 | [服务端部署](guides/server-deployment.md) | `QQPET_SYNC_*` 配置、Docker/systemd、TLS/WSS、secret 挂载、健康检查 |
 | [质量门禁](guides/quality-gates.md) | typecheck、测试、构建、服务端、e2e、验收命令与证据位置 |
+| [Android 叠加窗触控区](guides/android-overlay-touch.md) | 窗口/触控区分离、alpha cap、BLOCK_UNTRUSTED、portal、拖动/白闪/菜单背景坑点与验收方法 |
 
 ## 规范（角色约定）
 
