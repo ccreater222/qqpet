@@ -170,15 +170,18 @@ npm run dev
 ## 构建
 
 ```bash
-npm run dist      # 类型检查 + 构建 + 打包当前平台安装包到 dist/
-npm run android   # Android debug APK
-npm run harmony   # HarmonyOS debug HAP（需要本机 DevEco Studio）
-npm run ios       # iOS IPA（资源、SDK 和签名工具见 iOS 说明）
+npm run dist            # 类型检查 + 构建 + 打包当前平台安装包到 dist/
+npm run release:android # 签名 Android 生产 APK 到 dist/QQPet-<版本>.apk（需要 JDK 17、Android SDK 与签名材料）
+npm run android         # Android debug APK
+npm run harmony         # HarmonyOS debug HAP（需要本机 DevEco Studio）
+npm run ios             # iOS IPA（资源、SDK 和签名工具见 iOS 说明）
 ```
 
 推送 `v*` 标签时由 GitHub Actions 打出三平台安装包、Android APK、Harmony HAP 和 iOS IPA 并发布 Release。iOS 及共用代码的 pull request 还会生成可下载的 IPA。iOS CI 在 Ubuntu 上使用固定版本的 LLVM、SDK 和 `ldid`，并打包完整资源。
 
-Android 版本地调试用 `npm run android`（debug 包，输出到 `android/app/build/outputs/apk/debug/`），需要 Android SDK 和 JDK 17（Gradle 8 不支持更新的 JDK，可用 `JAVA_HOME` 指定）。如果从 Android Studio 或直接运行 Gradle 构建，需先在仓库根目录执行 `npm run build:android-web`，否则 APK 缺少网页资源且无法启动。CI 打的 release 包需要在仓库 Secrets 中配置签名密钥：
+Android 版本地调试用 `npm run android`（debug 包，输出到 `android/app/build/outputs/apk/debug/`），需要 Android SDK 和 JDK 17（Gradle 8 不支持更新的 JDK，可用 `JAVA_HOME` 指定）。如果从 Android Studio 或直接运行 Gradle 构建，需先在仓库根目录执行 `npm run build:android-web`，否则 APK 缺少网页资源且无法启动。
+
+Android 生产包统一用 `npm run release:android`（CI 的 android 作业调用同一命令）。它默认读取 `~/.qqpet-release/release.env`，也可用 `$QQPET_RELEASE_ENV`、`-- --env-file <path>` 指定，或 `-- --no-env-file` 关闭；环境中已有的变量优先，只打印加载路径、不打印值。命令先做预检（`package.json` 语义化版本、JDK 17、Android SDK 的 `apksigner`/`aapt2`、签名材料、`android/gradlew`），再执行 `npm run typecheck`、`QQPET_VERSION=<package version> npm run build:android-web` 和 `cd android && ./gradlew assembleRelease`，用 `apksigner verify` 与 `aapt2 dump badging` 校验签名、包名（`net.ankio.qqpet`）和 versionName 后复制到 `dist/QQPet-<版本>.apk`，并打印 APK SHA-256 与签名证书 SHA-256 指纹（缺失时 JSON 字段 `certificateSha256` 为 `null`，human 摘要显示 `(unavailable)`）。`--json` 让 CLI 只在 stdout 输出 JSON 摘要（进度写 stderr）；npm 会在脚本前打印自己的 banner，脚本化消费请用 `npm run --silent release:android -- --json`。预检或校验失败以退出码 1 终止，不会把未签名或未校验的 APK 归档到 `dist/`（Gradle 中间产物可能留在 `android/app/build/`，但不作为交付物）。本地 release 构建支持 macOS 与 Linux；Windows 请通过 CI 产物或 WSL 构建。CI 打的 release 包需要在仓库 Secrets 中配置签名密钥：
 
 | Secret | 内容 |
 |---|---|

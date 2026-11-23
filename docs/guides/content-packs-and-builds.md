@@ -80,15 +80,19 @@ node --experimental-strip-types scripts/pack-content.mjs \
 ### 5.2 Android
 
 ```bash
-npm run android   # = typecheck + build:android-web + cd android && ./gradlew assembleDebug
+npm run android           # debug：typecheck + build:android-web + cd android && ./gradlew assembleDebug
+npm run release:android   # 生产：预检 → typecheck → build:android-web → assembleRelease → 校验 → dist/QQPet-<version>.apk
 ```
 
 `vite.android.config.ts` 输出到 `out/android`，`base: './'`、`publicDir: false`，并在 `index.html` 的 `bootstrap.ts` 之前注入 `../android/bridge.ts`（`vite.android.config.ts:7-30`）。`resources/pet` 不进 Web 产物，而由 Gradle 作为 APK assets 打入。
 
 #### 生产 release 签名（net.ankio.qqpet）
 
+- **入口**：`npm run release:android` 是唯一生产入口（`scripts/build-android-release.mjs` 薄入口 + `scripts/lib/release-android.mjs` 编排），本地 macOS 与 CI Linux 共用同一实现；Windows 本地不直接支持（Gradle wrapper 与归档按 POSIX 处理），请走 CI 或 WSL。`--json` 让 CLI 只在 stdout 输出 JSON 摘要、进度写 stderr（npm 自身会先打印脚本 banner，脚本化消费用 `npm run --silent release:android -- --json`）；`-- --env-file <path>` 显式指定环境文件；`-- --no-env-file` 不加载任何环境文件；`-- --help` 打印用法。
+- **环境文件**：默认 `$QQPET_RELEASE_ENV`，否则 `~/.qqpet-release/release.env`（仅在该文件存在时）；只补齐当前进程未设置的变量，显式环境优先；只打印加载路径，绝不打印值；非法行显式失败。按 shell 子集解析（支持 `export`、单/双引号、整行与行尾注释），但不展开 `$`/`~`，路径请写绝对路径；值含空格或 `#` 时用引号包裹。`--env-file` 或 `QQPET_RELEASE_ENV` 指向的文件不存在时直接失败，默认文件不存在则跳过。
+- **预检**：`package.json` 语义化版本；JDK 17（验证 `JAVA_HOME`、PATH 中的 `java`，macOS 再尝试 `/usr/libexec/java_home -v 17`，非 17 拒绝）；Android SDK（`ANDROID_HOME` → `ANDROID_SDK_ROOT` → `~/Library/Android/sdk` → `/opt/homebrew/share/android-commandlinetools` → `~/Android/Sdk`，要求同一 build-tools 版本同时有 `apksigner` 与 `aapt2`）；签名（四个 `ANDROID_KEYSTORE*` 齐全且 keystore 文件存在，或 `android/keystore.properties` 存在）；`android/gradlew` 存在且可执行。任一缺失都在耗时构建前退出 1，不产出未签名包。
+- **构建与产物**：`android/local.properties` 缺失时写入 `sdk.dir`，已存在时只校验、不覆盖；依次执行 `npm run typecheck`、`QQPET_VERSION=<package version> npm run build:android-web`、`cd android && ./gradlew assembleRelease`（注入 `JAVA_HOME`、`ANDROID_HOME`、`ANDROID_SDK_ROOT`、`PATH`）。`apksigner verify --print-certs` 必须通过；`aapt2 dump badging` 的 `package` 必须是 `net.ankio.qqpet`、`versionName` 必须等于 `package.json` 版本；通过后复制到 `dist/QQPet-<version>.apk`，并打印 APK SHA-256 与签名证书 SHA-256 指纹（取自 `apksigner --print-certs` 的 `Signer #1 certificate SHA-256 digest`；缺失时 `certificateSha256` 为 `null`，不伪造）。JSON 摘要字段为 `ok,target,version,apk,sha256,packageName,versionName,signer,certificateSha256`；失败输出 `{ok:false,error}` 并以非零码退出。
 - **本地签名材料**：release keystore 与本机环境放在 `~/.qqpet-release/`（`qqpet-release.jks`、`release.env`，`chmod 600`）；`android/keystore.properties`（`storeFile/storePassword/keyAlias/keyPassword`，gitignored）也可作为本地后备。环境变量 `ANDROID_KEYSTORE` 等优先于 properties；CI 使用 `ANDROID_KEYSTORE_BASE64`（base64 的 jks）加 `ANDROID_KEYSTORE_PASSWORD`/`ANDROID_KEY_ALIAS`/`ANDROID_KEY_PASSWORD`。
-- **构建**：`scripts/build-android-release.sh` 自动加载 `~/.qqpet-release/release.env`、选择 JDK 17 与 Android SDK、写 `android/local.properties` 的 `sdk.dir`，执行 `npm run build:android-web` 与 `./gradlew assembleRelease`，再用 `apksigner` 打印证书、`shasum` 打印 APK sha256；产物是 `android/app/build/outputs/apk/release/app-release.apk`（`net.ankio.qqpet`）。脚本不上传任何构建产物。
 - **签名一致性**：生产 APK 必须与设备上已安装的 `net.ankio.qqpet` 使用同一 keystore，否则 `adb install -r` 会报签名不匹配；更换签名（例如 0.20.0 新 keystore）只能卸载旧包（会丢本地数据）或换新设备/新 applicationId，不能静默覆盖。
 - **备份/CI**：keystore 与 env 必须离线备份；丢失后无法升级同一签名。GitHub Actions 的 release 作业读取上述 secrets；tag 只发布源码/tag，构建产物本地生成，不推送到仓库或 release。
 
@@ -133,10 +137,10 @@ npm run check:ios-assets    # 只校验，不下载
 
 1. `acceptance` 作业 `uses: ./.github/workflows/ci.yml`，即发布构建依赖完整验收工作流，不是另跑一套（`build.yml:9-13`）。
 2. `build` 矩阵（windows/macos/ubuntu/ubuntu-arm）跑 `npm run dist`，再跑一次 `electron-builder --config electron-builder.lite.yml` 产出精简版（`build.yml:16-46`）。
-3. `android` 作业用 JDK 17 + Gradle 跑 `./gradlew assembleRelease`，产物改名 `QQPet-<version>.apk`（`build.yml:48-84`）。
-4. `harmony` 作业跑 `build:harmony-web` + `pack-harmony.mjs`，改版本号后 `assembleHap`（`build.yml:86-130`）。
-5. `ios` 作业复用 `ios-build.yml`（`build.yml:132-136`）。
-6. `release` 作业 `needs` 全部上述作业，`git lfs pull --include "resources/pet/**"` 后调用 `pack-content.mjs --version … --full --base <上一个 tag> --out artifacts --url-prefix <release 下载前缀>`，把包、`packs.json` 与各平台产物一起上传（`build.yml:138-195`）。带 `-` 的 tag 标记为 prerelease 且不设为 latest，精简版首次运行因此不会挑到 beta。
+3. `android` 作业用 JDK 17 跑 `npm run release:android`，由 CLI 完成 typecheck、Web 构建、`assembleRelease`、签名/包名/版本校验并归档 `dist/QQPet-<version>.apk`，最后上传 `dist/*.apk`（`build.yml:48-80`）。
+4. `harmony` 作业跑 `build:harmony-web` + `pack-harmony.mjs`，改版本号后 `assembleHap`（`build.yml:82-127`）。
+5. `ios` 作业复用 `ios-build.yml`（`build.yml:129-132`）。
+6. `release` 作业 `needs` 全部上述作业，`git lfs pull --include "resources/pet/**"` 后调用 `pack-content.mjs --version … --full --base <上一个 tag> --out artifacts --url-prefix <release 下载前缀>`，把包、`packs.json` 与各平台产物一起上传（`build.yml:134-192`）。带 `-` 的 tag 标记为 prerelease 且不设为 latest，精简版首次运行因此不会挑到 beta。
 
 ## 7. 不变量清单
 
@@ -180,4 +184,4 @@ node scripts/pack-harmony.mjs
 - 改 `deletes` 语义或 `lookup` 的隐藏顺序：会出现「旧文件复活」或「新文件被误隐藏」，只能靠安装层测试发现。
 - 改注入脚本的 HTML 入口匹配（`vite.*.config.ts` 的 `transformIndexHtml`）：桥接脚本可能不被打进产物，页面会报无 `window.qqpet`。
 - 改完整版/精简版的 `extraResources`：会让精简版意外带内容，或完整版缺资源；两份 yml 必须一起评审。
-- 改 CI 的 tag 触发或 release 作业的 `needs`：内容包可能在验收失败时仍被发布，破坏「发布依赖完整验收工作流」的约束（`build.yml:9-13`、`build.yml:138-139`）。
+- 改 CI 的 tag 触发或 release 作业的 `needs`：内容包可能在验收失败时仍被发布，破坏「发布依赖完整验收工作流」的约束（`build.yml:9-13`、`build.yml:134-135`）。
