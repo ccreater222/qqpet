@@ -118,6 +118,7 @@ const GUESS = { dir: 'guess', name: '猜动作', icon: 'guess' }
 const ROPE = { dir: 'rope', name: '跳绳', icon: 'tiaosheng' }
 const CENG = { dir: '100ceng', name: '下一百层', icon: undefined }
 const MOUSE = { dir: 'mouse', name: '捉老鼠', icon: 'duolaoshu' }
+const BALL = { dir: 'ball', name: '颠球', icon: 'tanliqiu' }
 
 /**
  * The full paopao2 start path: #pet rect → root window → its ExternalInterface API.
@@ -213,7 +214,14 @@ function paopaoHostFixture({ touchHost = true } = {}) {
       textContent: '',
       title: '',
       handlers: {},
-      classList: { toggle: () => {} },
+      classList: {
+        values: new Set(),
+        toggle(name, on) {
+          if (on === undefined ? !this.values.has(name) : on) this.values.add(name)
+          else this.values.delete(name)
+        },
+        contains(name) { return this.values.has(name) },
+      },
       append: () => {},
       addEventListener(type, callback) {
         ;(this.handlers[type] ??= []).push(callback)
@@ -342,8 +350,9 @@ function paopaoHostFixture({ touchHost = true } = {}) {
       const result = host.rootApi.CreateWindow(name, x, y, w, h, hidden ? 1 : 0, swf)
       assert.equal(result, 1, `CreateWindow(${name}) must succeed`)
       host.loadFrames(before)
-      // 100ceng's SWF uses Windows Show semantics (1=show); other games use 0=show.
-      if (show) host.rootApi.Show(host.state().dir === '100ceng' ? 1 : 0, name)
+      // 100ceng/ball SWFs use Windows Show semantics (1=show); other games use 0=show.
+      const windowsShow = host.state().dir === '100ceng' || host.state().dir === 'ball'
+      if (show) host.rootApi.Show(windowsShow ? 1 : 0, name)
       return result
     },
   }
@@ -673,6 +682,25 @@ test('guess fits six base windows and three action windows in its budget', async
   assert.equal(host.players.filter((player) => !player.destroyed).length, 10, 'no base window was reclaimed for an action')
 })
 
+test('mouse rat stays passive; a rat tap is forwarded to the root pet jump', async () => {
+  const host = paopaoHostFixture()
+  host.play(MOUSE)
+  await host.settle()
+  host.createWindow('wnd_name_rat_1', 'rat.swf', 20, 30, 35, 30)
+  await host.settle()
+  const rat = host.state().wins.get('wnd_name_rat_1')
+  assert.equal(rat.box.classList.contains('passive'), true, 'rat remains pointer-events:none')
+
+  const rootPlayer = host.players[0]
+  const before = rootPlayer.events.length
+  host.pointer('pointerdown', 25, 35)
+  await host.settle()
+  const forwarded = rootPlayer.events.slice(before)
+  assert.ok(forwarded.some((event) => event.type === 'pointerdown'), 'rat tap becomes a root pointerdown')
+  assert.ok(forwarded.some((event) => event.type === 'mousedown'), 'rat tap becomes a root mousedown')
+  assert.equal(host.context.window.__qqpetSmallGameKeys.mouseForwards, 1)
+})
+
 test('touch pointermove feeds GetCursorPosition in window-local CSS px', async () => {
   const host = paopaoHostFixture()
   host.play()
@@ -720,6 +748,46 @@ test('touch bridge sends passive/hidden hit calls only to visible windows under 
   host.rootApi.DestroyWindow()
   host.pointer('pointermove', 25, 35)
   assert.equal(rat.calls.length, beforePool, 'pooled shells are not hit targets')
+})
+
+test('ball uses Windows Show semantics and keeps ball/shadow/base across quit and reopen', async () => {
+  const host = paopaoHostFixture()
+  host.play(BALL)
+  await host.settle()
+  host.createWindow('WND_NAME_BALL', 'ball.swf', 0, 0, 50, 50, { hidden: true, show: false })
+  await host.settle()
+  const ball = host.state().wins.get('WND_NAME_BALL')
+  assert.equal(ball.box.hidden, true, 'ball starts hidden before the throw')
+  host.rootApi.Show(1, 'WND_NAME_BALL')
+  assert.equal(ball.box.hidden, false, 'letballMove uses Show(1) to reveal the ball')
+  host.rootApi.Show(0, 'WND_NAME_BALL')
+  assert.equal(ball.box.hidden, true, 'onBallWinRemove uses Show(0) to hide it')
+
+  // Throw: ball + shadow + base windows are all visible; DOM/shell count stays bounded.
+  host.rootApi.Show(1, 'WND_NAME_BALL')
+  host.createWindow('WND_NAME_SHADOW', 'shadow.swf', 81, 130, 55, 15)
+  host.createWindow('WND_NAME_STATUS_MOOD', 'status_mood.swf', 50, 50, 140, 20)
+  host.createWindow('WND_NAME_STATUS_COUNT', 'status_count.swf', 50, 80, 60, 25)
+  host.createWindow('WND_NAME_PROMPT_MOOD', 'prompt_mood.swf', 50, 100, 180, 90)
+  host.createWindow('WND_NAME_PROMPT_MONEY', 'prompt_money.swf', 50, 120, 300, 180)
+  await host.settle()
+  assert.equal(ball.box.hidden, false)
+  assert.equal(host.state().wins.get('WND_NAME_SHADOW').box.hidden, false)
+  for (const name of ['WND_NAME_STATUS_MOOD', 'WND_NAME_STATUS_COUNT', 'WND_NAME_PROMPT_MOOD', 'WND_NAME_PROMPT_MONEY']) {
+    assert.equal(host.state().wins.get(name).box.hidden, false, `${name} must be visible`)
+  }
+  assert.ok(host.state().shells.size <= 11, 'ball 8+3 budget')
+
+  // Quit returns every shell to the pool; a reopen reuses it instead of allocating another game.
+  const shells = host.state().shells.size
+  host.rootApi.DestroyWindow()
+  assert.equal(host.state().wins.size, 0)
+  assert.equal(host.state().shells.size, shells)
+  assert.ok(host.state().pools.size > 0)
+  host.play(BALL)
+  await host.settle()
+  assert.ok(host.state().root, 'ball can be reopened')
+  assert.equal(host.state().wins.get('WND_NAME_BALL')?.swf ?? 'ball.swf', 'ball.swf')
 })
 
 test('100ceng uses Windows Show semantics: Show(1) reveals the player, Show(0) hides it', async () => {

@@ -234,6 +234,46 @@ const windowsAt = (x: number, y: number): Win[] => {
   return out
 }
 
+/** A real tap on a passive rat window is forwarded to the mouse game's pet, which owns the jump. */
+function ratAt(x: number, y: number): boolean {
+  if (dir !== 'mouse') return false
+  for (const w of wins.values()) {
+    if (!/^rat\./.test(w.swf) || !w.player || w.loading || w.pooled || w.box.hidden) continue
+    const r = boxRect(w)
+    if (x >= r.left && y >= r.top && x < r.left + r.width && y < r.top + r.height) return true
+  }
+  return false
+}
+
+function forwardMouseTapToPet(rootWin: Win): void {
+  if (dir !== 'mouse' || !rootWin.player) return
+  const el = rootWin.player.el as HTMLElement & { shadowRoot?: ShadowRoot }
+  const canvas = el.shadowRoot?.querySelector('#container canvas') as HTMLElement | null
+  const target = canvas ?? el
+  const rect = typeof target.getBoundingClientRect === 'function' ? target.getBoundingClientRect() : null
+  // The pet sprite sits slightly left of the 140x140 root's centre in the original layout.
+  const x = rect ? rect.left + rect.width * 0.4 : 0
+  const y = rect ? rect.top + rect.height * 0.47 : 0
+  focusGame(rootWin)
+  const view = rootWin.frame.contentWindow
+  let P: typeof PointerEvent | undefined
+  let M: typeof MouseEvent | undefined
+  try {
+    const w = view as (Window & { PointerEvent?: typeof PointerEvent; MouseEvent?: typeof MouseEvent }) | null
+    P = w?.PointerEvent ?? PointerEvent
+    M = w?.MouseEvent ?? MouseEvent
+  } catch { return }
+  for (const type of ['pointerdown', 'pointerup', 'click'] as const) {
+    if (!P) break
+    try { target.dispatchEvent(new P(type, { bubbles: true, composed: true, cancelable: true, clientX: x, clientY: y, pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, buttons: type === 'pointerdown' ? 1 : 0 })) } catch { /* iframe gone */ }
+  }
+  for (const type of ['mousedown', 'mouseup', 'click'] as const) {
+    if (!M) break
+    try { target.dispatchEvent(new M(type, { bubbles: true, composed: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons: type === 'mousedown' ? 1 : 0 })) } catch { /* iframe gone */ }
+  }
+  gameKeyDebug.mouseForwards += 1
+}
+
 /**
  * Native desktop windows get real mouse events; on a touch host the passive rat/shadow/player
  * iframes never do. The bridge records the primary pointer and feeds the same coordinates to
@@ -257,6 +297,9 @@ const pointerDown = (e: PointerEvent): void => {
   if (e.isPrimary === false) return
   activePointer = e.pointerId
   pointerHit(e, 'down')
+  // The rat is PASSIVE and has no click handler; on touch the pet's jump lives in the root.
+  // Forward rat taps to the root pet so the verifier's rat-tap sequence is playable.
+  if (!isPadTarget(e.target) && root && ratAt(e.clientX, e.clientY)) forwardMouseTapToPet(root)
 }
 const pointerUp = (e: PointerEvent): void => {
   if (activePointer !== null && e.pointerId !== activePointer) return
@@ -521,10 +564,11 @@ function api(self: Win): Record<string, Fn> {
     Show: (cmd: number, n?: string) => {
       const t = of(n)
       if (!t) return 0
-      // 100ceng's MainWindow calls ShowWindow(1, player) to reveal the hidden player (Windows
-      // SW_SHOW=1 / SW_HIDE=0). Every other small game historically uses 0=show here, and the
-      // bubble tests depend on that; keep their semantics and special-case this game only.
-      const show = self.dir === '100ceng' ? cmd === 1 : cmd === 0
+      // 100ceng and ball call ShowWindow with Windows semantics (SW_SHOW=1 / SW_HIDE=0):
+      // 100ceng reveals its player with Show(1); ball reveals the thrown ball with Show(1) and
+      // hides it again with Show(0). Every other small game historically uses 0=show here, and
+      // the bubble tests depend on that; keep their semantics and special-case these two games.
+      const show = self.dir === '100ceng' || self.dir === 'ball' ? cmd === 1 : cmd === 0
       t.pendingVisible = show
       if (show) {
         if (t.lazy) demand(t)
@@ -715,9 +759,10 @@ interface GameKeyDebug {
   nativeFalse: number
   fallbackDown: number
   playerHidden: boolean | null
+  mouseForwards: number
 }
 const gameKeyDebug: GameKeyDebug = {
-  active: false, cloudFocus: 0, cloudClicks: 0, nativeDown: 0, nativeUp: 0, nativeTrue: 0, nativeFalse: 0, fallbackDown: 0, playerHidden: null,
+  active: false, cloudFocus: 0, cloudClicks: 0, nativeDown: 0, nativeUp: 0, nativeTrue: 0, nativeFalse: 0, fallbackDown: 0, playerHidden: null, mouseForwards: 0,
 }
 try { (window as Window & { __qqpetSmallGameKeys?: GameKeyDebug }).__qqpetSmallGameKeys = gameKeyDebug } catch { /* tests/old shells */ }
 
