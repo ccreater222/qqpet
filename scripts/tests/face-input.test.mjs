@@ -78,6 +78,7 @@ function faceFixture({ stage = 'Egg', sex = 'GG', touch = true, faceClick = 2, p
   const scope = {
     FACE, pokeMoodGain, document, machine, touch, info: app.info, save: app.save,
     stage: () => stage,
+    petStaged: () => false,
     runtimeProjectionMode: projection,
     uiCommands: { pokeFace: key => ({ type: 'pet.pokeFace', payload: { spotId: key } }) },
     dispatchRuntimeCommand: dispatch ?? (() => Promise.resolve(null)),

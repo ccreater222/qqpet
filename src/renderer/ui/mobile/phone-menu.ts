@@ -2,13 +2,17 @@
 // submenus) rebuilt as a bottom action sheet at 1 CSS px = 1 dp. It reuses the
 // exact item tree from menu.ts; phone-menu-model.ts owns grouping and inline
 // expansion, this file only projects it to the sheet's DOM.
+//
+// 顶部新增「宠物舞台」：sheet 打开后把真实 #pet 搬进滚动内容的第一块放大显示，
+// 点位负责逗宠；往下滚会随列表滚走。舞台高度与几何见 pet-stage.ts。
 import { doctor } from '../../pet/items'
-import { avatar, info, runtimeProjectionMode, save } from '../../pet/store'
+import { machine } from '../../pet/pet'
+import { edgeSide, info, onInfoChange, runtimeProjectionMode, save } from '../../pet/store'
 import { openChat } from '../chat'
 import { openGoods, openStudyPanel, openWorkPanel } from '../control'
 import { div, img } from '../dom'
 import { openEmail } from '../email'
-import { showFacePoints } from '../face'
+import { clearFacePoints, showFacePoints } from '../face'
 import { sendLetter } from '../lan-visit'
 import { closeMenu, menuItems, restNow, type MenuItem } from '../menu'
 import { openPetInfo } from '../petinfo'
@@ -25,11 +29,21 @@ import {
   type MenuSectionId,
   type MenuView,
 } from './phone-menu-model'
+import { openPetStage, type PetStageHandle } from './pet-stage'
 import { openSheet, type SheetHandle } from './sheet'
 import './menu-phone.css'
 
 /** The open phone menu, so a second request replaces it instead of stacking sheets. */
 let current: SheetHandle | null = null
+
+/**
+ * 菜单头部的三条状态条只在打开时构建一次；逗宠/后台把心情、饥饿、清洁改掉时要立刻重画。
+ * onInfoChange 没有退订接口，所以模块顶层只注册一次：开菜单时换目标，关闭时只清自己那份。
+ */
+let refreshStats: (() => void) | null = null
+onInfoChange((key) => {
+  if (key === 'hunger' || key === 'clean' || key === 'mood') refreshStats?.()
+})
 
 const activate = (row: HTMLElement, onActivate: () => void): void => {
   row.setAttribute('role', 'button')
@@ -70,41 +84,54 @@ function shortcuts(onPick: (id: Shortcut) => void): HTMLElement {
   return div('qp-menu-shortcuts', div('qp-section qp-menu-section-title', '快捷操作'), grid)
 }
 
-function stat(label: string, cls: string, value: number, max: number): HTMLElement {
-  const ratio = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0
-  const fill = div(`qp-menu-stat-fill ${cls}`)
-  fill.style.width = `${Math.round(ratio * 100)}%`
-  const meter = div('qp-menu-stat-track', fill)
-  const cell = div(
-    'qp-menu-stat',
-    div('qp-menu-stat-head', div('qp-menu-stat-label', label), div('qp-menu-stat-value', String(Math.round(value)))),
-    meter,
-  )
-  cell.setAttribute('role', 'img')
-  cell.setAttribute('aria-label', `${label} ${Math.round(value)} / ${max}`)
-  return cell
+interface MenuStat {
+  el: HTMLElement
+  refresh(): void
 }
 
-/** Avatar, name, level and the three care meters; a tap opens the pet's profile. */
-function header(onOpen: () => void): HTMLElement {
+/** 一条状态条；数字/条宽由 refresh() 读最新值，舞台里逗宠后能立刻变。 */
+function stat(label: string, cls: string, read: () => [value: number, max: number]): MenuStat {
+  const fill = div(`qp-menu-stat-fill ${cls}`)
+  const valueEl = div('qp-menu-stat-value')
+  const meter = div('qp-menu-stat-track', fill)
+  const cell = div('qp-menu-stat', div('qp-menu-stat-head', div('qp-menu-stat-label', label), valueEl), meter)
+  cell.setAttribute('role', 'img')
+  const refresh = (): void => {
+    const [value, max] = read()
+    const ratio = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0
+    valueEl.textContent = String(Math.round(value))
+    fill.style.width = `${Math.round(ratio * 100)}%`
+    cell.setAttribute('aria-label', `${label} ${Math.round(value)} / ${max}`)
+  }
+  refresh()
+  return { el: cell, refresh }
+}
+
+interface MenuHeader {
+  el: HTMLElement
+  refresh(): void
+}
+
+/** 昵称、等级和三条状态条；点击进宠物档案。48dp 头像已由顶部宠物舞台代替。 */
+function header(onOpen: () => void): MenuHeader {
   const computed = save.petComputedlInfo
   const who = div(
     'qp-menu-who',
     div('qp-menu-name', info.name),
     div('qp-menu-meta', div('qp-menu-level', `Lv.${computed.level}`), arrow(false)),
   )
-  const stats = div(
-    'qp-menu-stats',
-    stat('饥饿', 'qp-stat-hunger', info.hunger, computed.hungerMax),
-    stat('清洁', 'qp-stat-clean', info.clean, computed.cleanMax),
-    stat('心情', 'qp-stat-mood', info.mood, computed.moodMax),
-  )
-  const head = div('qp-menu-head', img('qp-menu-avatar', avatar()), who, stats)
+  // 上限也从当前的 petComputedlInfo 读，升级/投影变化后不会停在旧值。
+  const stats = [
+    stat('饥饿', 'qp-stat-hunger', () => [info.hunger, save.petComputedlInfo.hungerMax]),
+    stat('清洁', 'qp-stat-clean', () => [info.clean, save.petComputedlInfo.cleanMax]),
+    stat('心情', 'qp-stat-mood', () => [info.mood, save.petComputedlInfo.moodMax]),
+  ]
+  const head = div('qp-menu-head', who, div('qp-menu-stats', ...stats.map((one) => one.el)))
   head.tabIndex = 0
   head.setAttribute('role', 'button')
   head.setAttribute('aria-label', `宠物档案：${info.name} 等级 ${computed.level}`)
   activate(head, onOpen)
-  return head
+  return { el: head, refresh: () => { for (const one of stats) one.refresh() } }
 }
 
 function childRow(item: MenuItem, onPick: (item: MenuItem) => void): HTMLElement {
@@ -211,6 +238,9 @@ function phoneEntries(runtime: boolean): MenuItem[] {
  */
 export function openPhoneMenu(at: { x: number; y: number; pet: boolean }, adopt: () => void): void {
   void at
+  // 轻点宠物会先把桌面热点画出来（showFacePointsAfterClick）；这里先清掉按 187dp 盒子
+  // 算出的点位，等舞台把宠物放大到 300dp 后按新尺寸重新画，避免点位错位。
+  clearFacePoints()
   closeMenu()
   current?.close()
   current = null
@@ -226,25 +256,70 @@ export function openPhoneMenu(at: { x: number; y: number; pet: boolean }, adopt:
   const sections = groupMenuItems(items)
   let view = createMenuView()
   let handle: SheetHandle | null = null
+  let stageHandle: PetStageHandle | null = null
+  let pointWatcher: number | null = null
   let fired = false
+  // 舞台层级 695 高于新开的 sheet（690）：点条目会立刻打开另一个面板，必须在关菜单前
+  // 先释放舞台，否则关闭动画的 180ms 里放大的宠物会压在新面板上面。
+  const releaseStage = (): void => {
+    if (pointWatcher !== null) {
+      clearInterval(pointWatcher)
+      pointWatcher = null
+    }
+    stageHandle?.close()
+    stageHandle = null
+  }
   const pickAndClose = (item: MenuItem): void => {
     if (fired) return
     fired = true
+    releaseStage()
     handle?.close()
     item.run?.()
   }
+  const hasPet = save.havePet && !save.isBury
   const body = div('qp-menu')
-  if (save.havePet && !save.isBury) body.append(header(() => {
-    // The profile must be mounted before the sheet animates away; the sheet's
-    // own close then reveals it instead of leaving a dead tap.
-    openPetInfo()
-    handle?.close()
-  }))
-  if (save.havePet && !save.isBury) {
-    body.append(shortcuts((id) => {
+  let ownRefresh: (() => void) | null = null
+  let stageSlot: HTMLElement | null = null
+  if (hasPet) {
+    // 轻点结束会把贴着屏幕侧边的宠物切到 Hide_left/right（input 的 end 先于菜单打开，而且
+    // 新姿态可能还在 machine 的队列里）：舞台放大的正是这只宠物，剪影放大后只剩一条黑线，
+    // 所以只要位置贴边就主动唤回站姿。edgeSide() 只看位置，能同时盖住已在播和刚排队的躲藏；
+    // 动画结束后的兜底躲边由 store 的 applyEdge() 舞台守卫负责，这里不用重复处理。
+    if (edgeSide() !== null) machine.play({ a: 'normal' })
+    // 舞台是滚动内容的第一块：随列表一起滚走，而不是固定在标题栏下面。
+    stageSlot = div('qp-menu-pet-slot')
+    const stage = div('qp-menu-pet-stage', stageSlot)
+    // 只要互动没关（faceClick=1/2）就给提示；点位本身在舞台里是隐形的。
+    if (save.settings.faceClick !== 0) stage.append(div('qp-menu-pet-hint', '点击宠物逗它'))
+    // 舞台本身只是宠物容器：点空白/宠物身体＝把可点部位重新显示出来；真正的逗宠是 .point 的 click。
+    stage.addEventListener('click', () => {
+      // 正在播 interact（预载/播放）时不补点位；其余情况点身体＝重新显示可点部位，不逗宠。
+      if (document.querySelector('#pet ruffle-player[data-swf*="/interact/"]')) return
+      showFacePoints()
+    })
+    body.append(stage)
+  }
+  if (hasPet) {
+    const head = header(() => {
+      // The profile must be mounted before the sheet animates away; the sheet's
+      // own close then reveals it instead of leaving a dead tap.
+      openPetInfo()
+      releaseStage()
       handle?.close()
-      if (id === 'face') showFacePoints()
-      else openGoods(id)
+    })
+    body.append(head.el)
+    ownRefresh = head.refresh
+  }
+  if (hasPet) {
+    body.append(shortcuts((id) => {
+      if (id === 'face') {
+        // 原地显示可点部位，不关菜单、不直接逗宠；点位自己的 click 才会触发 interact 动画。
+        showFacePoints()
+        return
+      }
+      releaseStage()
+      handle?.close()
+      openGoods(id)
     }))
   }
   for (const entry of sections) body.append(section(entry, () => view, (next) => { view = next }, pickAndClose))
@@ -254,10 +329,26 @@ export function openPhoneMenu(at: { x: number; y: number; pet: boolean }, adopt:
     body,
     cardClass: 'qp-menu-card',
     onClose: () => {
+      // ✕、遮罩、下滑、返回键都汇到 sheet 的 close()，所以舞台在这里兜底释放一次。
+      releaseStage()
+      // 只清自己那份：新菜单可能已在旧 sheet 的关闭动画里接管了 refreshStats。
+      if (refreshStats === ownRefresh) refreshStats = null
       if (current === handle) current = null
     },
   })
   current = handle
+  refreshStats = ownRefresh
+  if (stageSlot) {
+    stageHandle = openPetStage(stageSlot)
+    // 打开时宠物可能还在换装/回站姿（例如贴边唤回），先画一次；之后每 400ms 补一次：
+    // poke 播完会清空 .face 层，showFacePoints 自己按 faceClick/姿势门控决定何时重建。
+    showFacePoints()
+    // interact 片在预载/播放时不能补点位（pose 的切换晚于 SWF 的 data-swf 更新）。
+    const pointsIdle = (): boolean => document.querySelector('#pet ruffle-player[data-swf*="/interact/"]') === null
+    pointWatcher = window.setInterval(() => {
+      if (pointsIdle()) showFacePoints()
+    }, 400)
+  }
   // The panel opens under the finger that tapped the pet, so a second tap would
   // either hit the first row (和我聊天) or the backdrop (and close it again).
   // Ignore the whole layer for the length of the open animation; the tap falls

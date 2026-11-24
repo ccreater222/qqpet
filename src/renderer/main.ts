@@ -2,7 +2,7 @@ import { createPetInput, type PetPointerInput } from './pet/input'
 import { clipAsk, IDLE, note } from './pet/ai'
 import { resumeTask } from './pet/jobs'
 import { machine, speak, startPet, startProjectionPet } from './pet/pet'
-import { applyEdge, info, onInfoChange, onStoreSyncStatus, petSize, save, setInfo, stage, update } from './pet/store'
+import { applyEdge, info, onInfoChange, onStoreSyncStatus, petSize, petStaged, save, setInfo, stage, update } from './pet/store'
 import { RuntimeReadinessBanner } from './pet/readiness'
 import type { DesktopCursor } from '../shared/ipc'
 import { pageZoom, setDesktopSize, viewportSize } from './ui/viewport'
@@ -24,6 +24,8 @@ import { initVoice } from './ui/voice'
 import { resizePetPosition } from '../shared/layout'
 import { bootRenderer, mountLanVisits } from './pet/runtime-boot'
 import { hitCover, type Box } from '../mobile/overlay'
+import { onStageBox, stageBox } from './ui/mobile/pet-stage'
+import type { PetStageBox } from './ui/mobile/pet-stage-model'
 import { applyPhoneClass, phoneUI, safeInset } from './ui/mobile/sizing'
 
 // Phone layout is keyed off the real viewport (1 CSS px = 1 dp, short side < 600dp): mark the body before
@@ -105,7 +107,30 @@ function snapEdge(): 'hideleft' | 'hideright' | null {
 
 let size = petSize()
 let previousViewport = { ...viewportSize(), size }
+
+/** 舞台期间 #pet 的窗口就是舞台盒：尺寸取盒边长，图片按可视区裁掉上下滚出的部分。 */
+function applyStage(box: PetStageBox): void {
+  petEl.style.display = ''
+  petEl.style.left = `${box.left}px`
+  petEl.style.top = `${box.top}px`
+  petEl.style.width = petEl.style.height = `${box.size}px`
+  petEl.style.clipPath = `inset(${box.clipTop}px 0 ${box.clipBottom}px 0)`
+}
+
+/** 舞台会话还在、但整块已滚出 sheet 可视区：只藏视觉层，不碰 info。 */
+function hideStage(): void {
+  petEl.style.display = 'none'
+}
+
 function layout(): void {
+  // 舞台期间 #pet 是菜单顶部的一块视觉层：只按舞台盒摆位置，不写 info.lastX/lastY，
+  // 关闭菜单后由 pet-stage 还原内联样式，宠物回到打开前的位置与大小。
+  if (petStaged()) {
+    const box = stageBox()
+    if (box) applyStage(box)
+    else hideStage()
+    return
+  }
   // A pet that grows keeps its center.
   const shift = dragging ? 0 : (petSize() - size) / 2
   size = petSize()
@@ -120,6 +145,9 @@ function layout(): void {
   const area = viewportSize()
   if (area.width === previousViewport.width && area.height === previousViewport.height) previousViewport.size = size
 }
+
+// 舞台盒变化（滚动、旋转、入场动画）只需要重跑一次布局；注册一次即可。
+onStageBox(() => layout())
 
 if (info.lastX === -1 && info.lastY === -1) {
   setInfo('lastX', (innerWidth - size) / 2)
@@ -187,7 +215,12 @@ onInfoChange((key) => {
 const cursor = { x: 0, y: 0 }
 window.API = {
   GetCursorPosition: () => `${cursor.x},${cursor.y},0`,
-  GetWindowRect: () => `${info.lastX},${info.lastY},${size},${size}`,
+  // 舞台期间 SWF 的「窗口」就是舞台盒；滚出可视区时视觉层已隐藏，沿用一个不会
+  // 让 SWF 算出非法坐标的盒子（此时没有可见像素，只有动作内部在量它）。
+  GetWindowRect: () => {
+    const box = stageBox()
+    return box ? `${box.left},${box.top},${box.size},${box.size}` : `${info.lastX},${info.lastY},${size},${size}`
+  },
   // No PetEden.ini: every key reads as its default, as the Windows call does for a missing file.
   GetPrivateProfileString: (_section, _key, fallback) => fallback,
   // Release positioning and flings belong to the host. An outgoing movie may
@@ -207,6 +240,8 @@ const MENU_LEAVE_MS = 300
 let menuLeave = 0
 /** Peek movies leave most of the pet box transparent (#74). */
 function petHitBoxes(): Box[] {
+  // 舞台期间宠物只是 sheet 上方的视觉层：触控交给菜单，不能把舞台像素当成宠物命中区。
+  if (petStaged()) return []
   if (petEl.hidden || save.settings.hidden) return []
   if (machine.pose.a !== 'hideleft' && machine.pose.a !== 'hideright') {
     return [{ left: info.lastX, top: info.lastY, right: info.lastX + size, bottom: info.lastY + size }]
@@ -220,6 +255,9 @@ const overPet = (x: number, y: number): boolean => petHitBoxes().some((r) => x >
  * `petHitBoxes` keeps the whole box for a standing pet on purpose (desktop hover needs it); the touch region cannot.
  */
 function visiblePetBoxes(): Box[] {
+  // 舞台期间宠物由 sheet 的舞台容器接收点击；50ms 循环若上报舞台像素，原生触控区会
+  // 盖住菜单行（而且舞台滚出可视区后那里根本没有像素），因此这里保持空。
+  if (petStaged()) return []
   if (petEl.hidden || save.settings.hidden) return []
   const boxes: Box[] = []
   // An equipped scene is a background image on #pet > .petBg and covers the whole pet box. Older builds put it on #pet.
@@ -363,6 +401,8 @@ const petInput = createPetInput({
   cancelFrame: cancelAnimationFrame,
   position: () => ({ x: info.lastX, y: info.lastY, size }),
   begin: () => {
+    // 舞台期间 #pet 是视觉层，不属于宠物本体：不关菜单、不清热点、不接管拖动。
+    if (petStaged()) return
     clearFacePoints()
     closeMenu()
     // The phone's entry point is the bottom action panel; the floating icon bar is desktop-only.
@@ -373,18 +413,24 @@ const petInput = createPetInput({
     dragging = on
     if (!on) { dragLifted = false; releaseDomInput() }
   },
-  hold: (x, y) => openMenu({ x, y, pet: true }, startAdoption),
+  hold: (x, y) => {
+    // 长按舞台不是「打开菜单」：菜单已经开着，这一层由 sheet 自己处理。
+    if (petStaged()) return
+    openMenu({ x, y, pet: true }, startAdoption)
+  },
   // A phone click (no drag, no long press) opens the menu: a thumb has no hover and the desktop's face
   // hotspots are not discoverable. It opens one task later on purpose: the tap's own click is hit-tested
   // after pointerup, so a panel built right here would receive that click on whichever row is under the
   // finger (observed on Android). Letting the click land on the pet first keeps menu rows inert.
   tap: (x, y) => {
-    if (!phoneMode()) return
+    // 舞台期间的轻点由舞台容器的 click 处理（逗宠），不能重新打开/替换菜单。
+    if (!phoneMode() || petStaged()) return
     // After the click, not during pointerup: the click the browser still dispatches would
     // otherwise land on the row the freshly opened sheet puts under the finger.
     setTimeout(() => openMenu({ x, y, pet: true }, startAdoption))
   },
   lift: (s, align) => {
+    if (petStaged()) return null
     dragLifted = true
     if (stage() === 'Adult') {
       // Hold the upper-right rim of the head, so the finger lifts it from the side.
@@ -397,11 +443,14 @@ const petInput = createPetInput({
     return null
   },
   move: (x, y, lifted) => {
+    if (petStaged()) return
     setInfo('lastX', x)
     setInfo('lastY', y)
     if (!lifted) clampOnScreen()
   },
   end: (lifted, vx, vy, cancelled) => {
+    // 舞台期间不触发贴边/隐藏/热点复位：宠物位置只由舞台盒决定，关闭时原样恢复。
+    if (petStaged()) return
     if (releaseDiudiule(cancelled ? false : lifted, vx, vy)) return scheduleHide()
     const edge = snapEdge()
     if (edge && !lifted && !cancelled && machine.pose.a === edge) {

@@ -4,7 +4,7 @@
  * rows 56, inline children 48, body text 15, section labels 13.
  */
 
-/* ---- card and header ---------------------------------------------------- */
+/* ---- card, pet stage and header ----------------------------------------- */
 
 body.qp-phone .qp-menu-card {
   width: 100%;
@@ -24,10 +24,93 @@ body.qp-phone .qp-menu {
   flex-direction: column;
   min-height: 0;
 }
+/*
+ * 宠物舞台：真实 #pet 由 main.ts 按舞台盒摆在它上面（不在本容器的 DOM 子树里），
+ * 这里只负责占位、画背景、接收点击。高度与几何模型配合：412×892 上 30vh ≈ 268dp，
+ * 宠物盒按宽度 0.82 取到 300dp 上限；盒顶允许向上溢出 slot，溢出的都是角色上方的透明边距。
+ */
+body.qp-phone .qp-menu-pet-stage {
+  position: relative;
+  flex: none;
+  height: clamp(240px, 30vh, 320px);
+  background:
+    radial-gradient(72% 64% at 50% 78%, rgba(241, 149, 29, 0.22), rgba(241, 149, 29, 0) 72%),
+    linear-gradient(180deg, rgba(253, 247, 234, 0) 40%, rgba(253, 247, 234, 0.92) 74%, var(--qp-card) 100%);
+  border-bottom: 1px solid var(--qp-line);
+  touch-action: manipulation;
+}
+/* 地面阴影：给站姿一个落点，舞台下半屏不再是死白。 */
+body.qp-phone .qp-menu-pet-stage::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  width: 55%;
+  height: 18px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(0, 0, 0, 0.16), transparent);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+/* slot 铺满整个舞台：hint 用绝对定位不占高度，宠物盒按 slot 宽取尺寸并可向上溢出。 */
+body.qp-phone .qp-menu-pet-slot {
+  position: absolute;
+  inset: 0;
+}
+body.qp-phone .qp-menu-pet-hint {
+  position: absolute;
+  top: 8px;
+  right: 0;
+  left: 0;
+  color: var(--qp-ink-soft);
+  font-size: 13px;
+  line-height: 1.2;
+  text-align: center;
+  opacity: 0.7;
+  pointer-events: none;
+}
+/*
+ * 舞台期间 #pet 高于 sheet(690)、低于 .box/.modal(700)。pointer-events:none 必须压到
+ * 播放器后代：Ruffle 每次换动画都会给可见播放器内联 pointer-events:auto；舞台里只有
+ * .point 可点，其余像素一律让位给滚动与舞台层。
+ */
+body.qp-phone #pet.qp-pet-stage {
+  z-index: 695;
+  pointer-events: none;
+  /* 与 sheet 的 180ms 关闭动画（qp-fade-out，同样 ease-in）同步；打开时 qp-sheet-open 已在，不会淡入。 */
+  transition: opacity 0.18s ease-in;
+}
+/* 菜单开始关闭时 qp-sheet-open 立刻被摘掉：让放大宠物随面板一起淡出，
+   180ms 后 pet-stage 才还原内联样式，避免它悬在淡出的面板上。 */
+body.qp-phone:not(.qp-sheet-open) #pet.qp-pet-stage {
+  opacity: 0;
+}
+body.qp-phone #pet.qp-pet-stage * {
+  pointer-events: none !important;
+}
+/*
+ * 舞台期间点位有 36dp 命中区（16dp 盒 + ::after 外扩 10dp），但视觉上完全隐藏：
+ * 用户只看到宠物，手指仍能点到原来的部位。36dp 是上限：Egg 点位纵向间距 30–57dp，
+ * 再大会让相邻点位误触。background/animation 要压掉 `.faceHint .point` 的 click.svg 与脉冲。
+ */
+body.qp-phone #pet.qp-pet-stage .point {
+  width: 16px;
+  height: 16px;
+  pointer-events: auto !important;
+  background: none !important;
+  animation: none;
+  box-shadow: none;
+}
+body.qp-phone #pet.qp-pet-stage .point::after {
+  content: '';
+  position: absolute;
+  inset: -10px;
+  border-radius: 50%;
+}
 body.qp-phone .qp-menu-head {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  gap: 8px 12px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
   flex: none;
   align-items: center;
   padding: 6px 20px 14px;
@@ -36,12 +119,6 @@ body.qp-phone .qp-menu-head {
 }
 body.qp-phone .qp-menu-head:active {
   background: rgba(241, 149, 29, 0.16);
-}
-body.qp-phone .qp-menu-avatar {
-  width: 48px;
-  height: 48px;
-  object-fit: contain;
-  image-rendering: pixelated;
 }
 body.qp-phone .qp-menu-who {
   min-width: 0;
