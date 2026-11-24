@@ -1,8 +1,8 @@
 # 手机 UI 层（Android 1 CSS px = 1 dp）
 
-> 结论：Android 手机宿主以 `initial-scale=1` 把页面按 1 CSS px = 1 dp 布局，渲染层用 `phoneUI()` 判定后给 `body` 挂 `qp-phone`；dp 尺寸体系、底部动作菜单、通用 sheet、手机商城和触摸手势全部只在该作用域生效，桌面、平板和旧壳继续走原有桌面布局。本轮把适配面从 7 个扩到全页面：42 个交互面复核后，领养、游戏大厅、签到、任务、农场、企鹅岛、旅行、相册、邮箱、宠物档案、考试与结果弹窗都改为 dp 重排（sheet、行、≥44 dp 目标），手机菜单补齐工具/互动入口与玩具瓦片；`box.ts` 的 frame 保持自然宽度，宽画布只在确实无法重排时才整体缩放。明确剩余缺口是社区 SWF（建议隐藏入口）、密室（入口与手柄遮挡）、钓鱼 SWF 内部控件未验证、平板与 iOS 未真机回归。
+> 结论：Android 手机宿主以 `initial-scale=1` 把页面按 1 CSS px = 1 dp 布局，渲染层用 `phoneUI()` 判定后给 `body` 挂 `qp-phone`；dp 尺寸体系、底部动作菜单、通用 sheet、手机商城和触摸手势全部只在该作用域生效，桌面、平板和旧壳继续走原有桌面布局。本轮把适配面从 7 个扩到全页面：42 个交互面复核后，领养、游戏大厅、签到、任务、农场、企鹅岛、旅行、相册、邮箱、宠物档案、考试与结果弹窗都改为 dp 重排（sheet、行、≥44 dp 目标），手机菜单补齐工具/互动入口与玩具瓦片；并在菜单顶部加了**宠物舞台**——把真实宠物放大搬进滚动内容的第一块，沿用原版的部位热点逗宠（点特定部位播对应动画），下滚随列表滚走、关闭回原位（§4.0）。`box.ts` 的 frame 保持自然宽度，宽画布只在确实无法重排时才整体缩放。明确剩余缺口是社区 SWF（建议隐藏入口）、密室（入口与手柄遮挡）、钓鱼 SWF 内部控件未验证、平板与 iOS 未真机回归。
 
-代码位置约定：`main.ts` = `src/renderer/main.ts`，`input.ts` = `src/renderer/pet/input.ts`，`sizing.ts`/`sheet.ts`/`back.ts`/`phone-menu*.ts`/`phone-shop*.ts`/`phone-games*.ts`/`phone-signin.ts`/`phone-task.ts`/`phone-email.ts`/`phone-petinfo.ts`/`phone-pages-model.ts`/`mobile.css`/`menu-phone.css`/`phone-shop.css`/`phone-games.css` = `src/renderer/ui/mobile/` 下同名文件，`phone-panels.css`/`phone-pages.css` = `src/renderer/ui/css/` 下同名文件，`box.ts`/`menu.ts`/`control.ts`/`state.ts`/`shop.ts`/`adopt.ts`/`farm.ts`/`travel.ts`/`album.ts`/`signin.ts`/`task.ts`/`email.ts`/`petinfo.ts`/`games.ts`/`island-runtime.ts` = `src/renderer/ui/` 下同名文件，`AssetClient.kt`/`PetService.kt` = `android/app/src/main/java/net/ankio/qqpet/` 下同名文件。
+代码位置约定：`main.ts` = `src/renderer/main.ts`，`input.ts` = `src/renderer/pet/input.ts`，`sizing.ts`/`sheet.ts`/`back.ts`/`pet-stage.ts`/`pet-stage-model.ts`/`phone-menu*.ts`/`phone-shop*.ts`/`phone-games*.ts`/`phone-signin.ts`/`phone-task.ts`/`phone-email.ts`/`phone-petinfo.ts`/`phone-pages-model.ts`/`mobile.css`/`menu-phone.css`/`phone-shop.css`/`phone-games.css` = `src/renderer/ui/mobile/` 下同名文件，`phone-panels.css`/`phone-pages.css` = `src/renderer/ui/css/` 下同名文件，`box.ts`/`menu.ts`/`control.ts`/`state.ts`/`shop.ts`/`adopt.ts`/`farm.ts`/`travel.ts`/`album.ts`/`signin.ts`/`task.ts`/`email.ts`/`petinfo.ts`/`games.ts`/`island-runtime.ts`/`face.ts` = `src/renderer/ui/` 下同名文件，`store.ts`/`pet.ts` = `src/renderer/pet/` 下同名文件，`AssetClient.kt`/`PetService.kt` = `android/app/src/main/java/net/ankio/qqpet/` 下同名文件。
 
 ## 1. 设计空间与判定
 
@@ -54,7 +54,7 @@ scale = max(1, min(displayMetrics.widthPixels, heightPixels) / density / 480)
 
 | Surface | 关键尺寸 | 样式位置 |
 | --- | --- | --- |
-| 手机菜单 | 底部全宽卡片（上限 560）；行 `min-height:56`、字号 15；子项 48；5 个快捷瓦片高 ≥72、宽 ≥48；头部头像 48 | `menu-phone.css:9-18,116-145,164-169` |
+| 手机菜单 | 底部全宽卡片（上限 560）；顶部宠物舞台 `clamp(240, 30vh, 320)`（412×892 上 268）、宠物盒 300 dp；行 `min-height:56`、字号 15；子项 48；5 个快捷瓦片高 ≥72、宽 ≥48；身份行无头像 | `menu-phone.css:9-18,32-84,167-170` |
 | 喂养/背包 sheet | 行 ≥64；图标 40；名称 15、说明 13；分页按钮 44 | `phone-panels.css:537-645` |
 | 宠物状态 | 卡片 `min(360px, 92vw)`，字号 14；关闭/档案/开关 44；数值条 seeNum 13 带描边 | `phone-panels.css:155-289,562-575` |
 | 通用对话框 | `min(340px, 92vw)`、正文 15；主按钮 48、关闭 44、数量步进 44 | `phone-panels.css:39-153` |
@@ -79,16 +79,17 @@ scale = max(1, min(displayMetrics.widthPixels, heightPixels) / density / 480)
 
 | 手势 | 判据 | 动作 |
 | --- | --- | --- |
-| 轻点 | 未拖动、未长按、未取消，且按下到抬起 < 300 ms（`TAP_MAX_MS`，`input.ts:38`）；抬起在 `input.ts:57-62` 触发 `tap` | 手机打开底部动作菜单；桌面回调直接 return，行为不变 |
+| 轻点 | 未拖动、未长按、未取消，且按下到抬起 < 300 ms（`TAP_MAX_MS`，`input.ts:38`）；抬起在 `input.ts:57-62` 触发 `tap` | 手机打开底部动作菜单；桌面回调直接 return，行为不变；菜单打开期间宠物是舞台视觉层，轻点落在舞台容器上只会重新显示可点部位（真正逗宠是点 `.point` 部位） |
 | 拖动 | 位移超过 8 px（`input.ts:99`） | 搬动宠物，松手不开菜单 |
 | 长按 | 500 ms（`HOLD_MS`，`main.ts:81`） | 打开同一份菜单，兼容旧习惯 |
 | 面部热点 | 原有 `.point` 点击（`src/renderer/ui/face.ts`） | 保留，轻点宠物不再弹浮动图标工具栏 |
 
-手机上的组合回调在 `main.ts:316-337`：
+手机上的组合回调在 `main.ts:398-465`：
 
-- `begin` 在手机不再调用 `showControl()`（`main.ts:320`），浮动图标条是桌面专属入口。
-- `tap` 只对手机生效，并延迟一个 task 再打开菜单（`main.ts:332-337`）；Android 在 `pointerup` 之后还会命中一次 `click`，同步弹面板会让该 click 落在刚出现的面板行上，延迟后 click 先落在宠物上。
-- `hold` 仍然直接打开菜单（`main.ts:327`）；拖动/长按都不会重复触发轻点。
+- `begin` 在手机不再调用 `showControl()`（`main.ts:409`），浮动图标条是桌面专属入口；`petStaged()` 为 true 时整组回调直接退出（`main.ts:405-455`）。
+- `tap` 只对手机生效，并延迟一个 task 再打开菜单（`main.ts:425-431`）；Android 在 `pointerup` 之后还会命中一次 `click`，同步弹面板会让该 click 落在刚出现的面板行上，延迟后 click 先落在宠物上。
+- `hold` 仍然直接打开菜单（`main.ts:416-420`）；拖动/长按都不会重复触发轻点。
+- 菜单打开后轻点落在 `.qp-menu-pet-stage` 上只会重新显示可点部位；逗宠是点 `.point` 部位（§4.0），两者都不会重新打开或替换菜单。
 
 ### 3.2 位置与安全区
 
@@ -126,25 +127,49 @@ sheet 平铺背景被看到；位置移动不隐藏，300ms 看门狗防 alpha �
 
 `openMenu()` 在 `phoneUI()` 命中时转到 `openPhoneMenu()`（`menu.ts:226-229`）；桌面、平板和旧壳仍走原来的 110 px 弹出菜单与原生托盘菜单，桌面分支没有改动。
 
-`openPhoneMenu()`（`phone-menu.ts:212-261`）复用 `openSheet()`，行为约定：
+`openPhoneMenu()`（`phone-menu.ts:239-340`）复用 `openSheet()`，行为约定：
 
-- 单实例：再次打开先关闭上一份（`phone-menu.ts:215-216`），不会叠多层。
-- 内容来自 `menuItems(adopt)`；runtime 投影模式下菜单项本身没有“和我聊天”，手机层在“互动”组补一项（`phone-menu.ts:221-225`），不改共享的 `runtimeMenuItems()`。
+- 单实例：再次打开先关闭上一份（`phone-menu.ts:239-244`），不会叠多层。
+- 内容来自 `menuItems(adopt)`；runtime 投影模式下菜单项本身没有“和我聊天”，手机层在“互动”组补一项（`phone-menu.ts:251-255`），不改共享的 `runtimeMenuItems()`。
 - 分组由纯模型 `groupMenuItems()` 完成：互动 / 工具 / 养成 / 设置 / 其他，危险项统一抽到最后的“危险操作”（`phone-menu-model.ts:41-84`），颜色由 `.qp-danger` 控制。
-- 父项在当前面板内展开子项，不向侧面飞（`phone-menu-model.ts:104-126`；`phone-menu.ts:118-152`），子行 48 dp。
-- 头部显示头像、昵称、等级和饥饿/清洁/心情三条微条，点击进宠物档案（`phone-menu.ts:88-108`）。
-- 5 个快捷瓦片：喂养、清洁、吃药、逗它、玩具，高 ≥72 dp、宽 ≥48 dp（412 dp 上约 68），5 列排布（`phone-menu.ts:47-71`；`menu-phone.css:116-145`）。
-- 点选条目先关 sheet 再执行 `item.run()`，并用 `fired` 防重入（`phone-menu.ts:229-235`）；关闭动画期间不会重复触发。
-- 无宠物/已埋葬/已死亡时沿用 `menuItems()` 返回的受限项，不丢“领养/重新领养/退出宠物”等危险入口。
+- 父项在当前面板内展开子项，不向侧面飞（`phone-menu-model.ts:104-126`；`phone-menu.ts:136-173`），子行 48 dp。
+- 顶部是**宠物舞台**（`phone-menu.ts:275-292`；`pet-stage.ts`）：`openSheet()` 返回后把真实 `#pet` 搬进 `.qp-menu-pet-stage` 放大显示，打开即按原版热点逻辑铺好 `.point` 热区（**画面上不可见**，只有提示「点击宠物逗它」）；点具体部位触发对应 interact 动画，点身体其他位置只是重新铺热区（§4.0）。舞台是滚动内容的第一块，往下滚随列表一起滚走；48 dp 头像列已删除，身份由舞台承担。
+- 身份行显示昵称、等级和饥饿/清洁/心情三条微条，点击进宠物档案（`phone-menu.ts:116-142`）；三条微条在 `onInfoChange` 的 hunger/clean/mood 变化时即时重画（`phone-menu.ts:39-46,93-114`），逗宠后数字与条宽立刻变。
+- 5 个快捷瓦片：喂养、清洁、吃药、逗它、玩具，高 ≥72 dp、宽 ≥48 dp（412 dp 上约 68），5 列排布（`phone-menu.ts:68-84`；`menu-phone.css:167-170`）；「逗它」不关菜单，只重新显示可点部位（与点宠物身体等价）。
+- 点选条目先关 sheet 再执行 `item.run()`，并用 `fired` 防重入（`phone-menu.ts:267-274`）；开新面板前先 `releaseStage()`，否则舞台 695 会在关闭动画的 180 ms 里压在新 sheet(690) 上。
+- 无宠物/已埋葬/已死亡时沿用 `menuItems()` 返回的受限项，不丢“领养/重新领养/退出宠物”等危险入口（舞台与身份行只在有宠物且未埋葬时渲染）。
+
+### 4.0 宠物舞台（顶部放大宠物）
+
+舞台让手机菜单里能直接逗宠，而不必回到桌面宠物本体。实现三件套：
+
+| 文件 | 职责 |
+| --- | --- |
+| `pet-stage-model.ts` | 纯几何：`petStageBox(slot, view, maxSize?)` 由 slot 矩形与 sheet body 可视区算出宠物盒（水平居中、底距 slot 底 8 dp、`size = min(0.82 × slot 宽, 300)`）、`clipTop/clipBottom`，完全滚出返回 `null` |
+| `pet-stage.ts` | DOM 控制器：`scroll`(passive)/`resize`/`orientationchange` + sheet 卡片 `animationend` 后按帧重算，通知订阅者；关闭时还原 `#pet` 的 `left/top/width/height/clipPath/display` |
+| `main.ts:112-152` | `layout()` 在 `petStaged()` 时只写舞台盒（不写 `info.lastX/lastY`），`clip-path` 裁到 body 可视区；整只滚出时 `display:none` |
+
+不变量：
+
+- 舞台期间 `#pet` 是菜单的**视觉层**：`z-index: 695`（高于 sheet 690、低于 `.box/.modal` 700）、`pointer-events: none`（含 Ruffle 会内联 `pointer-events:auto` 的播放器后代，`menu-phone.css:77-130`）；唯一例外是 `.point` 部位：舞台上**不可见**（`background/animation/box-shadow` 全部关掉，无圆圈、无脉冲），16 dp 盒 + `::after` 外扩 10 dp 形成约 36 dp 透明命中区（Egg 点位纵向间距 30–57 dp，再大会相邻误触）。
+- `petHitBoxes()`/`visiblePetBoxes()` 返回 `[]`（`main.ts:244,260`）：舞台像素不上报为原生触控区，触点交给 sheet 全页矩形；`window.API.GetWindowRect` 返回舞台盒（`main.ts:221-226`）。
+- 位置/尺寸/姿态不进存档：关闭菜单后 `#pet` 回到打开前的内联盒，`info.lastX/lastY` 不变（实测 224.311/451 关闭后逐项一致）。
+- 舞台期间 `petStaged()` 为 true（`store.ts:284-290`）：`applyEdge()` 返回 `null`（贴边宠物不会在动画兜底时变成躲藏剪影）、`idle()` 与走路不跑（`pet.ts:183-190,254-260`）、`createPetInput` 的 begin/hold/tap/lift/move/end 全部退出（`main.ts:405-455`）。
+- 互动保持桌面原版热点逻辑，不做「点哪都能逗」：`showFacePoints()` 在 `faceClick`（0 关 / 1 开不可见 / 2 开且显示标记，默认 2；**舞台里无论 1 还是 2 都不显示标记**）为真且 `machine.pose.a === 'normal'` 时按 `FACE[sex][stage]`（Adult 再按心情带）铺 `.point`；每个点位的 click 走原有 `poke(key, dir, s, e)` → `pet/Action/<sex>/<stage>[/<band>]/interact/<key><n>.swf`（动画 + 心情/成就；投影模式 `dispatchRuntimeCommand(uiCommands.pokeFace)`），没有任何宿主判断。poke 播完 `.face` 层被清空后，菜单开着时 400 ms watcher 会在宠物回到站姿时把点位补回来（`face.ts` 的 `lastPoke` 300 ms 守卫 + interact SWF 存在时不补，避免动画期间闪现）。
+- 生命周期：✕ / 遮罩 / 下滑 / 返回键都汇到 `openSheet()` 的 `close()`，`onClose` 里释放舞台（`phone-menu.ts:317-328`），不会留下 `display:none` 的宠物。`close()` 一开始就摘掉 `body.qp-sheet-open`，舞台宠物的 `opacity` 因此按同一段 0.18 s 曲线跟着 sheet 淡出（`menu-phone.css:77-86`），不会出现「面板快透明、放大的宠物仍不透明」的 180 ms 观感；实测 92 ms 时两者不透明度同为 0.887。
 
 失败模式：
 
 | 现象 | 原因 | 定位 |
 | --- | --- | --- |
 | 手机仍出现 110 px 弹出菜单（子菜单向侧面展开） | `phoneUI()` 未命中（旧壳仍 480、非触摸、平板） | `sizing.ts:20-29`；用 `probe.mjs eval` 读 `visualViewport.scale` 与 `clientWidth` |
-| 点菜单项没有反应 | 条目没有 `run` 或已被 `fired` 拦截 | `phone-menu.ts:230-235`；检查 `menuItems()` 树 |
-| 菜单行落点错位 | 轻点回调没有延迟，面板吃到随后的 click | `main.ts:332-337` |
-| 某功能在手机上找不到 | 只加了桌面菜单项，没加到 `phoneEntries()`/`SHORTCUTS` | §4.1；`phone-menu.ts:183-205,54-60` |
+| 点菜单项没有反应 | 条目没有 `run` 或已被 `fired` 拦截 | `phone-menu.ts:267-274`；检查 `menuItems()` 树 |
+| 菜单行落点错位 | 轻点回调没有延迟，面板吃到随后的 click | `main.ts:433-441` |
+| 某功能在手机上找不到 | 只加了桌面菜单项，没加到 `phoneEntries()`/`SHORTCUTS` | §4.1；`phone-menu.ts:210-231,68-84` |
+| 舞台里的宠物是一条贴边剪影 | 贴边位置让 `applyEdge()` 在动作结束时路由 `Hide_left/right` | `store.ts:299-305` 的舞台守卫；不要在舞台期间改 `info.lastX` |
+| 舞台里又出现脉冲圆点 | `.faceHint .point` 的标记/动画没被舞台规则压掉 | `menu-phone.css` 的 `#pet.qp-pet-stage .point` 必须含 `background: none !important` 与 `animation: none` |
+| 舞台滚出后宠物压在标题栏上 | 只挪 `#pet` 没按 body 可视区裁剪 | `pet-stage-model.ts` 的 `clipTop/clipBottom`、`main.ts:112-119` 的 `clipPath` |
+| 点舞台没反应 / 点位点不到 | ① `settings.faceClick = 0` 关闭了点位；② 宠物不在站姿（`pose !== normal`）；③ `.point` 被 `#pet.qp-pet-stage *` 的 `pointer-events:none` 压住 | `face.ts` 的 `showFacePoints` 门控；`menu-phone.css:110-120` 的 `.point` 规则必须比 `#pet.qp-pet-stage *` 更具体 |
 
 ### 4.1 入口对等（删入口必须同时补入口）
 
@@ -253,7 +278,7 @@ v0.10.0 把手机入口从浮动图标工具栏换成底部菜单后，`main.ts:
 | 说话气泡 | 可用 P2 | 261×183、字 ≈13.7 dp；按钮在 SWF 内不可控 | 接受 |
 | 探访（朋友来玩） | OK | 358×239 1:1、15.5 dp | 无需处理 |
 | LAN 回话框 | 需优化 P2 | 96×36 按钮 | 下版（Android 无 LAN 桥，当前不可触发） |
-| 手机菜单/状态/喂养/商城/聊天/设置 | OK | 上一版已重排 | 保持（本轮真机：18 个顶级行 min 56、5 个瓦片 68×72） |
+| 手机菜单/状态/喂养/商城/聊天/设置 | OK | 上一版已重排 | 保持（本轮真机：18 个顶级行 min 56、5 个瓦片 68×72）；菜单顶部新增宠物舞台（268 dp、宠物盒 300 dp），点击宠物身上的部位逗宠（无可见点位，提示「点击宠物逗它」）、下滚随内容滚走，关闭回原位（§4.0） |
 | 进度条数值（seeNum） | 需优化 P2 | 11 px 压在填充条上 | 已修：13 px + 深色描边（`phone-panels.css:562-575`） |
 | 设置标签条 / 商城分类条 | 需优化 | 横向滚动把「工具/AI/关于」「属性/装扮」藏在屏外 | 已修：手机改为换行，全部可见（`phone-panels.css:336-535`、`phone-shop.css`） |
 | firstrun（首次会话） | 不适用 | Android 构建不含 firstrun.html，真正的首屏是领养弹窗 | — |
@@ -341,6 +366,7 @@ adb shell input swipe 900 1800 300 1800 400
 - **改 `setBackHandler`/`__qqpetBack` 契约**：必须同步 `src/android/bridge.ts`、`PetService.kt`、`src/renderer/global.d.ts` 与 `docs/architecture/native-bridge.md` §4.2；漏一端会让返回键静默失效。
 - **改 `box.ts` 的 `flat`、frame 宽度或面板内容宽度**：先满足 §5.3 的契约 1；任何给 `.qp-panel`/`.boxFrame` 加宽高限制的规则都会让 `flat` 失效，必须改用内容重排。桌面回归要同时打开宽面板确认缩放未变。
 - **改菜单树/入口过滤**：同步 `phoneEntries()`/`SHORTCUTS` 与 `phone-menu.test.mjs`，遵守 §4.1 的“删入口必须同时补入口”；`runtimeMenuItems()` 保持桌面树不变。
+- **改宠物舞台**（`pet-stage.ts`/`pet-stage-model.ts`/`menu-phone.css:32-84`）：同步本文 §4.0 与 `scripts/tests/pet-stage.test.mjs`。舞台盒只由 slot 与 body 可视区决定，**不得**写 `info.lastX/lastY` 或 `petSize()`；改 `store.ts` 的 `petStaged()` 守卫会影响贴边/待机/输入全部路径，必须真机回归“贴边宠物开菜单→点逗→关闭”的完整链路。舞台可见性依赖 `#pet` 的 `z-index:695` 与 `pointer-events:none`，改动 sheet/box 的层级或 Ruffle 的 `pointer-events` 内联策略都要重测点击与滚动。
 - **桌面回归**：手机 surface 规则都以 `body.qp-phone` 为作用域（base sheet 原语只在手机分支创建），桌面/平板应保持原样；改动后跑 `npm run typecheck` 与 `npm run test:compat`，并在桌面上打开菜单、状态、设置、商城确认布局未变。
 
 ## 10. 代码位置到文档的映射
@@ -348,6 +374,8 @@ adb shell input swipe 900 1800 300 1800 400
 | 代码位置 | 同步文档 |
 | --- | --- |
 | `src/renderer/ui/mobile/**`、`src/renderer/ui/css/phone-panels.css`、`src/renderer/ui/css/phone-pages.css` | 本文 §2–§6 |
+| 宠物舞台（`src/renderer/ui/mobile/pet-stage.ts`、`pet-stage-model.ts`、`src/renderer/ui/mobile/menu-phone.css`、`src/renderer/ui/mobile/phone-menu.ts`） | 本文 §4.0、§4 失败模式 |
+| 舞台接缝（`src/renderer/main.ts` 的 `layout/applyStage` 与输入守卫、`src/renderer/pet/store.ts` 的 `petStaged/applyEdge`、`src/renderer/pet/pet.ts` 的 idle/走路守卫、`src/renderer/ui/face.ts` 的 `showFacePoints/poke`） | 本文 §4.0 不变量 |
 | 手机分支接入点（`src/renderer/main.ts`、`src/renderer/pet/input.ts`、`src/renderer/ui/menu.ts`、`src/renderer/ui/runtime-menu.ts`、`src/renderer/ui/box.ts`、`src/renderer/ui/control.ts`、`src/renderer/ui/state.ts`、`src/renderer/ui/shop.ts`） | 本文 §3–§5 |
 | 页面手机分支（`adopt.ts`、`farm.ts`、`travel.ts`、`album.ts`、`signin.ts`、`task.ts`、`email.ts`、`petinfo.ts`、`games.ts`、`island-runtime.ts`） | 本文 §5.4、§6 |
 | Android 视口与返回键（`AssetClient.kt`、`PetService.kt`、`src/android/bridge.ts`） | 本文 §1、§5.1、§5.3 与 [原生桥](native-bridge.md) §4.2 |

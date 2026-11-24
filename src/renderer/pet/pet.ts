@@ -37,6 +37,7 @@ import {
   onProjectionApplied,
   onStoreEvent,
   petSize,
+  petStaged,
   playingDesk,
   refreshTray,
   runtimeProjectionMode,
@@ -182,6 +183,11 @@ function stopWalk(): void {
 function startWalkMove(speed: number, until: number): void {
   clearInterval(walkTick)
   walkTick = window.setInterval(() => {
+    // 菜单舞台期间不继续走：舞台里的宠物是视觉层，位置必须停在打开菜单那一刻。
+    if (petStaged()) {
+      stopWalk()
+      return
+    }
     if (machine.pose.a !== 'walk') {
       clearInterval(walkTick)
       walkTick = 0
@@ -248,6 +254,12 @@ export function rest(): boolean {
 
 /** After 20-60 s of standing: walk / play / talk, same timer. Walk only if roam is on. */
 function idle(): void {
+  // 舞台期间（手机菜单开着）宠物正被放大摆在菜单顶部：走/玩/说会跑到菜单外，必须先停。
+  // 重新排下一次而不是让 idle 链断掉，菜单关闭后 20-60s 内自然恢复。
+  if (petStaged()) {
+    scheduleIdle()
+    return
+  }
   if (save.settings.hidden || window.__qqpetHostPaused || !save.havePet) return
   if (peeking() || playingDesk()) return
   if (maybeLead()) return

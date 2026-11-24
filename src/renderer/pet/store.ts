@@ -281,6 +281,13 @@ export const petSize = (): number =>
 /** How close to a side counts as peeking. Hide_left/right SWFs assume the box sits on that edge. */
 export const EDGE_NEAR = 36
 
+let staged = false
+/** 手机菜单把宠物放大进舞台期间为 true：宠物只是菜单的视觉层，不按屏幕位置躲边。 */
+export const petStaged = (): boolean => staged
+export function setPetStaged(v: boolean): void {
+  staged = v
+}
+
 export function edgeSide(): 'hideleft' | 'hideright' | null {
   const s = petSize()
   if (info.lastX <= EDGE_NEAR) return 'hideleft'
@@ -290,6 +297,8 @@ export function edgeSide(): 'hideleft' | 'hideright' | null {
 
 /** Snaps X onto the side it is already on. */
 export function applyEdge(): 'hideleft' | 'hideright' | null {
+  // 舞台期间不按屏幕位置躲边：放大的宠物只是菜单的视觉层，任何兜底动作都必须是站姿。
+  if (staged) return null
   const edge = edgeSide()
   if (edge === 'hideleft') setInfo('lastX', 0)
   else if (edge === 'hideright') setInfo('lastX', viewportSize().width - petSize())

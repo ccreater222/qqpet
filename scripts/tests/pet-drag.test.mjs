@@ -162,6 +162,10 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
     clearFacePoints: noop,
     showFacePoints: noop,
     showFacePointsAfterClick: noop,
+    // 手机菜单顶部的宠物舞台：本 harness 里没有舞台，main.ts 走原来的布局分支。
+    onStageBox: () => () => {},
+    stageBox: () => null,
+    petStaged: () => false,
     catchDiudiule: noop,
     releaseDiudiule: (...args) => { releases.push(args); return false },
     scheduleHide: noop,

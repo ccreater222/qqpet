@@ -5,7 +5,7 @@ import { rand } from '../pet/rand'
 import { pokeMoodGain } from '../pet/mood'
 import { uiCommands } from '../pet/command-map'
 import { commandResultData, dispatchRuntimeCommand } from '../pet/runtime-command'
-import { info, mood, runtimeProjectionMode, save, setInfo, stage, update } from '../pet/store'
+import { info, mood, petStaged, runtimeProjectionMode, save, setInfo, stage, update } from '../pet/store'
 import { addCount } from '../pet/tasks'
 import { touch } from './dom'
 import { floatMood } from './float'
@@ -29,6 +29,7 @@ interface PokeIntent {
 
 const pendingPokes: PokeIntent[] = []
 let sendingPokes = false
+let lastPoke = 0
 
 /** Shows the authoritative outcome for one accepted poke, once. */
 function showPokeResult(result: Awaited<ReturnType<typeof dispatchRuntimeCommand>>): void {
@@ -76,6 +77,7 @@ function enqueuePoke(intent: PokeIntent): void {
  * the animation loadable (and is also correct for an egg/kid's fixed directory).
  */
 function poke(key: string, dir: string, s = 1, e = s): void {
+  lastPoke = Date.now()
   layer.replaceChildren()
   const faceActive: Pose = { a: 'faceActive', opt: { url: `pet/Action/${info.sex}/${dir}/interact/${key}${rand(s, e)}.swf`, opt: {} } }
   if (runtimeProjectionMode) {
@@ -104,7 +106,11 @@ export function setFaceClick(v: 0 | 1 | 2): void {
 document.body.classList.toggle('faceHint', save.settings.faceClick === 2)
 
 export function showFacePoints(): void {
+  // 舞台里 poke 触发后 interact SWF 还在预载时 machine.pose 仍是 normal；这一窗口不能补点位。
+  if (petStaged() && Date.now() - lastPoke < 300) return
   if (!save.settings.faceClick || machine.pose.a !== 'normal') return
+  // 幂等：舞台里 400ms watcher 会反复调用；已有点位就不要重建，否则脉冲动画会被重置。
+  if (layer.childElementCount) return
   const st = stage()
   const band = st === 'Adult' ? mood() : null
   const dir = band === null ? st : `Adult/${band}`
