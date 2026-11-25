@@ -682,6 +682,36 @@ test('a 140x140 base/prompt shell is never promoted to root; every root keeps ex
   }
 })
 
+test('switching to a smaller-budget game keeps the upcoming root shell instead of trimming it away', async () => {
+  const host = paopaoHostFixture()
+  host.play(GUESS)
+  await host.settle()
+  const bases = [
+    ['wnd_name_status_mood', 'status_mood.swf', 140, 20],
+    ['wnd_name_status_count', 'status_count.swf', 60, 25],
+    ['wnd_name_prompt_mood', 'prompt_mood.swf', 180, 90],
+    ['wnd_name_prompt_money', 'prompt_money.swf', 300, 180],
+    ['wnd_name_prompt_text', 'prompt_text.swf', 150, 65],
+    ['wnd_name_prompt_timer', 'prompt_timer.swf', 140, 140],
+  ]
+  for (const [name, swf, width, height] of bases) host.createWindow(name, swf, 316, 580, width, height)
+  await host.settle()
+  assert.equal(host.state().shells.size, 7)
+  const oldRoot = host.state().root
+  const frameCount = host.frames.length
+  host.rootApi.DestroyWindow()
+  await host.settle()
+  assert.equal(host.state().shells.size, 7, 'guess pools all seven shells')
+
+  // rope has the same main_102 root variant but caps at 5; trimming before open() used to evict
+  // the oldest shell first, which is always the root, so rope had to allocate a new root shell.
+  host.play(ROPE)
+  await host.settle()
+  assert.equal(host.state().root, oldRoot, 'rope root must reuse the pooled guess root shell')
+  assert.equal(host.frames.length, frameCount, 'a kept root shell must not allocate a new iframe')
+  assert.equal(quitCount(oldRoot.box), 1, 'the reused root keeps exactly one quit button')
+})
+
 test('a failed SWF load discards the iframe and player instead of leaving an empty window', async () => {
   const host = paopaoHostFixture()
   host.play()

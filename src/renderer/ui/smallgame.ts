@@ -346,7 +346,10 @@ function dropShell(w: Win): void {
  * another game); a live bubble only after the SWF has shown it. A live base/root or an unshown
  * provisional window is never evicted, so a game switch cannot starve the next game's windows.
  */
-function evictOne(): boolean {
+function evictOne(keepRootKey?: string): boolean {
+  // The root is always the oldest shell, so a trim before open() would evict the exact shell the
+  // next game is about to claim. Keep one root shell matching the upcoming root's pool key.
+  const keep = (w: Win): boolean => w.kind === 'root' && w.key === keepRootKey
   const pooledBubbles: Win[] = []
   const pooledOther: Win[] = []
   for (const list of pools.values()) {
@@ -355,17 +358,17 @@ function evictOne(): boolean {
   const byAge = (a: Win, b: Win): number => a.seq - b.seq
   pooledBubbles.sort(byAge)
   pooledOther.sort(byAge)
-  const foreign = pooledOther.filter((w) => w.dir !== dir)
+  const foreign = pooledOther.filter((w) => w.dir !== dir && !keep(w))
   const liveBubbles = [...wins.values()].filter((w) => w.kind === 'bubble' && w.everShown).sort(byAge)
-  const victim = pooledBubbles[0] ?? foreign[0] ?? liveBubbles[0] ?? pooledOther[0]
+  const victim = pooledBubbles[0] ?? foreign[0] ?? liveBubbles[0] ?? pooledOther.find((w) => !keep(w))
   if (!victim) return false
   if (wins.get(victim.name) === victim) wins.delete(victim.name)
   dropShell(victim)
   return true
 }
 
-function trimPool(): void {
-  while (touchHost() && activeShells() > shellCap() && evictOne()) { /* keep trimming */ }
+function trimPool(keepRootKey?: string): void {
+  while (touchHost() && activeShells() > shellCap() && evictOne(keepRootKey)) { /* keep trimming */ }
 }
 
 /**
@@ -1166,8 +1169,11 @@ async function startRuntimeSmallGame(g: SmallGame): Promise<void> {
 function openSmallGame(g: SmallGame): void {
   const st = stage()
   dir = g.dir
-  // A game with a smaller dynamic budget must not inherit the previous game's pool over cap.
-  trimPool()
+  const variant = `1${g.kidOnly || st !== 'Adult' ? 0 : 2}${info.sex === 'GG' ? 2 : 3}`
+  // A game with a smaller dynamic budget must not inherit the previous game's pool over cap, but
+  // the upcoming root's shell must survive the trim: it is the oldest shell and open() is about
+  // to claim it by pool key.
+  trimPool(poolKey(`main_${variant}.swf`, MAIN, MAIN))
   setDeskGame(g.dir)
   const pet = document.getElementById('pet')!
   const r = pet.getBoundingClientRect()
@@ -1176,7 +1182,6 @@ function openSmallGame(g: SmallGame): void {
   // 100ceng moves with the arrow keys.
   window.qqpet.setFocusable(true)
   setNativeGameKeyActive(keyboardKeys().length > 0)
-  const variant = `1${g.kidOnly || st !== 'Adult' ? 0 : 2}${info.sex === 'GG' ? 2 : 3}`
   // A leaked finish() leaves #pet hidden, so its rect is 0×0 and the old formula put the whole
   // game at (-70,-140). Dock it to the viewport instead; the paopao2 clamp keeps it on screen.
   const docked = r.width <= 0 || r.height <= 0
