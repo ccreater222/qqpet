@@ -73,6 +73,7 @@ let legacyV2PresenceError: string | undefined
 const legacyAuthorityDisabled = (): boolean => LOCAL_RUNTIME_V2_FLAG || legacyV2DocumentPresent || legacyV2PresenceError !== undefined
 const capabilities: NonNullable<QQPetApi['capabilities']> = {
   rotatableScreen: true,
+  phoneLayout: true,
   serverMode: false,
   localRepositoryV2: false,
   autoStart: false,

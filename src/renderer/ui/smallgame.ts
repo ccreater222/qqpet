@@ -103,6 +103,8 @@ interface Win {
   pendingVisible: boolean
   /** RemoteCalls that arrived before a lazy prompt's movie was ready. */
   pending: { fn: string; args: unknown[] }[]
+  /** The shell's quit button; only root shells own one, and a reused shell must keep exactly one. */
+  quit: HTMLElement | null
 }
 
 type Fn = (...a: never[]) => unknown
@@ -344,7 +346,10 @@ function dropShell(w: Win): void {
  * another game); a live bubble only after the SWF has shown it. A live base/root or an unshown
  * provisional window is never evicted, so a game switch cannot starve the next game's windows.
  */
-function evictOne(): boolean {
+function evictOne(keepRootKey?: string): boolean {
+  // The root is always the oldest shell, so a trim before open() would evict the exact shell the
+  // next game is about to claim. Keep one root shell matching the upcoming root's pool key.
+  const keep = (w: Win): boolean => w.kind === 'root' && w.key === keepRootKey
   const pooledBubbles: Win[] = []
   const pooledOther: Win[] = []
   for (const list of pools.values()) {
@@ -353,17 +358,17 @@ function evictOne(): boolean {
   const byAge = (a: Win, b: Win): number => a.seq - b.seq
   pooledBubbles.sort(byAge)
   pooledOther.sort(byAge)
-  const foreign = pooledOther.filter((w) => w.dir !== dir)
+  const foreign = pooledOther.filter((w) => w.dir !== dir && !keep(w))
   const liveBubbles = [...wins.values()].filter((w) => w.kind === 'bubble' && w.everShown).sort(byAge)
-  const victim = pooledBubbles[0] ?? foreign[0] ?? liveBubbles[0] ?? pooledOther[0]
+  const victim = pooledBubbles[0] ?? foreign[0] ?? liveBubbles[0] ?? pooledOther.find((w) => !keep(w))
   if (!victim) return false
   if (wins.get(victim.name) === victim) wins.delete(victim.name)
   dropShell(victim)
   return true
 }
 
-function trimPool(): void {
-  while (touchHost() && activeShells() > shellCap() && evictOne()) { /* keep trimming */ }
+function trimPool(keepRootKey?: string): void {
+  while (touchHost() && activeShells() > shellCap() && evictOne(keepRootKey)) { /* keep trimming */ }
 }
 
 /**
@@ -373,9 +378,14 @@ function trimPool(): void {
  * (its SWF sees a null-safe API); the shell is reloaded with the new SWF.
  */
 function reclaim(name: string, parent: Win | null, swf: string, x: number, y: number, width: number, height: number): Win | undefined {
+  const asRoot = parent === null
   let victim: Win | undefined
   const consider = (w: Win): void => {
     if (w.loading || w.w !== width || w.h !== height) return
+    // Only a root shell may become a root again, and a root shell may never be repurposed as a
+    // base/bubble. A 140x140 prompt/base has no quit button; promoting it to root used to leave
+    // mobile players with no way to quit, while a root demoted to a child kept a stray quit.
+    if (asRoot !== (w.kind === 'root')) return
     if (!victim || w.seq < victim.seq) victim = w
   }
   // Idle shells of any kind may be repurposed; a live window only if it is a shown bubble.
@@ -392,7 +402,15 @@ function reclaim(name: string, parent: Win | null, swf: string, x: number, y: nu
 function recycle(w: Win): void {
   if (!touchHost()) {
     shells.delete(w)
-    setTimeout(() => w.box.remove())
+    const player = w.player
+    w.player = undefined
+    // The player.ts MutationObserver cannot see an iframe that was removed from a detached
+    // document (isConnected stays true, defaultView is null), so without this every desktop round
+    // kept its SwfPlayer/Ruffle instance alive in the module-level players Set.
+    setTimeout(() => {
+      w.box.remove()
+      player?.destroy()
+    })
     return
   }
   // A half-built or still-loading player cannot be reloaded; SwfPlayer.load rejects while busy.
@@ -417,8 +435,11 @@ function destroy(w: Win | null | undefined): void {
   if (!w || wins.get(w.name) !== w) return
   for (const c of [...wins.values()]) if (c.parent === w) destroy(c)
   wins.delete(w.name)
-  if (w === root) finish()
+  // Recycle while the game directory is still active: finish() clears `dir`, and trimPool() would
+  // then fall back to DEFAULT_SHELL_CAP=9 instead of the game's real budget (paopao2: 11 → 9,
+  // destroying two WASM shells after every full round).
   recycle(w)
+  if (w === root) finish()
 }
 
 /** A failed load must not leave an empty iframe (or a dead player) behind. */
@@ -433,6 +454,7 @@ function finish(): void {
   setNativeGameKeyActive(false)
   root = null
   dir = ''
+  cloudStarted = false
   setDeskGame('')
   document.getElementById('pet')!.hidden = false
   window.qqpet.setFocusable(false)
@@ -651,10 +673,9 @@ function focusGame(w: Win): void {
 
 /** Dispatches into the iframe realm, but constructs the event exactly like gamepad.ts (host realm). */
 function sendKeyTo(w: Win, type: 'keydown' | 'keyup', side: 'left' | 'right'): void {
-  const view = w.frame.contentWindow
-  const doc: Document | null = view?.document ?? w.frame.contentDocument ?? null
   const player = w.player
-  if (!doc && !player) return
+  if (!player) return
+  const view = w.frame.contentWindow
   const spec = KEY_CODES[side]
   const init = {
     key: spec.key,
@@ -674,17 +695,10 @@ function sendKeyTo(w: Win, type: 'keydown' | 'keyup', side: 'left' | 'right'): v
     }
   }
   focusGame(w)
-  // gamepad.ts dispatches on the Ruffle player; do that first so its input path sees it, then
-  // also give the iframe window/document a bubbling copy for verifiers and any document listeners.
-  if (player) {
-    try { player.el.dispatchEvent(make()) } catch { /* the player may have gone */ }
-  }
-  if (view && typeof view.dispatchEvent === 'function') {
-    try { view.dispatchEvent(make()) } catch { /* the iframe may have gone */ }
-  }
-  if (doc) {
-    try { doc.dispatchEvent(make()) } catch { /* the iframe may have gone */ }
-  }
+  // gamepad.ts dispatches exactly one event on the Ruffle player. bubbles+composed carries it
+  // through the iframe document to its window, so extra copies on either target made window
+  // listeners see three keydowns and document listeners two for every press.
+  try { player.el.dispatchEvent(make()) } catch { /* the player may have gone */ }
 }
 
 /**
@@ -705,10 +719,18 @@ function focusCloudWindow(rootWin: Win): Win | null {
   return null
 }
 
+/**
+ * The intro click only has to happen once per 100ceng round: the first down starts the cloud,
+ * every repeat tick and every native `sendGameKey` (which also calls the prepare hook) must not
+ * synthesize the pointer/mouse sequence again. Reset in finish() for the next round.
+ */
+let cloudStarted = false
+
 function clickCloudStart(rootWin: Win): void {
-  if (dir !== '100ceng') return
+  if (dir !== '100ceng' || cloudStarted) return
   const cloud = focusCloudWindow(rootWin)
   if (!cloud) return
+  cloudStarted = true
   gameKeyDebug.cloudClicks += 1
   const el = cloud.player!.el as HTMLElement & { shadowRoot?: ShadowRoot }
   const canvas = el.shadowRoot?.querySelector('#container canvas') as HTMLElement | null
@@ -770,8 +792,12 @@ try { (window as Window & { __qqpetSmallGameKeys?: GameKeyDebug }).__qqpetSmallG
 const setNativeGameKeyActive = (on: boolean): void => {
   gameKeyDebug.active = on
   try {
-    const native = (window as Window & { QQPetNative?: { setGameKeyActive?: (on: boolean) => void } }).QQPetNative
-    native?.setGameKeyActive?.(on)
+    // The gate is part of the window.qqpet host contract: Android's bridge forwards it to
+    // PetService.setGameKeyActive. Reading window.QQPetNative directly bypassed the contract and
+    // broke every host that exposes the capability through qqpet. Hosts that lack the optional
+    // method keep keyboard injection closed; this is a safe no-op, not a silent fallback.
+    const api = window.qqpet as typeof window.qqpet & { setGameKeyActive?: (on: boolean) => void }
+    api.setGameKeyActive?.(on)
   } catch { /* desktop/older shells */ }
 }
 
@@ -1005,6 +1031,19 @@ function demand(w: Win): void {
   reload(w)
 }
 
+/** Root shells own exactly one quit button; a shell reused as a child must not keep one. */
+function syncQuit(w: Win): void {
+  if (w.kind === 'root') {
+    if (w.quit) return
+    w.quit = button('quit', () => { if (root) destroy(root) })
+    w.box.append(w.quit)
+    return
+  }
+  if (!w.quit) return
+  w.quit.remove()
+  w.quit = null
+}
+
 function createShell(name: string, parent: Win | null, swf: string, x: number, y: number, width: number, height: number): Win {
   const frame = document.createElement('iframe')
   frame.src = 'swf.html'
@@ -1035,6 +1074,7 @@ function createShell(name: string, parent: Win | null, swf: string, x: number, y
     demanded: false,
     pendingVisible: parent !== null,
     pending: [],
+    quit: null,
   }
   wins.set(name, win)
   shells.add(win)
@@ -1049,7 +1089,7 @@ function createShell(name: string, parent: Win | null, swf: string, x: number, y
       bind(win)
       draggable(win, frame.contentDocument!)
       // Root shells own the quit button; it stays on the shell across games.
-      if (parent === null) box.append(button('quit', () => { if (root) destroy(root) }))
+      syncQuit(win)
       if (win.lazy && !win.demanded) {
         // Prompt overlays stay cheap until their SWF first shows or remote-calls them, but the
         // CreateWindow visibility is honored: hidden=0 keeps the empty iframe visible.
@@ -1088,6 +1128,8 @@ function activate(w: Win, name: string, parent: Win | null, swf: string, x: numb
   w.box.style.display = ''
   delete w.box.dataset.pooled
   w.box.classList.toggle('passive', PASSIVE.test(swf))
+  // A shell can change roles between games: roots need their quit back, children must lose it.
+  syncQuit(w)
   // A live bubble repurposed at the cap keeps its old movie running until reload starts.
   w.player?.setIdle(true)
   wins.set(name, w)
@@ -1140,8 +1182,11 @@ async function startRuntimeSmallGame(g: SmallGame): Promise<void> {
 function openSmallGame(g: SmallGame): void {
   const st = stage()
   dir = g.dir
-  // A game with a smaller dynamic budget must not inherit the previous game's pool over cap.
-  trimPool()
+  const variant = `1${g.kidOnly || st !== 'Adult' ? 0 : 2}${info.sex === 'GG' ? 2 : 3}`
+  // A game with a smaller dynamic budget must not inherit the previous game's pool over cap, but
+  // the upcoming root's shell must survive the trim: it is the oldest shell and open() is about
+  // to claim it by pool key.
+  trimPool(poolKey(`main_${variant}.swf`, MAIN, MAIN))
   setDeskGame(g.dir)
   const pet = document.getElementById('pet')!
   const r = pet.getBoundingClientRect()
@@ -1150,7 +1195,6 @@ function openSmallGame(g: SmallGame): void {
   // 100ceng moves with the arrow keys.
   window.qqpet.setFocusable(true)
   setNativeGameKeyActive(keyboardKeys().length > 0)
-  const variant = `1${g.kidOnly || st !== 'Adult' ? 0 : 2}${info.sex === 'GG' ? 2 : 3}`
   // A leaked finish() leaves #pet hidden, so its rect is 0×0 and the old formula put the whole
   // game at (-70,-140). Dock it to the viewport instead; the paopao2 clamp keeps it on screen.
   const docked = r.width <= 0 || r.height <= 0

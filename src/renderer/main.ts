@@ -338,7 +338,9 @@ window.qqpet.onCursor(updateCursor)
  * must not abort the whole hit-shape tick, so fall back to the plain style reads the gate actually needs.
  */
 function hitTargetVisible(el: Element): boolean {
-  if (typeof el.checkVisibility === 'function') return el.checkVisibility({ visibilityProperty: true })
+  // `visibilityProperty` alone still reports an opacity:0 subtree as visible, which would leave a
+  // transparent panel in the native hit shape. The fallback keeps the old WebView's own semantics.
+  if (typeof el.checkVisibility === 'function') return el.checkVisibility({ visibilityProperty: true, opacityProperty: true })
   const style = getComputedStyle(el)
   return style.display !== 'none'
     && style.visibility !== 'hidden'
@@ -363,10 +365,15 @@ if (setHitShape || window.qqpet.setDragging) {
       for (const r of touch ? visiblePetBoxes() : petHitBoxes()) rects.push({ x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top })
       for (const el of document.querySelectorAll('#pet, [data-hit], [data-hit] *')) {
         if (el.closest('#pet') && !el.matches('.point')) continue
-        // The phone sheet is pointer-events:none only for the tap that opened it; its full-page layer must still
-        // count, or the render window keeps the pet's size until the opening animation is over.
-        const ignoresInput = getComputedStyle(el).pointerEvents === 'none'
-        if (!hitTargetVisible(el) || (ignoresInput && !el.matches('.qp-sheet'))) continue
+        // A phone sheet's root already reports the whole page; its rows are children of that same
+        // rectangle. Scanning every row every 50 ms only makes the tick scale with the menu DOM.
+        if (el.closest('.qp-sheet') && !el.matches('.qp-sheet')) continue
+        // Check visibility first: reading computed style for every hidden [data-hit] descendant on every 50 ms
+        // tick stalls the renderer on the desktop (the Linux window shape then lags the bubble and drag). Only an
+        // element that actually paints needs its pointer-events read. The phone sheet is pointer-events:none only
+        // for the tap that opened it; its full-page layer must still count.
+        if (!hitTargetVisible(el)) continue
+        if (getComputedStyle(el).pointerEvents === 'none' && !el.matches('.qp-sheet')) continue
         const r = el.getBoundingClientRect()
         if (r.width > 0 && r.height > 0) rects.push({ x: r.x, y: r.y, width: r.width, height: r.height })
       }

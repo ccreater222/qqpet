@@ -97,9 +97,37 @@ test('nothing to show empties the window', () => {
   assert.deepEqual(nextBounds({ x: 5, y: 5, w: 50, h: 50 }, box(10, 10, 10, 30), 400, 800), { x: 0, y: 0, w: 0, h: 0 })
 })
 
+// ---- shared hit-shape tick: keep the desktop shape loop on the fast path ----------------------
+
+const renderer = readFileSync(new URL('../../src/renderer/main.ts', import.meta.url), 'utf8')
+
+test('the hit-shape tick checks visibility before reading pointer-events (desktop shape loop stays cheap)', () => {
+  // The Linux window shape is render clipping; a getComputedStyle read for every hidden [data-hit] descendant
+  // on every 50 ms tick made the shape lag the speech bubble and drag. The visibility short-circuit must come
+  // first; only painted elements need their pointer-events read.
+  const visible = renderer.indexOf('if (!hitTargetVisible(el)) continue')
+  const pointer = renderer.indexOf("getComputedStyle(el).pointerEvents === 'none'")
+  assert.ok(visible >= 0, 'the hit-shape tick must call hitTargetVisible')
+  assert.ok(pointer >= 0, 'the hit-shape tick must still filter pointer-events')
+  assert.ok(visible < pointer, 'visibility must short-circuit before the computed-style read')
+})
+
 // ---- page-side touch region contract (Android overlay) -------------------------------------
 
 const bridge = readFileSync(new URL('../../src/android/bridge.ts', import.meta.url), 'utf8')
+
+test('new shells with setTouchableRegion do not start the legacy setBounds tracker', () => {
+  // New Android crops the render child from the page's setHitShape rectangles, so the page must not keep
+  // measuring every DOM node and calling the now no-op setBounds. Old shells (no setTouchableRegion) keep it.
+  assert.match(bridge, /if \(setTouchableRegion === null\) frame\(track\)/)
+})
+
+test('the Android bridge forwards setGameKeyActive through the shared contract', () => {
+  // smallgame.ts must not read window.QQPetNative; the capability lives on window.qqpet and the bridge
+  // forwards it to the optional native method (old shells simply lack it).
+  assert.match(bridge, /setGameKeyActive\?\(on: boolean\): void/)
+  assert.match(bridge, /setGameKeyActive: \(on\) => native\.setGameKeyActive\?\.\(on\)/)
+})
 
 test('the bridge exposes setHitShape only when the shell can restrict the touchable region', () => {
   // The optional native method is the capability probe; old APKs simply lack it.

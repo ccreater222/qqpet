@@ -55,10 +55,10 @@
 ## 4. 生命周期与池（R2）
 
 - `destroy` 语义：`wins.delete` + 隐藏/回池 + `player.setIdle(true)`；**不要**在 SWF 自己的 `ExternalInterface` 调用里同步销毁 iframe；iframe 必须保持 connected，否则 `player.ts` 的 MutationObserver 会销毁 player，池失效。
-- 池键：`${swf}|${w}x${h}`；跨局保留；达到 `shellCap()` 时按“pooled 动态窗 → 其它游戏 idle base/root → 当前可见 dynamic → 当前游戏 idle base”顺序驱逐；**永不驱逐**当前 root、可见 base、未 show 的 provisional 窗。
-- 复用：更新 name/parent/dir/坐标/尺寸，复位 `hidden/display`，重绑 `frame.contentWindow.API` + `TICKLE_*`；同一 `SwfPlayer.load(newSwf)` 重置 SWF；root 的 quit 按钮随 shell 保留，不要重复 append。
+- 池键：`${swf}|${w}x${h}`；跨局保留；达到 `shellCap()` 时按“pooled 动态窗 → 其它游戏 idle base/root → 当前可见 dynamic → 当前游戏 idle base”顺序驱逐；**永不驱逐**当前 root、可见 base、未 show 的 provisional 窗。切到更小 cap 的游戏时，必须先按即将使用的 `main_*.swf|140x140` poolKey 保留 root shell 再裁剪，不能先驱逐可复用 root。
+- 复用：更新 name/parent/dir/坐标/尺寸，复位 `hidden/display`，重绑 `frame.contentWindow.API` + `TICKLE_*`；同一 `SwfPlayer.load(newSwf)` 重置 SWF。`reclaim` 必须按 kind 匹配：root 只接受 root shell，140×140 的 base/prompt 不得被提升为 root，base/bubble 也不得占用 root shell；root 的 quit 按钮在所有复用路径下存在且唯一（复用为 root 时补建、复用为子窗时移除），不要重复 append。
 - 加载失败：`SwfPlayer.load` reject/timeout 必须 `discard`（隐藏、销毁 player、移除 iframe、从 wins/pool 删除）；root 失败必须恢复 `#pet`/`setDeskGame('')`。
-- 退出：`finish()` 恢复 pet、`root=null`、`dir=''`；所有 shell 回池；可见游戏窗 0；不要依赖 `setTimeout(box.remove())` 释放内存。
+- 退出：`finish()` 恢复 pet、`root=null`、`dir=''`；所有 shell 回池；可见游戏窗 0；不要依赖 `setTimeout(box.remove())` 释放内存。回池必须发生在 `finish()` 之前，按退出前游戏的 `shellCap()` 裁剪：完整 paopao2 局（11 shell）退出后池数量仍须为 11，不能回退到 `DEFAULT_SHELL_CAP=9`。桌面不复用 shell，`recycle` 必须显式 `player.destroy()`：已移除 iframe 的 `isConnected` 仍为 true 且 `defaultView=null`，`player.ts` 的 MutationObserver 无法兜底，否则 `players` Set 会跨局累积。
 
 ## 5. 渲染与性能（R3）
 
@@ -67,6 +67,8 @@
 - 每窗 canvas 尺寸 = 窗口尺寸 × dpr；禁止用 4K canvas 画 70×70 气泡；避免 SVG filter/大面积 shadow/逐帧 `getImageData`。
 - 隐藏窗必须 `setIdle(true)`/suspend；不可见 prompt 不加载 SWF；不在后台跑 RAF/计时器。
 - 新游戏要给出启动时间、峰值 RSS、单窗增量、最长单帧；超过预算要降级（少窗/池化/改内部对象）。
+
+- 手机小游戏样式（`phone-games.css` 等）由 `src/renderer/ui/mobile/phone-css.ts` 统一按需加载；`phone-games.ts` 不得再静态 import `phone-games.css`，桌面主 chunk/首屏不解析手机小游戏样式。
 
 ## 6. 屏幕/坐标/触摸（R4）
 
@@ -81,7 +83,7 @@
 - `API.*` 的窗口查找必须 null-safe：SWF 会持有已池化/已销毁的窗口名；`of()` 返回 undefined 时方法返回 `0/''/安全值`，不能 TypeError。
 - `CreateWindow` 返回 0 表示宿主拒绝（达上限/加载失败）；SWF 必须能降级（不画该对象/重试/结束回合），不能死循环等窗口。
 - `DestroyWindow` 幂等；`Show` 只改可见性；`RemoteCall` 目标不存在时 no-op；`GetWindowRect/Position` 对 root 返回虚拟坐标，对子窗返回真实坐标。
-- **`Show` 语义按游戏声明**：默认 qqpet 语义 `0=显示/1=隐藏`（paopao2 bubble、guess、ball 等）；Windows 语义 SWF 是 `1=显示/0=隐藏`，当前只有 **100ceng**（`MainWindow.playerShow` 调 `Show(1)` 显示 player）。新游戏若来自 Win32，必须在 `Show` 增加明确分支 + 单元测试，不能全局反转。
+- **`Show` 语义按游戏声明**：默认 qqpet 语义 `0=显示/1=隐藏`（paopao2 bubble、guess 等）；Windows 语义 SWF 是 `1=显示/0=隐藏`，当前为 **100ceng**（`MainWindow.playerShow` 调 `Show(1)` 显示 player）与 **ball**（`letballMove` 调 `Show(1)` 显示球，`onBallWinRemove` 调 `Show(0)` 隐藏球）。新游戏若来自 Win32，必须在 `Show` 增加明确分支 + 单元测试，不能全局反转。
 - 不允许 SWF 在 `CreateWindow` 里同步等待宿主；宿主不允许在 `CallExternalInterface` 里重入同一玩家。
 
 ## 8. 输入与原生键桥（R6）
@@ -90,10 +92,11 @@
 - 键盘：**只有声明 `keyboard` 的游戏才显示 D-pad**；当前 `100ceng` 用 `ARROW_KEYS`。D-pad 必须在游戏结束/切游戏/页面隐藏时释放所有键。
 - Android 原生键桥（0.16+）：
   - 契约：`window.qqpet.sendGameKey(code: 'ArrowLeft'|'ArrowRight', phase: 'down'|'up') => Promise<boolean>`；只允许左右，返回 false 表示平台不支持/未运行。
+  - 原生键门控同样走宿主契约 `window.qqpet.setGameKeyActive?(on: boolean): void`（可选；缺失时安全 no-op，让键盘注入保持关闭）；renderer 禁止直接读 `window.QQPetNative`。
   - Android：`PetService` 的 WebView 在 UI 线程 `dispatchKeyEvent(KeyEvent)`；`setGameKeyActive(true)` 只在小游戏运行期；50ms 限流、down 未 up 不重复、up 幂等；结束/隐藏释放所有键。
-  - 其它平台缺失/返回 false 时回退 DOM `KeyboardEvent`；桌面 preload 明确返回 false，不静默假装成功。
+  - 其它平台缺失/返回 false 时回退 DOM `KeyboardEvent`；桌面 preload 明确返回 false，不静默假装成功。DOM 回退只向 `player.el` 派发一次（`bubbles:true, composed:true` 自然冒泡到 iframe document/window），不得再向 window/document 重复派发：否则 window 监听器每键收到 3 次、document 2 次。
   - 安全：不接任意键/文本/组合键，不申请权限，不暴露给非小游戏页面。
-- 100ceng 启动顺序：cloud 的 `StartAnimation` 在 frame 36 发 `playerShow`（`Show(1)` 显示 player），frame 98 发 `addEvent`/“单击鼠标开始”；测试必须等 3.5–4.5s 再点 cloud 文本并按住 D-pad 800ms，不能用瞬时点击/文档 keycount 判过。
+- 100ceng 启动顺序：cloud 的 `StartAnimation` 在 frame 36 发 `playerShow`（`Show(1)` 显示 player），frame 98 发 `addEvent`/“单击鼠标开始”；测试必须等 3.5–4.5s 再点 cloud 文本并按住 D-pad 800ms，不能用瞬时点击/文档 keycount 判过。cloud 启动点击是会话级幂等：每次 down（含 140ms repeat 与原生 `sendGameKey` 的 prepare）只允许触发一次 click，新局/结束重置；800ms 长按的 `cloudClicks` 增量必须 ≤ `nativeDown` 增量。
 
 ## 9. 六个游戏的适配要点
 
@@ -103,7 +106,7 @@
 | paopao2 | root+4 base+最多 6 Bubble；虚拟区 `offset=180`；0=show；prompt eager（lazy 会阻塞 onWindowCreate） | 两轮 Bubble；>3 落点；<850MB |
 | rope | root+4 base；中央 `waitToMouseDown_mc` 点一次，随后每个跳跃窗口点一次；非按住 | 启动/退出；节奏可人工复测 |
 | mouse | root+4 base+1 rat；rat 窗 PASSIVE；真实输入是 tap root/宠物（不是 rat）；第二轮菜单状态要复位 | 两轮；宠物跳/得分；第二轮 open |
-| ball | root+7 base+ball/shadow/fallball；intro 后点 `startbtn_mc/begin_mc` 才建 base/shadow | ball+shadow+4 base；完整颠球/结算；lightReopen |
+| ball | root+7 base+ball/shadow/fallball；`Show` 1=show/0=hide；intro 后点 `startbtn_mc/begin_mc` 才建 base/shadow | ball+shadow+4 base；完整颠球/结算；lightReopen |
 | 100ceng | root+cloud+player+2 prompt；cloud 文本 click→`playerShow`→`Show(1)`；D-pad 原生 37/39 | player 可见；按住 x 位移；无 stuck |
 
 ## 10. CS 边界（R7）

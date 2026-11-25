@@ -9,8 +9,15 @@ type Handler = () => void
 
 const stack: Handler[] = []
 
+/** The Android shell installs this hook; the desktop and the other mobile hosts never do. */
+const hostHasBackKey = (): boolean => typeof window.__qqpetSetBackHandler === 'function'
+
 /** Makes the layer focusable so the host routes the back key here; releases it with the last layer. */
 const sync = (): void => {
+  // Without a native back key this stack has no purpose: iOS maps setFocusable(true) to
+  // makeKeyAndVisible and setFocusable(false) to endEditing, so touching it there changes
+  // window focus and dismisses the keyboard on every sheet open/close.
+  if (!hostHasBackKey()) return
   const open = stack.length > 0
   window.__qqpetSetBackHandler?.(open)
   if (!open) {
@@ -25,7 +32,7 @@ const sync = (): void => {
 export function pushBack(close: Handler): () => void {
   const wasOpen = stack.length > 0
   stack.push(close)
-  if (!wasOpen) window.qqpet.setFocusable(true)
+  if (!wasOpen && hostHasBackKey()) window.qqpet.setFocusable(true)
   sync()
   let released = false
   return () => {

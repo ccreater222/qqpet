@@ -6,7 +6,6 @@
 import { div } from '../dom'
 import { pushBack } from './back'
 import { safeInset } from './sizing'
-import './mobile.css'
 
 export interface SheetOptions {
   title: string

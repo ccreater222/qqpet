@@ -20,20 +20,24 @@ scale = max(1, min(displayMetrics.widthPixels, heightPixels) / density / 480)
 
 ### 1.2 `phoneUI()` 判定
 
-手机样式只在以下四条同时成立时启用（`sizing.ts:20-29`）：
+手机样式只在以下条件同时成立时启用（`sizing.ts:19-48`）：
 
 | 条件 | 代码事实 | 失败时的行为 |
 | --- | --- | --- |
+| 宿主允许手机布局 | `capabilities.phoneLayout !== false`；桌面 preload `false`、Android `true`、iOS `true`、Harmony `false`，未声明表示旧桥沿用视口启发式（`src/shared/ipc.ts`、各 bridge） | 显式 `false` 的宿主永不启用（桌面/Harmony 保持既有布局） |
+| 不是桌面宿主 | 宿主不暴露 `window.qqpet.setDragging`（`sizing.ts`） | 桌面触屏（如 960×600 coarse 的 Windows 2-in-1）不会误命中手机 UI |
 | 触摸指针 | `touch` 来自 `matchMedia('(pointer: coarse)')`（`src/renderer/ui/dom.ts:2`） | 桌面即使窗口很窄也不启用 |
-| 屏幕短边 ≤ 600 dp | `Math.min(screen.width, screen.height) <= 600`（`PHONE_MAX`，`sizing.ts:11`） | 平板保持桌面尺寸 |
-| 页面没有缩放 | `visualViewport.scale` 与 1 相差 < 0.02（`sizing.ts:26`） | 旧壳仍按 480 设计空间缩小，继续用桌面布局 |
-| 页面确实按 dp 布局 | `documentElement.clientWidth` 与 `screen.width` 或 `screen.height` 相差 ≤ 2（`sizing.ts:14-19`） | 防止“窄但被缩放”的宿主误命中 |
+| 屏幕短边 ≤ 600 dp | `Math.min(screen.width, screen.height) <= 600`（`PHONE_MAX`，`sizing.ts:12`） | 平板保持桌面尺寸 |
+| 页面没有缩放 | `visualViewport.scale` 与 1 相差 < 0.02（`sizing.ts`） | 旧壳仍按 480 设计空间缩小，继续用桌面布局 |
+| 页面确实按 dp 布局 | `documentElement.clientWidth` 与 `screen.width` 或 `screen.height` 相差 ≤ 2（`sizing.ts`） | 防止“窄但被缩放”的宿主误命中 |
 
-判定通过后 `applyPhoneClass()` 给 `document.body` 切换 `qp-phone` 类（`sizing.ts:32-36`），启动时调用一次并在每次 `resize` 重新判定（`main.ts:27-36`），因此旋转和手机/平板边界切换会换布局。手机 surface 的样式以 `body.qp-phone` 为作用域；`mobile.css` 的 `.qp-sheet*` 只在手机分支调用 `openSheet()` 时出现，桌面不会创建这些节点，因此桌面、平板和旧壳的布局不变。
+判定核心是纯函数 `phoneUIFrom(facts)`（`sizing.ts`），`phoneUI()` 只负责从 `window.qqpet.capabilities.phoneLayout`、`setDragging` 和真实视口组装 facts；这组矩阵由 `scripts/tests/phone-layout.test.mjs` 覆盖（desktop fine/desktop touch/Android phone/iOS phone/Android tablet/Harmony/undefined 兼容）。判定通过后 `applyPhoneClass()` 给 `document.body` 切换 `qp-phone` 类（`sizing.ts`），启动时调用一次并在每次 `resize` 重新判定（`main.ts:31-37`），因此旋转和手机/平板边界切换会换布局。
+
+手机样式表不再静态进入主 chunk：六个 phone-only CSS（`mobile.css`、`menu-phone.css`、`phone-shop.css`、`phone-games.css`、`phone-pages.css`、`phone-panels.css`）统一由 `src/renderer/ui/mobile/phone-css.ts` 汇总，`bootstrap.ts` 在 `import('./main')` 前 await 加载以满足手机首绘，`applyPhoneClass()` 在 resize 后首次命中时补加载。桌面构建主 CSS 因此从 140,362 B / 1,074 规则降到 62,159 B / 607 规则，手机 CSS 78,203 B / 467 规则作为独立 chunk 只在手机加载。手机 surface 的样式仍以 `body.qp-phone` 为作用域；`mobile.css` 的 `.qp-sheet*` 只在手机分支调用 `openSheet()` 时出现，桌面不会创建这些节点，因此桌面、平板和旧壳的布局不变。
 
 ### 1.3 实测基线
 
-412×892 dp、dpr 2.625 的模拟器上：`innerWidth = 412`、`documentElement.clientWidth = 412`、`visualViewport.scale = 1`、`--safe-top = 24.03`；宠物盒 167.1 CSS px（物理尺寸与改造前一致，见 §2.3）。旧壳的同一页面是 `clientWidth = 480`、`scale = 0.857`，`phoneUI()` 不命中。
+412×892 dp、dpr 2.625 的模拟器上：`innerWidth = 412`、`documentElement.clientWidth = 412`、`visualViewport.scale = 1`、`--safe-top = 24.03`；宠物盒 167.1 CSS px（物理尺寸与改造前一致，见 §2.3）。旧壳的同一页面是 `clientWidth = 480`、`scale = 0.857`，`phoneUI()` 不命中。iOS 手机（390×844、`phoneLayout:true`、scale=1、coarse）保持既有手机 UI 且现在由能力位显式声明；Harmony 手机（`phoneLayout:false`、480 设计空间）与 Android 平板（短边 ≥600 dp）不命中。
 
 ## 2. dp 尺寸体系
 
@@ -100,7 +104,11 @@ scale = max(1, min(displayMetrics.widthPixels, heightPixels) / density / 480)
 Android 叠加窗的透明像素不会让触摸穿透，所以窗口矩形必须和触控区解耦。页面（`main.ts` 的 50 ms
 `setHitShape` 循环）把**当前可见内容**上报给原生：触屏宿主用 `visiblePetBoxes()`（每个可见
 `ruffle-player` 的 `hitCover` 当前帧 alpha 包围盒；`.petBg` 有可见背景图时整盒），桌面宿主仍用
-`petHitBoxes()` 整盒；`[data-hit]` 根及子元素、`.point` 照旧按 DOM 矩形加入；拖动中整页、隐藏时 `[]`。
+`petHitBoxes()` 整盒；`[data-hit]` 根及普通子元素、`.point` 照旧按 DOM 矩形加入，但 `.qp-sheet` 的后代跳过
+（`el.closest('.qp-sheet') && !el.matches('.qp-sheet')`），只保留 sheet 根的全页矩形——否则菜单/任务/商城
+每行都会在 50ms tick 里变成独立 rect，DOM 越大 hit-shape 越慢。拖动中整页、隐藏时 `[]`。
+`hitTargetVisible()` 的现代路径用 `checkVisibility({ visibilityProperty: true, opacityProperty: true })`，
+`opacity:0` 及其子树不再占触控区；旧 WebView 的 fallback 保持原有 `display/visibility/opacity` 语义。
 Android 桥仅在原生有 `setTouchableRegion` 时提供 `setHitShape`，旧壳不定义、整窗保持现状。
 
 原生把渲染窗做成 `TYPE_APPLICATION_ATTACHED_DIALOG` 子窗口并设 `FLAG_NOT_TOUCHABLE`，**裁剪到上报矩形并集 +
@@ -112,8 +120,8 @@ portal 把 MotionEvent 平移后转发给 WebView；详见[原生桥接契约](n
 `hitCover` 采样间隔 150 ms，触控区最多滞后 150 ms；拖动中整页可触。
 
 开手机菜单时 `openPhoneMenu` 会给整页 sheet 层 `pointer-events:none` 220ms，防止开屏那次点击落到菜单第一行；
-这个**输入锁不能把该层从触控上报里过滤掉**。`main.ts` 的 50ms hit-shape 循环对 `.qp-sheet` 豁免
-`pointer-events` 过滤，sheet 的整页矩形在开屏后 ≤50ms 到达原生，原生渲染窗在 sheet 动画开始时已经扩到全页；
+这个**输入锁不能把该层从触控上报里过滤掉**。`main.ts` 的 50ms hit-shape 循环对 `.qp-sheet` 根豁免
+`pointer-events` 过滤并跳过其全部后代，sheet 的整页矩形在开屏后 ≤50ms 到达原生，原生渲染窗在 sheet 动画开始时已经扩到全页；
 否则窗口停在宠物大小，sheet 的 cream 背景会先在小窗里滚出、随后原生才做大 resize（用户看到的“点击后先出菜单
 背景色”）。sheet 的 rise 动画只做位移、不做透明度淡入，首帧就带内容。完整坑点与调试方法见
 [Android 叠加窗触控区：坑点与最佳实践](../guides/android-overlay-touch.md)。
@@ -295,9 +303,9 @@ v0.10.0 把手机入口从浮动图标工具栏换成底部菜单后，`main.ts:
 - **密室**：CSS 已把舞台改成 380×285、按键 64 dp，但手柄 `.padArrows`/`.padButtons` 是 `position:fixed`，包含块是带 `transform` 的 380×285 舞台框，分别盖住舞台 34% 和 23.6%；runtime 菜单的过滤器（`control.ts:285-298`）又把密室过滤掉，手机仍无入口。入口与手柄竖排都列入下版。
 - **钓鱼 SWF 内部控件**：舞台 411×320、缩放 0.963，宿主侧只有买苗弹窗已重排；抛竿/收杆/卖鱼的按钮在 Ruffle 内部，CSS 不可量，尚未真机验证。另有一个 50×50 的冷却期隐形块位于 (0,125)。
 - **openFrame 且没有自带关闭控件的面板**：`openFrame` 的返回键/遮罩已统一走 `dismiss()`（`box.ts:256-266`），有 `.sclose`/`.windowViewBut` 时会点控件；钓鱼（`fishing.ts:17,30,187-199` 的 `open` 与 `window.close_game`）和密室（`mstx.ts:10,63-69` 的 `closeFrame`）没有这类 DOM 控件，仍走 `stop()`，清理不会执行，二次打开可能静默失效。给它们加关闭控件，或把清理挂到 `stop`。
-- **旧壳返回键**：Android 返回键只在包含 `setBackHandler` 的新壳上生效；旧 APK + 新页面时 `window.__qqpetSetBackHandler` 是 no-op，面板仍可点遮罩、✕ 或下滑关闭，但返回键退回原行为（`src/android/bridge.ts:61-63,98-101`；`back.ts:13-23`）。
+- **旧壳返回键**：Android 返回键只在包含 `setBackHandler` 的新壳上生效；旧 APK + 新页面时 `window.__qqpetSetBackHandler` 是 no-op，`setFocusable` 也不会被调用，面板仍可点遮罩、✕ 或下滑关闭，但返回键退回原行为（`src/android/bridge.ts:61-63,98-101`；`back.ts`）。
 - **宠物横向安全区**：宠物横向未按 `--safe-*` 的左右值钳制；本次只实测了 `--safe-top`（24.03），横屏/挖孔设备的左右与底部安全区未验证（`main.ts:92-93`）。
-- **平板/iOS**：平板继续使用 480 CSS px 设计空间，手机样式不会命中；iOS/HarmonyOS 只有在页面本来就按 1 CSS px = 1 pt/dp 布局时才会命中 `phoneUI()`。两者都未在真机回归。
+- **平板/iOS**：平板继续使用 480 CSS px 设计空间，手机样式不会命中；iOS 手机 `phoneLayout:true` 且页面为 1:1 时沿用既有手机 UI（不是新适配，未真机回归），Harmony `phoneLayout:false` 永不进入手机 UI。三者都需要真机复核。
 - **键盘避让**：依赖 `visualViewport` 真正收缩；宿主若不回报，sheet 只能按布局视口贴合，无法保证输入框始终可见（`sheet.ts:136-147`）。
 - **firstrun 不属 Android**：Android 构建输入只有 `index`/`game`/`swf`（`vite.android.config.ts:19`），firstrun 只在 Electron 输入端；Android 真正的首屏是 §5.4 的领养 sheet。
 - **LAN 回话框**：按钮 96×36；Android 桥没有 `lanSend/lanPeers`，peer 恒空，当前不可触发（`src/android/bridge.ts` 无 LAN 实现）。
@@ -308,7 +316,7 @@ v0.10.0 把手机入口从浮动图标工具栏换成底部菜单后，`main.ts:
 1. **社区入口**：手机隐藏或标注“桌面可用”；不要补入口。
 2. **密室**：先决定是否开放；若开放，补 runtime 菜单入口，并把舞台与手柄改成竖排（舞台在上、手柄带在下），避免 `position:fixed` 盖住舞台。
 3. **钓鱼**：补 44 dp 宿主操作条（买苗/收获/加速/关闭），真机验证 SWF 内抛竿/收杆/卖鱼，并修 §7.1 的 `openFrame` 返回键清理。
-4. **平板与其它移动宿主**：确认页面按 1:1 布局后才允许命中 `phoneUI()`；至少在真机验证 iPad/HarmonyOS 的旋转、安全区和键盘。
+4. **平板与其它移动宿主**：iOS 手机保持显式 `phoneLayout:true` 的既有 UI、Harmony 保持 `phoneLayout:false` 的 480 设计空间；至少在真机验证 iPad/HarmonyOS 的旋转、安全区和键盘。
 5. **P2 打磨**：LAN 回话框、小游戏退出位置、丢丢乐退出跟随、说话气泡按钮（只能改 SWF）。
 
 ## 8. 验证命令

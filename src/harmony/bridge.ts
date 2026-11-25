@@ -308,6 +308,7 @@ listeners.outside.push(() => {
 const api: QQPetApi = {
   capabilities: {
     rotatableScreen: true,
+    phoneLayout: false,
     serverMode: false,
     localRepositoryV2: localRuntime !== null,
     ...(localRuntimeFailure === undefined ? {} : { localRepositoryV2Reason: localRuntimeFailure }),
