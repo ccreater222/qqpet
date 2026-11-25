@@ -446,6 +446,7 @@ function finish(): void {
   setNativeGameKeyActive(false)
   root = null
   dir = ''
+  cloudStarted = false
   setDeskGame('')
   document.getElementById('pet')!.hidden = false
   window.qqpet.setFocusable(false)
@@ -718,10 +719,18 @@ function focusCloudWindow(rootWin: Win): Win | null {
   return null
 }
 
+/**
+ * The intro click only has to happen once per 100ceng round: the first down starts the cloud,
+ * every repeat tick and every native `sendGameKey` (which also calls the prepare hook) must not
+ * synthesize the pointer/mouse sequence again. Reset in finish() for the next round.
+ */
+let cloudStarted = false
+
 function clickCloudStart(rootWin: Win): void {
-  if (dir !== '100ceng') return
+  if (dir !== '100ceng' || cloudStarted) return
   const cloud = focusCloudWindow(rootWin)
   if (!cloud) return
+  cloudStarted = true
   gameKeyDebug.cloudClicks += 1
   const el = cloud.player!.el as HTMLElement & { shadowRoot?: ShadowRoot }
   const canvas = el.shadowRoot?.querySelector('#container canvas') as HTMLElement | null

@@ -1087,6 +1087,54 @@ test('the direct native bridge can focus/start the cloud before injecting keys',
   assert.deepEqual(host.nativeGameActive.at(-1), false)
 })
 
+test('100ceng clicks the cloud once per press session, even across a long hold and repeated downs', async () => {
+  const host = paopaoHostFixture()
+  host.play(CENG)
+  await host.settle()
+  host.createWindow('w_name_cloud', 'cloud_boy.swf', 105, 310, 350, 500)
+  await host.settle()
+  const pad = host.state().keypad
+  const debug = host.context.window.__qqpetSmallGameKeys
+  const press = { preventDefault: () => {}, stopPropagation: () => {} }
+
+  // An 800ms hold = one pointerdown + ~6 repeat ticks at 140ms.
+  const clicksBefore = debug.cloudClicks
+  const downsBefore = debug.nativeDown
+  pad.left.handlers.pointerdown[0](press)
+  await host.settle()
+  const interval = host.intervals.at(-1)
+  for (let i = 0; i < 6; i++) {
+    interval()
+    await host.settle()
+  }
+  assert.equal(debug.cloudClicks - clicksBefore, 1, 'a held press must click the cloud exactly once')
+  assert.ok(debug.cloudClicks - clicksBefore <= debug.nativeDown - downsBefore, 'cloudClicks growth must not exceed down growth')
+  pad.left.handlers.pointerup[0]()
+  await host.settle()
+
+  // Releasing and pressing again in the same round must not re-click either.
+  const clicksAfterHold = debug.cloudClicks
+  pad.right.handlers.pointerdown[0](press)
+  await host.settle()
+  assert.equal(debug.cloudClicks, clicksAfterHold, 'a second press in the same round is a no-op for the cloud')
+  pad.right.handlers.pointerup[0]()
+  await host.settle()
+
+  // A fresh round builds a fresh cloud and gets one click of its own.
+  host.rootApi.DestroyWindow()
+  await host.settle()
+  host.play(CENG)
+  await host.settle()
+  host.createWindow('w_name_cloud', 'cloud_boy.swf', 105, 310, 350, 500)
+  await host.settle()
+  const nextPad = host.state().keypad
+  const clicksBeforeNewRound = debug.cloudClicks
+  nextPad.left.handlers.pointerdown[0](press)
+  await host.settle()
+  assert.equal(debug.cloudClicks - clicksBeforeNewRound, 1, 'the session flag resets when a new round starts')
+  nextPad.left.handlers.pointerup[0]()
+})
+
 test('the touch pad only appears for keyboard games on touch hosts', async () => {
   const guess = paopaoHostFixture()
   guess.play(GUESS)
