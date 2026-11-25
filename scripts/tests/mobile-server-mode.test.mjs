@@ -21,6 +21,14 @@ const PET_ID = 'pet-0001'
 const DEVICE_ID = 'server-device-0001'
 const AUTHORITY = fixtures.remoteCache.authority
 
+function syncConfigJson() {
+  return JSON.stringify({ serverUrl: SERVER_URL, petId: PET_ID, deviceId: DEVICE_ID, lastRevision: 0, lastEventSeq: 0 })
+}
+
+function storageConfigJson(mode) {
+  return JSON.stringify({ format: 'qqpet-storage-config', schemaVersion: 1, mode, serverUrl: SERVER_URL, deviceLabel: 'Android' })
+}
+
 function welcomeFrame(issuedToken) {
   return {
     t: 'welcome',
@@ -257,6 +265,60 @@ test('server mode without a cache falls back to the local pet and preserves pair
   assert.equal(status.paired, true)
   assert.match(status.notice ?? '', /离线/)
   assert.equal(status.mode, 'local')
+  await runtime.stop()
+})
+
+test('an unreadable Keystore token keeps the persisted server mode and retries on the next start', async () => {
+  const native = memoryNative()
+  native.saveRemoteToken('android-token-1')
+  native.writeAtomic('sync-config.json', syncConfigJson())
+  native.writeAtomic('storage-config.json', storageConfigJson('server'))
+  native.loadRemoteToken = () => JSON.stringify({ status: 'error', error: 'keystore decrypt failed' })
+  const first = createMobileServerRuntime({ local: memoryLocal(), native, appVersion: 'test', transport: fakeTransport(), connectTimeoutMs: 50 })
+  const save = await first.load()
+  assert.equal(save.havePet, true, 'this run falls back to the local pet')
+  const status = await first.storage.status()
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.mode, 'server', 'the requested mode must stay server after a transient read failure')
+  assert.match(status.lastError ?? '', /keystore decrypt failed/)
+  assert.match(status.notice ?? '', /不可读/)
+  assert.equal(JSON.parse(native.files.get('storage-config.json')).mode, 'server', 'startup must not persist a local downgrade')
+  await first.stop()
+
+  // Once the Keystore recovers, the same persisted mode=server is retried at startup.
+  native.loadRemoteToken = () => JSON.stringify({ status: 'ok', text: 'android-token-1' })
+  const second = createMobileServerRuntime({ local: memoryLocal(), native, appVersion: 'test', transport: fakeTransport(), connectTimeoutMs: 200 })
+  await second.load()
+  assert.equal(second.runtimeInfo().serverMode, true)
+  assert.equal((await second.storage.status()).activeMode, 'server')
+  await second.stop()
+})
+
+test('a corrupt sync config keeps the persisted server mode for the next retry', async () => {
+  const native = memoryNative()
+  native.saveRemoteToken('android-token-1')
+  native.writeAtomic('sync-config.json', '{"serverUrl":')
+  native.writeAtomic('storage-config.json', storageConfigJson('server'))
+  const runtime = createMobileServerRuntime({ local: memoryLocal(), native, appVersion: 'test', transport: fakeTransport(), connectTimeoutMs: 50 })
+  const save = await runtime.load()
+  assert.equal(save.havePet, true)
+  const status = await runtime.storage.status()
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.mode, 'server')
+  assert.match(status.lastError ?? '', /state_corrupt/)
+  assert.equal(JSON.parse(native.files.get('storage-config.json')).mode, 'server')
+  await runtime.stop()
+})
+
+test('a corrupt storage config is surfaced and left untouched', async () => {
+  const native = memoryNative()
+  native.writeAtomic('storage-config.json', '{"mode":')
+  const runtime = createMobileServerRuntime({ local: memoryLocal(), native, appVersion: 'test', transport: fakeTransport(), connectTimeoutMs: 50 })
+  await runtime.load()
+  const status = await runtime.storage.status()
+  assert.equal(status.activeMode, 'local')
+  assert.match(status.notice ?? '', /存储配置不可读/)
+  assert.equal(native.files.get('storage-config.json'), '{"mode":', 'a corrupt config must not be rewritten during startup')
   await runtime.stop()
 })
 

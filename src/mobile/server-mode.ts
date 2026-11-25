@@ -197,6 +197,7 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
   const transport = options.transport ?? createWebSocketTransport()
   const tokenStore: MobileRemoteTokenStore = createMobileRemoteTokenStore(native)
 
+  let configReadFailure: string | undefined
   let config: StorageConfigFile = readStorageConfig()
   let activeMode: StorageMode = 'local'
   let remote: RemoteRepository | null = null
@@ -221,7 +222,10 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
       const text = native.read(STORAGE_CONFIG_FILE)
       if (typeof text !== 'string' || text.length === 0) return defaultStorageConfig()
       return parseStorageConfig(JSON.parse(text) as unknown)
-    } catch {
+    } catch (error) {
+      // Missing is normal; unreadable/corrupt is not. Keep the failure so the
+      // status surface reports it instead of silently pretending mode=local.
+      configReadFailure = messageOf(error)
       return defaultStorageConfig()
     }
   }
@@ -370,6 +374,11 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
   async function initializeNow(): Promise<void> {
     if (config.mode !== 'server') {
       activeMode = 'local'
+      if (configReadFailure !== undefined) {
+        lastError = configReadFailure
+        notice = '存储配置不可读，本次已使用本机存储；配置文件保留，下次启动会重试。'
+        emitStatus()
+      }
       return
     }
     let token: string | null = null
@@ -379,11 +388,12 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
       stored = await tokenStore.loadConfig()
     } catch (error) {
       lastError = messageOf(error)
-      notice = '服务器配对信息不可读，已回到本机存储；请重新配对。'
-      config = { ...defaultStorageConfig() }
-      pairedFlag = false
+      notice = '服务器配对信息不可读，本次已使用本机存储；配对信息保留，下次启动会重试。'
+      // A transient Keystore/state read failure must not rewrite the user's
+      // persisted server-mode choice. Keep config.mode === 'server' (and the
+      // stored pairing files) so the next start retries; only an explicit
+      // unpair clears it.
       activeMode = 'local'
-      try { writeConfig() } catch { /* the local fallback still works */ }
       emitStatus()
       return
     }
