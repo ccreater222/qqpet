@@ -63,9 +63,9 @@
 
 单文件组装，最后一步才注入全局：`contextBridge.exposeInMainWorld('qqpet', api)`（`src/preload/index.ts:156`）。
 
-`api`（类型见 `QQPetApi`，`src/shared/ipc.ts:272-409`）由四块拼成：
+`api`（类型见 `QQPetApi`，`src/shared/ipc.ts:272-422`）由四块拼成：
 
-1. `capabilities`：桌面恒定 `{ serverMode: true }`（`src/preload/index.ts:48`）。
+1. `capabilities`：桌面恒定 `{ serverMode: true, phoneLayout: false }`（`src/preload/index.ts:48`）。`phoneLayout` 是宿主布局能力位：桌面/ Harmony 显式 `false`，Android/iOS 显式 `true`，未声明（旧桥）沿用渲染层的视口启发式；它只控制手机 UI，不改变任何 IPC 方法面（见[手机 UI 层](mobile-ui.md) §1.2）。
 2. `load`/`save`/`resetPet`/`exportSave`/`importSave` 等旧存档 API（`src/preload/index.ts:49-60`）。
 3. `...runtime`：来自 `createRendererRuntimePreload(ipcRenderer)`（`src/preload/renderer-api.ts:60-86`），提供 `runtimeInfo`、`command`、`setAdvanceWhileEmpty`、`localSettings.load/update`、`flush`、`getProjection`、`getStatus` 与四个订阅器。
 4. `storage`（C11 管理面，`src/preload/index.ts:21-45`）与 `remote`（C10 兼容面，`src/preload/index.ts:53-57`）、`packs`（`src/preload/index.ts:68-80`）以及各平台能力。
@@ -77,7 +77,7 @@
 
 `capabilities` 的语义是「只在明确为 `false` 时表示不支持」，未声明即视为可用（渲染层判据见 `src/renderer/ui/setup.ts:104-117`）。移动桥不再一律写 `serverMode: false`：**Android 例外**——原生能力齐备时 `capabilities.serverMode = true` 且新增 `serverModeClientOnly = true`，表示「只能作为服务器宠物客户端，不能上传本机宠物或做权威交接」（`src/android/bridge.ts:364-370`、`src/shared/ipc.ts:285` 的 `QQPetApi.capabilities.serverModeClientOnly`）；原生能力缺失时两者都回到 `false` 并给出原因，本机模式不受影响。iOS/HarmonyOS 仍显式 `serverMode: false`（`src/ios/bridge.ts:73-83`）。桌面 preload 不声明 `localRepositoryV2`，因为渲染层优先用 `runtimeInfo()` 的真实返回值，只有该调用失败时才回落到 `capabilities.localRepositoryV2`（`src/renderer/bootstrap.ts:8-17`）。
 
-小游戏方向键是**可选宿主能力**，不进 IPC 通道表：契约在 `src/shared/renderer-api.ts` 声明 `sendGameKey?(code: ArrowLeft|ArrowRight, phase: down|up): Promise<boolean>`（`src/shared/ipc.ts` 的 `QQPetApi` 同名可选方法）。桌面不渲染 D-pad，preload 也显式返回 `Promise.resolve(false)`（`src/preload/index.ts:63`），渲染层据此回退 DOM 键盘事件；Android 则由 `src/android/bridge.ts` 的 `QQPetNative.sendGameKey` 走 `WebView.dispatchKeyEvent`，并在 down 前延迟 80ms、保证 down/up 顺序；iOS/Harmony 未实现即视为缺席。
+小游戏方向键是**可选宿主能力**，不进 IPC 通道表：契约在 `src/shared/ipc.ts` 的 `QQPetApi` 声明 `sendGameKey?(code: ArrowLeft|ArrowRight, phase: down|up): Promise<boolean>` 与 `setGameKeyActive?(on: boolean): void`（`src/shared/ipc.ts:336-338`）。桌面不渲染 D-pad，preload 也显式返回 `Promise.resolve(false)`（`src/preload/index.ts:63`），渲染层据此回退 DOM 键盘事件；Android 则由 `src/android/bridge.ts` 的 `QQPetNative.sendGameKey` 走 `WebView.dispatchKeyEvent`，并在 down 前延迟 80ms、保证 down/up 顺序，`setGameKeyActive` 由 Android bridge 转发到原生同名可选方法（旧壳缺方法时 no-op）；iOS/Harmony 未实现即视为缺席。渲染层只应调用 `window.qqpet.setGameKeyActive?`，不得直接读 `window.QQPetNative`。
 
 ## 4. sender 信任模型
 
