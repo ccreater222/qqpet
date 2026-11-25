@@ -128,6 +128,7 @@ const BALL = { dir: 'ball', name: '颠球', icon: 'tanliqiu' }
 function paopaoHostFixture({ touchHost = true } = {}) {
   const frames = []
   const boxes = []
+  const buttons = []
   const players = []
   const intervals = []
   const nativeGameKeys = []
@@ -144,8 +145,10 @@ function paopaoHostFixture({ touchHost = true } = {}) {
   }
 
   class FakeSwfPlayer {
-    constructor(frame) {
-      this.frame = frame
+    constructor(body) {
+      // startPlayer() passes frame.contentDocument.body; keep the owning frame so a dispatched
+      // KeyboardEvent can bubble through the fake iframe document/window like the real DOM event.
+      this.frame = body?.ownerFrame ?? null
       this.loads = []
       this.calls = []
       this.events = []
@@ -153,7 +156,10 @@ function paopaoHostFixture({ touchHost = true } = {}) {
       this.destroyed = false
       this.el = {
         focus: () => {},
-        dispatchEvent: (event) => { this.events.push({ type: event.type, key: event.key, keyCode: event.keyCode }) },
+        dispatchEvent: (event) => {
+          this.events.push({ type: event.type, key: event.key, keyCode: event.keyCode })
+          this.frame?.contentDocument?.dispatchEvent(event)
+        },
         ruffle: () => ({
           addFSCommandHandler: () => {},
           callExternalInterface: (fn, ...args) => { this.calls.push([fn, ...args]) },
@@ -182,15 +188,25 @@ function paopaoHostFixture({ touchHost = true } = {}) {
   }
 
   function createFrame() {
+    const windowEvents = []
     const frame = {
       focused: false,
-      contentWindow: {},
+      contentWindow: {
+        focus: () => { frame.focused = true },
+        events: windowEvents,
+        dispatchEvent(event) {
+          windowEvents.push(event)
+          return true
+        },
+      },
       contentDocument: {
         body: {},
         events: [],
         addEventListener: () => {},
         dispatchEvent(event) {
           this.events.push(event)
+          // A composed event dispatched inside the iframe document still reaches its window.
+          windowEvents.push(event)
           return true
         },
       },
@@ -199,7 +215,7 @@ function paopaoHostFixture({ touchHost = true } = {}) {
         this.listeners[type] = callback
       },
     }
-    frame.contentWindow.focus = () => { frame.focused = true }
+    frame.contentDocument.body.ownerFrame = frame
     frame.contentWindow.document = frame.contentDocument
     frames.push(frame)
     return frame
@@ -222,7 +238,10 @@ function paopaoHostFixture({ touchHost = true } = {}) {
         },
         contains(name) { return this.values.has(name) },
       },
-      append: () => {},
+      children: [],
+      append(...nodes) {
+        this.children.push(...nodes)
+      },
       addEventListener(type, callback) {
         ;(this.handlers[type] ??= []).push(callback)
       },
@@ -232,6 +251,22 @@ function paopaoHostFixture({ touchHost = true } = {}) {
     }
     boxes.push(box)
     return box
+  }
+
+  function createButton() {
+    const el = {
+      className: 'quit',
+      removed: false,
+      handlers: {},
+      addEventListener(type, callback) {
+        ;(this.handlers[type] ??= []).push(callback)
+      },
+      remove() {
+        this.removed = true
+      },
+    }
+    buttons.push(el)
+    return el
   }
 
   const context = {
@@ -248,7 +283,7 @@ function paopaoHostFixture({ touchHost = true } = {}) {
     },
     SwfPlayer: FakeSwfPlayer,
     div: () => createBox(),
-    button: () => ({ remove: () => {} }),
+    button: () => createButton(),
     clampRoot,
     paopaoGameArea,
     setTimeout: (run) => { run(); return 0 },
@@ -357,6 +392,22 @@ function paopaoHostFixture({ touchHost = true } = {}) {
     },
   }
   return host
+}
+
+/** Root + four base windows + six bubbles: paopao2's full 11-shell budget. */
+async function fillPaopao2(host) {
+  host.play()
+  await host.settle()
+  host.createWindow('wnd_name_status_mood', 'status_mood.swf', 316, 720, 140, 20)
+  host.createWindow('wnd_name_status_count', 'status_count.swf', 236, 650, 60, 55)
+  host.createWindow('wnd_name_prompt_mood', 'prompt_mood.swf', 291, 568, 180, 90, { show: false })
+  host.createWindow('wnd_name_prompt_money', 'prompt_money.swf', 241, 581, 300, 180, { show: false })
+  await host.settle()
+  host.createWindow('b1', 'BubbleGreen.swf', 316, 580, 70, 70, { show: false })
+  host.rootApi.Show(1, 'b1')
+  for (let i = 2; i <= 6; i++) host.createWindow(`b${i}`, 'BubbleGreen.swf', 316, 580, 70, 70)
+  await host.settle()
+  assert.equal(host.state().shells.size, 11, 'fixture must fill paopao2 to its 11-shell cap')
 }
 
 test('paopao2 maps only the root onto the virtual game area; children keep real coordinates', () => {
@@ -574,6 +625,22 @@ test('the paopao2 pool caps at 11 and evicts the oldest shown bubble, never a pr
   assert.equal(host.players.filter((player) => player.destroyed).length, 1)
   assert.equal(host.state().wins.has('b1'), true, 'provisional windows are still protected')
   assert.equal(host.state().wins.has('b3'), false, 'the next oldest shown bubble was destroyed')
+})
+
+test('a full paopao2 game keeps all 11 shells pooled after quit and reopens without new players', async () => {
+  const host = paopaoHostFixture()
+  await fillPaopao2(host)
+  const frameCount = host.frames.length
+  const playerCount = host.players.length
+
+  host.rootApi.DestroyWindow()
+  await host.settle()
+  assert.equal(host.state().wins.size, 0, 'quit closes every game window')
+  assert.equal(host.state().shells.size, 11, 'quit must not trim the pool to DEFAULT_SHELL_CAP=9')
+
+  await fillPaopao2(host)
+  assert.equal(host.frames.length, frameCount, 'reopening paopao2 must reuse all 11 iframes')
+  assert.equal(host.players.length, playerCount, 'reopening paopao2 must reuse all 11 SwfPlayer instances')
 })
 
 test('a failed SWF load discards the iframe and player instead of leaving an empty window', async () => {

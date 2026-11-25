@@ -417,8 +417,11 @@ function destroy(w: Win | null | undefined): void {
   if (!w || wins.get(w.name) !== w) return
   for (const c of [...wins.values()]) if (c.parent === w) destroy(c)
   wins.delete(w.name)
-  if (w === root) finish()
+  // Recycle while the game directory is still active: finish() clears `dir`, and trimPool() would
+  // then fall back to DEFAULT_SHELL_CAP=9 instead of the game's real budget (paopao2: 11 → 9,
+  // destroying two WASM shells after every full round).
   recycle(w)
+  if (w === root) finish()
 }
 
 /** A failed load must not leave an empty iframe (or a dead player) behind. */

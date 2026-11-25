@@ -58,7 +58,7 @@
 - 池键：`${swf}|${w}x${h}`；跨局保留；达到 `shellCap()` 时按“pooled 动态窗 → 其它游戏 idle base/root → 当前可见 dynamic → 当前游戏 idle base”顺序驱逐；**永不驱逐**当前 root、可见 base、未 show 的 provisional 窗。
 - 复用：更新 name/parent/dir/坐标/尺寸，复位 `hidden/display`，重绑 `frame.contentWindow.API` + `TICKLE_*`；同一 `SwfPlayer.load(newSwf)` 重置 SWF；root 的 quit 按钮随 shell 保留，不要重复 append。
 - 加载失败：`SwfPlayer.load` reject/timeout 必须 `discard`（隐藏、销毁 player、移除 iframe、从 wins/pool 删除）；root 失败必须恢复 `#pet`/`setDeskGame('')`。
-- 退出：`finish()` 恢复 pet、`root=null`、`dir=''`；所有 shell 回池；可见游戏窗 0；不要依赖 `setTimeout(box.remove())` 释放内存。
+- 退出：`finish()` 恢复 pet、`root=null`、`dir=''`；所有 shell 回池；可见游戏窗 0；不要依赖 `setTimeout(box.remove())` 释放内存。回池必须发生在 `finish()` 之前，按退出前游戏的 `shellCap()` 裁剪：完整 paopao2 局（11 shell）退出后池数量仍须为 11，不能回退到 `DEFAULT_SHELL_CAP=9`。
 
 ## 5. 渲染与性能（R3）
 
