@@ -9,9 +9,18 @@ registerHooks({
     }
     return nextResolve(specifier)
   },
+  load(url, context, nextLoad) {
+    // The storage pane only needs its pure refresh planner; stub the DOM dialog
+    // module so Node never evaluates renderer DOM/CSS imports.
+    if (url.endsWith('/renderer/ui/window-view.ts')) {
+      return { format: 'module', shortCircuit: true, source: 'export function windowView() {}\n' }
+    }
+    return nextLoad(url, context)
+  },
 })
 
 const { createMobileServerRuntime } = await import('../../src/mobile/server-mode.ts')
+const { planStorageRefresh } = await import('../../src/renderer/ui/storage.ts')
 const { createSyncFixtures, GAME_TIME_MS } = await import('./sync-fixtures.mjs')
 const { PROTOCOL_VERSION, SAVE_SCHEMA_VERSION } = await import('../../src/shared/sync/index.ts')
 
@@ -20,6 +29,14 @@ const SERVER_URL = 'ws://127.0.0.1:8787/v1/sync'
 const PET_ID = 'pet-0001'
 const DEVICE_ID = 'server-device-0001'
 const AUTHORITY = fixtures.remoteCache.authority
+
+function syncConfigJson() {
+  return JSON.stringify({ serverUrl: SERVER_URL, petId: PET_ID, deviceId: DEVICE_ID, lastRevision: 0, lastEventSeq: 0 })
+}
+
+function storageConfigJson(mode) {
+  return JSON.stringify({ format: 'qqpet-storage-config', schemaVersion: 1, mode, serverUrl: SERVER_URL, deviceLabel: 'Android' })
+}
 
 function welcomeFrame(issuedToken) {
   return {
@@ -162,6 +179,8 @@ function localStatus() {
 function memoryLocal() {
   let started = false
   let suspended = false
+  let loadCalls = 0
+  let lastLoadedSave = null
   let projectionListener = null
   let resyncListener = null
   let commandListener = null
@@ -169,7 +188,16 @@ function memoryLocal() {
   return {
     get started() { return started },
     get suspended() { return suspended },
-    async load() { started = true; return fixtures.save },
+    get loadCalls() { return loadCalls },
+    get lastLoadedSave() { return lastLoadedSave },
+    async load() {
+      loadCalls += 1
+      started = true
+      // The real MobileLocalRepositoryBridge.load() returns a fresh JSON clone;
+      // identity of this object exposes any extra runtime-level clone.
+      lastLoadedSave = JSON.parse(JSON.stringify(fixtures.save))
+      return lastLoadedSave
+    },
     async command() { return { status: 'applied', commandType: 'pet.cheer', opId: 'local-op', commandSeq: 1, revision: 2, eventSeq: 2, result: {} } },
     async setAdvanceWhileEmpty() {},
     async exportPortableBundleJson() { return JSON.stringify(fixtures.bundle) },
@@ -258,6 +286,104 @@ test('server mode without a cache falls back to the local pet and preserves pair
   assert.match(status.notice ?? '', /离线/)
   assert.equal(status.mode, 'local')
   await runtime.stop()
+})
+
+test('an unreadable Keystore token keeps the persisted server mode and retries on the next start', async () => {
+  const native = memoryNative()
+  native.saveRemoteToken('android-token-1')
+  native.writeAtomic('sync-config.json', syncConfigJson())
+  native.writeAtomic('storage-config.json', storageConfigJson('server'))
+  native.loadRemoteToken = () => JSON.stringify({ status: 'error', error: 'keystore decrypt failed' })
+  const first = createMobileServerRuntime({ local: memoryLocal(), native, appVersion: 'test', transport: fakeTransport(), connectTimeoutMs: 50 })
+  const save = await first.load()
+  assert.equal(save.havePet, true, 'this run falls back to the local pet')
+  const status = await first.storage.status()
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.mode, 'server', 'the requested mode must stay server after a transient read failure')
+  assert.match(status.lastError ?? '', /keystore decrypt failed/)
+  assert.match(status.notice ?? '', /不可读/)
+  assert.equal(JSON.parse(native.files.get('storage-config.json')).mode, 'server', 'startup must not persist a local downgrade')
+  await first.stop()
+
+  // Once the Keystore recovers, the same persisted mode=server is retried at startup.
+  native.loadRemoteToken = () => JSON.stringify({ status: 'ok', text: 'android-token-1' })
+  const second = createMobileServerRuntime({ local: memoryLocal(), native, appVersion: 'test', transport: fakeTransport(), connectTimeoutMs: 200 })
+  await second.load()
+  assert.equal(second.runtimeInfo().serverMode, true)
+  assert.equal((await second.storage.status()).activeMode, 'server')
+  await second.stop()
+})
+
+test('a corrupt sync config keeps the persisted server mode for the next retry', async () => {
+  const native = memoryNative()
+  native.saveRemoteToken('android-token-1')
+  native.writeAtomic('sync-config.json', '{"serverUrl":')
+  native.writeAtomic('storage-config.json', storageConfigJson('server'))
+  const runtime = createMobileServerRuntime({ local: memoryLocal(), native, appVersion: 'test', transport: fakeTransport(), connectTimeoutMs: 50 })
+  const save = await runtime.load()
+  assert.equal(save.havePet, true)
+  const status = await runtime.storage.status()
+  assert.equal(status.activeMode, 'local')
+  assert.equal(status.mode, 'server')
+  assert.match(status.lastError ?? '', /state_corrupt/)
+  assert.equal(JSON.parse(native.files.get('storage-config.json')).mode, 'server')
+  await runtime.stop()
+})
+
+test('a corrupt storage config is surfaced and left untouched', async () => {
+  const native = memoryNative()
+  native.writeAtomic('storage-config.json', '{"mode":')
+  const runtime = createMobileServerRuntime({ local: memoryLocal(), native, appVersion: 'test', transport: fakeTransport(), connectTimeoutMs: 50 })
+  await runtime.load()
+  const status = await runtime.storage.status()
+  assert.equal(status.activeMode, 'local')
+  assert.match(status.notice ?? '', /存储配置不可读/)
+  assert.equal(native.files.get('storage-config.json'), '{"mode":', 'a corrupt config must not be rewritten during startup')
+  await runtime.stop()
+})
+
+test('local commands and settings do not reload the save, and each renderer load takes one bridge copy', async () => {
+  const native = memoryNative()
+  const local = memoryLocal()
+  const runtime = createMobileServerRuntime({ local, native, appVersion: 'test', transport: fakeTransport(), connectTimeoutMs: 50 })
+  const first = await runtime.load()
+  assert.equal(local.loadCalls, 1)
+  assert.equal(first, local.lastLoadedSave, 'runtime.load must reuse the bridge copy instead of cloning it twice')
+  const loadsAfterFirst = local.loadCalls
+
+  await runtime.command({ type: 'pet.cheer', payload: {} })
+  assert.equal(local.loadCalls, loadsAfterFirst, 'an already-started local command must not call local.load()')
+  await runtime.localSettings.load()
+  assert.equal(local.loadCalls, loadsAfterFirst, 'local settings reads must not call local.load()')
+  await runtime.setAdvanceWhileEmpty(true)
+  assert.equal(local.loadCalls, loadsAfterFirst, 'advance-while-empty writes must not call local.load()')
+
+  const second = await runtime.load()
+  assert.equal(local.loadCalls, loadsAfterFirst + 1, 'each renderer load takes exactly one fresh bridge copy')
+  assert.equal(second, local.lastLoadedSave)
+  await runtime.stop()
+})
+
+test('a paired local-authority device never requests or surfaces a fake offline device error', () => {
+  const fakeOffline = { devices: [], owner: false, canRevoke: false, error: 'offline: pair a server first' }
+  const localPlan = planStorageRefresh({ paired: true, activeMode: 'local' }, fakeOffline)
+  assert.equal(localPlan.listDevices, false, 'a local-authority device has no server session to list devices from')
+  assert.deepEqual(localPlan.devices, [])
+  assert.equal(localPlan.message, '', 'the canned offline reply must not become a storage panel error')
+
+  const serverPlan = planStorageRefresh(
+    { paired: true, activeMode: 'server' },
+    { devices: [{ deviceId: 'device-1' }], owner: true, canRevoke: true },
+  )
+  assert.equal(serverPlan.listDevices, true)
+  assert.deepEqual(serverPlan.devices, [{ deviceId: 'device-1' }])
+  assert.equal(serverPlan.message, '')
+
+  const ownerOnly = planStorageRefresh(
+    { paired: true, activeMode: 'server' },
+    { devices: [], owner: false, canRevoke: false, error: 'unauthorized: only an owner device can list devices' },
+  )
+  assert.equal(ownerOnly.message, '', 'player devices keep the existing silent unauthorized handling')
 })
 
 test('unpair clears the token/config/cache and restores the local pet', async () => {

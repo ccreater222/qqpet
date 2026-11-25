@@ -1,4 +1,4 @@
-import type { DeviceInfo, StorageStatusView } from '../../shared/storage'
+import type { DeviceInfo, StorageDeviceListView, StorageStatusView } from '../../shared/storage'
 import { buildStoragePanelModel, storageStatusRows } from '../../shared/storage'
 import type { Option } from './setup'
 import { windowView } from './window-view'
@@ -52,6 +52,34 @@ function ensureSubscription(): void {
   })
 }
 
+export interface StorageRefreshPlan {
+  /** Whether this status has a live server session to ask for a device list. */
+  listDevices: boolean
+  devices: DeviceInfo[]
+  message: string
+}
+
+/**
+ * Pure state merge for one storage-panel refresh. A paired device running on
+ * the local authority has no live server session, so it must neither request
+ * `listDevices()` nor surface the mobile host's canned
+ * `offline: pair a server first` reply as a storage error.
+ */
+export function planStorageRefresh(
+  status: Pick<StorageStatusView, 'paired' | 'activeMode'>,
+  view: StorageDeviceListView | null = null,
+): StorageRefreshPlan {
+  const listDevices = status.paired === true && status.activeMode === 'server'
+  if (listDevices === false) return { listDevices: false, devices: [], message: '' }
+  if (view === null) return { listDevices: true, devices: [], message: '' }
+  const error = view.error
+  return {
+    listDevices: true,
+    devices: view.devices,
+    message: error !== undefined && error.startsWith('unauthorized') === false ? error : '',
+  }
+}
+
 async function refresh(): Promise<void> {
   const storage = api()
   if (storage === undefined) return
@@ -61,12 +89,14 @@ async function refresh(): Promise<void> {
     if (statusValue.serverUrl) draft.serverUrl = statusValue.serverUrl
     if (statusValue.deviceLabel) draft.deviceLabel = statusValue.deviceLabel
     if (knownRestoreGeneration === undefined) knownRestoreGeneration = statusValue.authority.restoreGeneration
-    if (statusValue.paired) {
-      const view = await storage.listDevices()
-      devicesValue = view.devices
-      if (view.error && view.error.startsWith('unauthorized') === false) message = view.error
+    const plan = planStorageRefresh(statusValue)
+    if (plan.listDevices) {
+      const merged = planStorageRefresh(statusValue, await storage.listDevices())
+      devicesValue = merged.devices
+      message = merged.message
     } else {
-      devicesValue = []
+      devicesValue = plan.devices
+      message = plan.message
     }
   } catch (e) {
     message = '读取存储状态失败：' + reason(e)
