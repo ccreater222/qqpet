@@ -81,7 +81,7 @@
 - `API.*` 的窗口查找必须 null-safe：SWF 会持有已池化/已销毁的窗口名；`of()` 返回 undefined 时方法返回 `0/''/安全值`，不能 TypeError。
 - `CreateWindow` 返回 0 表示宿主拒绝（达上限/加载失败）；SWF 必须能降级（不画该对象/重试/结束回合），不能死循环等窗口。
 - `DestroyWindow` 幂等；`Show` 只改可见性；`RemoteCall` 目标不存在时 no-op；`GetWindowRect/Position` 对 root 返回虚拟坐标，对子窗返回真实坐标。
-- **`Show` 语义按游戏声明**：默认 qqpet 语义 `0=显示/1=隐藏`（paopao2 bubble、guess、ball 等）；Windows 语义 SWF 是 `1=显示/0=隐藏`，当前只有 **100ceng**（`MainWindow.playerShow` 调 `Show(1)` 显示 player）。新游戏若来自 Win32，必须在 `Show` 增加明确分支 + 单元测试，不能全局反转。
+- **`Show` 语义按游戏声明**：默认 qqpet 语义 `0=显示/1=隐藏`（paopao2 bubble、guess 等）；Windows 语义 SWF 是 `1=显示/0=隐藏`，当前为 **100ceng**（`MainWindow.playerShow` 调 `Show(1)` 显示 player）与 **ball**（`letballMove` 调 `Show(1)` 显示球，`onBallWinRemove` 调 `Show(0)` 隐藏球）。新游戏若来自 Win32，必须在 `Show` 增加明确分支 + 单元测试，不能全局反转。
 - 不允许 SWF 在 `CreateWindow` 里同步等待宿主；宿主不允许在 `CallExternalInterface` 里重入同一玩家。
 
 ## 8. 输入与原生键桥（R6）
@@ -103,7 +103,7 @@
 | paopao2 | root+4 base+最多 6 Bubble；虚拟区 `offset=180`；0=show；prompt eager（lazy 会阻塞 onWindowCreate） | 两轮 Bubble；>3 落点；<850MB |
 | rope | root+4 base；中央 `waitToMouseDown_mc` 点一次，随后每个跳跃窗口点一次；非按住 | 启动/退出；节奏可人工复测 |
 | mouse | root+4 base+1 rat；rat 窗 PASSIVE；真实输入是 tap root/宠物（不是 rat）；第二轮菜单状态要复位 | 两轮；宠物跳/得分；第二轮 open |
-| ball | root+7 base+ball/shadow/fallball；intro 后点 `startbtn_mc/begin_mc` 才建 base/shadow | ball+shadow+4 base；完整颠球/结算；lightReopen |
+| ball | root+7 base+ball/shadow/fallball；`Show` 1=show/0=hide；intro 后点 `startbtn_mc/begin_mc` 才建 base/shadow | ball+shadow+4 base；完整颠球/结算；lightReopen |
 | 100ceng | root+cloud+player+2 prompt；cloud 文本 click→`playerShow`→`Show(1)`；D-pad 原生 37/39 | player 可见；按住 x 位移；无 stuck |
 
 ## 10. CS 边界（R7）
