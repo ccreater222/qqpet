@@ -760,13 +760,15 @@ function assertSharedGoodArray(value: unknown, path: string): asserts value is u
 }
 
 function assertTaskDefinitionBlob(value: unknown, path: string): void {
-  assertBlobObject(value, path, ['label', 'msg', 'obj', 'num', 'keep', 'reroll', 'good'], ['label', 'msg', 'obj', 'num'])
+  assertBlobObject(value, path, ['label', 'msg', 'obj', 'num', 'keep', 'reroll', 'good', 'festivalId', 'festivalIssueWeek'], ['label', 'msg', 'obj', 'num'])
   requireString(value.label, path + '.label')
   requireString(value.msg, path + '.msg')
   if (isEnum(value.obj, TASK_COUNTERS) === false) failSchema('invalid_schema', path + '.obj', 'unknown task counter')
   requireNonNegativeInteger(value.num, path + '.num')
   assertOptionalBooleanField(value, 'keep', path)
   assertOptionalNonNegativeIntegerField(value, 'reroll', path)
+  assertOptionalStringField(value, 'festivalId', path)
+  assertOptionalStringField(value, 'festivalIssueWeek', path)
   if (value.good !== undefined) {
     if (isStringArray(value.good) === false) failSchema('invalid_schema', path + '.good', 'expected good strings')
   }
@@ -778,8 +780,35 @@ function assertTaskListEntryBlob(value: unknown, path: string): void {
   assertSharedGoodArray(value.good, path + '.good')
 }
 
+function assertFestivalClaimsBlob(value: unknown, path: string): void {
+  requireRecord(value, path)
+  for (const [activityId, weeks] of Object.entries(value)) {
+    const weeksPath = path + '.' + activityId
+    requireRecord(weeks, weeksPath)
+    for (const [issueWeek, claimed] of Object.entries(weeks)) {
+      if (claimed !== true) failSchema('invalid_schema', weeksPath + '.' + issueWeek, 'expected true')
+    }
+  }
+}
+
+function assertFestivalStreakBlob(value: unknown, path: string): void {
+  requireRecord(value, path)
+  for (const [activityId, streak] of Object.entries(value)) {
+    if (typeof streak !== 'number' || Number.isSafeInteger(streak) === false || streak < 1) {
+      failSchema('invalid_schema', path + '.' + activityId, 'expected a positive integer streak')
+    }
+  }
+}
+
+function assertFestivalBadgesBlob(value: unknown, path: string): void {
+  requireRecord(value, path)
+  for (const [activityId, badge] of Object.entries(value)) {
+    requireString(badge, path + '.' + activityId)
+  }
+}
+
 function assertTaskBlob(value: unknown, path: string): void {
-  assertBlobObject(value, path, ['doNums', 'taskList', 'daily', 'dailyDay'])
+  assertBlobObject(value, path, ['doNums', 'taskList', 'daily', 'dailyDay', 'festivalClaims', 'festivalStreak', 'festivalBadges'])
   if (value.doNums !== undefined) {
     assertBlobObject(value.doNums, path + '.doNums', TASK_COUNTERS)
     for (const [counter, count] of Object.entries(value.doNums)) {
@@ -800,6 +829,9 @@ function assertTaskBlob(value: unknown, path: string): void {
     assertBlobArray(value.daily, path + '.daily')
     value.daily.forEach((task, index) => assertTaskDefinitionBlob(task, path + '.daily[' + index + ']'))
   }
+  if (value.festivalClaims !== undefined) assertFestivalClaimsBlob(value.festivalClaims, path + '.festivalClaims')
+  if (value.festivalStreak !== undefined) assertFestivalStreakBlob(value.festivalStreak, path + '.festivalStreak')
+  if (value.festivalBadges !== undefined) assertFestivalBadgesBlob(value.festivalBadges, path + '.festivalBadges')
   assertOptionalFiniteNumberField(value, 'dailyDay', path)
 }
 

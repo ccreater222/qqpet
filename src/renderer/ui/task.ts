@@ -31,16 +31,17 @@ export function openTask(): void {
       reward.textContent = t.take ? '✓ 已领取' : ready ? '领取奖励' : '未达成'
       reward.addEventListener('click', () => {
         if (!ready) return
+        const options = t.festivalId !== undefined ? { festival: true, shareText: t.msg } : undefined
         if (runtimeProjectionMode) {
           void claimRuntime(tab, i).then((goods) => {
             render()
-            if (goods !== null) showResult(root, goods)
+            if (goods !== null) showResult(root, goods, '', options)
           })
           return
         }
         const goods = claim(tab, i)
         render()
-        showResult(root, goods || [], '还没完成任务哦！~~')
+        showResult(root, goods || [], goods ? '' : '还没完成任务哦！~~', options)
       })
       return div(
         'taskOnce fc',

@@ -1,7 +1,7 @@
 import type { CommandPayloadMap } from '../sync/protocol'
 import type { SharedSaveData } from '../sync/data-boundary'
 import { TRAVEL_PROVINCES, WORK_GOODS, STUDY_GOODS, type RuntimeGood } from './content/index'
-import { domainEvent } from './events'
+import { domainEvent, type DomainEvent } from './events'
 import {
   cancelPendingJobs,
   clearAllActivities,
@@ -15,6 +15,7 @@ import {
   writeTaskProgress,
 } from './runtime-helpers'
 import { counterValue, ensureTaskTables, taskDefinitionAt } from './runtime-tasks'
+import { CRAZY_THURSDAY, festivalMilestoneGood, festivalStreakForClaim } from './festival'
 import { dayKeyAt } from './time'
 import { answerIslandQuiz, startExam, startIslandQuiz, submitExam, type SessionHandlerOutcome } from './sessions'
 import type { HandlerContext, HandlerResult } from './handler-types'
@@ -158,17 +159,65 @@ export function claimTaskReward(context: HandlerContext, payload: CommandPayload
   const entry = progress.taskList[payload.tab][payload.index]
   if (definition === undefined || entry === undefined) reject('not_available', 'unknown task')
   if (entry.take) reject('already_claimed', 'task reward has already been claimed')
+  // 特供任务额外用 festivalClaims 账本拦截「改时区重掷 daily 表」后的重复领取。
+  if (definition.festivalId !== undefined) {
+    if (definition.festivalIssueWeek === undefined) reject('internal', 'festival task is missing its issue week')
+    if (progress.festivalClaims?.[definition.festivalId]?.[definition.festivalIssueWeek] === true) {
+      reject('already_claimed', 'task reward has already been claimed')
+    }
+  }
   const done = definition.obj === 'Travel2' ? save.gameSaveDatas.travel_china.length : counterValue(save, definition.obj)
   if (done < definition.num) reject('not_available', 'task is not complete')
   entry.take = true
+  let festivalStreak: number | undefined
+  let festivalBadge: string | undefined
+  if (definition.festivalId !== undefined && definition.festivalIssueWeek !== undefined) {
+    const activityId = definition.festivalId
+    const issueWeek = definition.festivalIssueWeek
+    const claims = progress.festivalClaims ?? {}
+    const weeks = claims[activityId] ?? {}
+    // 先按已有账本算出连续周数，再把本周写入账本，避免本周被当成「上一周」。
+    const streak = festivalStreakForClaim(progress.festivalStreak?.[activityId] ?? 0, Object.keys(weeks), issueWeek)
+    weeks[issueWeek] = true
+    claims[activityId] = weeks
+    progress.festivalClaims = claims
+    const streaks = progress.festivalStreak ?? {}
+    streaks[activityId] = streak
+    progress.festivalStreak = streaks
+    festivalStreak = streak
+    const badges = progress.festivalBadges ?? {}
+    if (streak >= CRAZY_THURSDAY.streakWeeks && badges[activityId] === undefined) {
+      badges[activityId] = CRAZY_THURSDAY.badgeTitle
+      progress.festivalBadges = badges
+      festivalBadge = CRAZY_THURSDAY.badgeTitle
+    }
+  }
   writeTaskProgress(save, progress)
   grantGoods(save, entry.good)
+  // 常客徽章与纪念玩具只在首次达到连续周数时发放，重复领取已被上面的幂等检查拦截。
+  if (festivalBadge !== undefined) grantGoods(save, [festivalMilestoneGood()])
+  const events: DomainEvent[] = [
+    domainEvent('task.claimed', {
+      tab: payload.tab,
+      index: payload.index,
+      counter: definition.obj,
+      ...(definition.festivalId === undefined
+        ? {}
+        : {
+            festivalId: definition.festivalId,
+            festivalStreak: festivalStreak ?? 0,
+            ...(festivalBadge === undefined ? {} : { festivalBadge }),
+          }),
+    }),
+    domainEvent('reward.granted', { source: 'task', count: entry.good.length }),
+  ]
+  // 纪念玩具不在任务 entry.good 里，单独补一条 reward 事件避免审计少计。
+  if (festivalBadge !== undefined) {
+    events.push(domainEvent('reward.granted', { source: 'festival-milestone', count: 1 }))
+  }
   return {
     result: json({ tab: payload.tab, index: payload.index, goods: entry.good.map(good => ({ id: good.id, type: good.type, num: good.num })) }),
-    events: [
-      domainEvent('task.claimed', { tab: payload.tab, index: payload.index, counter: definition.obj }),
-      domainEvent('reward.granted', { source: 'task', count: entry.good.length }),
-    ],
+    events,
   }
 }
 

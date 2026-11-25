@@ -27,6 +27,10 @@ interface Task {
   /** Rerolled every day: that many random goods, besides `good`. */
   reroll?: number
   good?: string[]
+  /** 疯狂星期四特供任务的活动 ID；普通任务不设置。 */
+  festivalId?: string
+  /** 特供任务所属周（该周周四的 dayKey）；普通任务不设置。 */
+  festivalIssueWeek?: string
 }
 
 export const TABS: Record<Tab, string> = { daily: '今日任务', ddw: '逗逗我', growth: '学习打工', travel: '旅游任务' }

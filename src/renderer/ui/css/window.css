@@ -162,3 +162,46 @@
 .ui-window .sweetHeart .title {
   display: none;
 }
+/* 疯狂星期四「晒餐盒」：windowView 的大图预览分支（600x800 SVG）。 */
+.ui-window .windowView.shareView {
+  width: auto;
+  height: auto;
+  max-width: 96vw;
+  padding: 34px 10px 58px;
+  box-sizing: border-box;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 28px #0003;
+}
+.ui-window .windowView.shareView .main {
+  position: static;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  display: block;
+}
+.ui-window .windowView.shareView .msg {
+  display: block;
+  overflow: hidden;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  -webkit-box-orient: initial;
+  min-height: 0;
+  margin-bottom: 8px;
+  text-align: center;
+}
+.ui-window .sharePreview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+}
+.ui-window .sharePreview img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(90vw, 100%);
+  max-height: 70vh;
+  object-fit: contain;
+}

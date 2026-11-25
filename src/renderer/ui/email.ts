@@ -3,7 +3,7 @@ import { speak } from '../pet/pet'
 import { readMails, writeMails, type Live } from '../pet/mail'
 import { onStoreEvent, runtimeProjectionMode } from '../pet/store'
 import { uiCommands } from '../pet/command-map'
-import { commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
+import { commandResultGoods, commandSucceeded, dispatchRuntimeCommand } from '../pet/runtime-command'
 import { photoUrl } from '../pet/album'
 import { openPhoto } from './album'
 import { openFrame } from './box'
@@ -13,6 +13,7 @@ import { button, div, img } from './dom'
 import { frame } from './frame'
 import { openPhoneEmail } from './mobile/phone-email'
 import { phoneUI } from './mobile/sizing'
+import { isFestivalActiveMailKey, showResult } from './result'
 
 const BG = ['bg_01.png', 'bg_02.bmp', 'bg_03.png', 'bg_04.bmp', 'bg_05.bmp', 'bg_06.bmp', 'bg_8.png', 'bg_09.png', 'bg_10.png']
 
@@ -30,12 +31,14 @@ export function openEmail(): void {
   const live = (): Live[] => Object.values(runtimeProjectionMode ? readMails() : mails)
     .filter((m): m is Live => m.e === undefined)
     .reverse()
-  const act = (list: Live[]): void => {
+  const act = (list: Live[], fromBulk = false): void => {
     if (runtimeProjectionMode) {
       if (list.length === 0) return
       const claiming = list.some(m => m.r !== true)
       const allClaimed = list.every(m => m.r === true)
       const allUnclaimed = list.every(m => m.r === undefined || m.r === false)
+      // 单封领取才展示结果面板；一键领取/删除保持原样，避免逐个弹窗。
+      const singleClaim = !fromBulk && list.length === 1 && list[0].r !== true ? list[0] : null
       const commands = list.length > 1 && allClaimed
         ? [uiCommands.mailDeleteAll()]
         : list.length > 1 && allUnclaimed
@@ -44,6 +47,8 @@ export function openEmail(): void {
       void Promise.all(commands.map(command => dispatchRuntimeCommand(command))).then((results) => {
         if (results.every(commandSucceeded) === false) return
         if (claiming) speak({ s: '[host]，邮箱奖励领取成功！~', now: true }, 'speak')
+        if (singleClaim !== null && isFestivalActiveMailKey(singleClaim.k))
+          showResult(content, commandResultGoods(results[0] ?? null), '', { festival: true, shareText: singleClaim.m || 'V我50！' })
         window.setTimeout(render, 0)
       })
       return
@@ -53,6 +58,8 @@ export function openEmail(): void {
       else {
         give(m.glb, m.m || '邮箱领取成功！')
         m.r = true
+        if (!fromBulk && list.length === 1 && isFestivalActiveMailKey(m.k))
+          showResult(content, m.glb, '', { festival: true, shareText: m.m || 'V我50！' })
       }
     }
     writeMails(mails)
@@ -80,6 +87,7 @@ export function openEmail(): void {
             'rightMain f1 fC w0',
             div('e_title', m.l),
             div('e_time', formatDate(m.d, 'YYYY-MM-DD HH:mm')),
+            ...(m.m ? [Object.assign(div('e_body', m.m), { title: m.m })] : []),
             div(
               'e_icons f1 mt2',
               m.p
@@ -107,8 +115,8 @@ export function openEmail(): void {
     div(
       'e_foot fcc',
       div('e_pager fcc', prev, at, next),
-      button('fcc wsnw getEmail getEmails', () => act(live().filter((m) => !m.r)), ' 一键领取 '),
-      button('fcc wsnw rgetEmail rgetEmails', () => act(live().filter((m) => m.r)), ' 一键删除 '),
+      button('fcc wsnw getEmail getEmails', () => act(live().filter((m) => !m.r), true), ' 一键领取 '),
+      button('fcc wsnw rgetEmail rgetEmails', () => act(live().filter((m) => m.r), true), ' 一键删除 '),
     ),
   )
   const closeFrame = openFrame(

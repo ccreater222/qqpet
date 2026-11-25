@@ -2,3 +2,24 @@
 .markFull .getResultBorder {border:1px solid #f1ac65;border-radius:8px;padding:10px}
 .markFull .grb_mgs {padding:8px;color:#000;font-size:12px;max-height:400px;overflow:hidden auto}
 .markFull .e_goodImgs {width:20px;height:20px}
+
+/* 疯狂星期四：餐盒开箱的轻量弹入动画；只动 transform/opacity，不拦截点击。 */
+@keyframes festival-box-open {
+  0% {opacity:0;transform:scale(.82) translateY(6px)}
+  60% {opacity:1;transform:scale(1.03) translateY(0)}
+  100% {opacity:1;transform:scale(1) translateY(0)}
+}
+.markFull.festival-result .getResult {transform-origin:50% 80%;animation:festival-box-open .36s cubic-bezier(.22,1,.36,1) both}
+.markFull.festival-result .grb_goods {transform-origin:50% 80%;animation:festival-box-open .42s cubic-bezier(.22,1,.36,1) both}
+.markFull.festival-result .grb_goods:nth-child(2) {animation-delay:.04s}
+.markFull.festival-result .grb_goods:nth-child(3) {animation-delay:.08s}
+.markFull.festival-result .grb_goods:nth-child(4) {animation-delay:.12s}
+.markFull.festival-result .grb_goods:nth-child(5) {animation-delay:.16s}
+.markFull .festival-share-text {margin-top:6px;padding:4px 6px;border-radius:6px;background:#fff0cf;color:#8a4b16;font-size:11px;line-height:1.4}
+.markFull .festival-share {background-color:#e94b35;color:#fff}
+.markFull .festival-share:hover {background-color:#d43f2a}
+.markFull .festival-share:active {background-color:#b83422}
+@media (prefers-reduced-motion:reduce) {
+  .markFull.festival-result .getResult,
+  .markFull.festival-result .grb_goods {animation:none}
+}

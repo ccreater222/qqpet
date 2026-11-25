@@ -137,6 +137,8 @@ export interface TaskInput {
   num: number
   done: number
   take: boolean
+  /** 疯狂星期四特供任务：领取后展示「晒餐盒」入口。 */
+  festival?: boolean
 }
 
 export interface TaskRow {
@@ -155,6 +157,8 @@ export interface TaskRow {
   action: string
   /** The reward button is only live for a finished, unclaimed task. */
   enabled: boolean
+  /** 疯狂星期四特供任务：领取成功时展示餐盒开箱与分享入口。 */
+  festival: boolean
 }
 
 /** One task as the phone row renders it, with the desktop's claim rules. */
@@ -174,6 +178,7 @@ export function taskRow(task: TaskInput, index: number): TaskRow {
     state,
     action: state === 'claimed' ? '✓ 已领取' : state === 'ready' ? '领取奖励' : '未达成',
     enabled: state === 'ready',
+    festival: task.festival === true,
   }
 }
 

@@ -1,6 +1,7 @@
 import type { SharedSaveData } from '../sync/data-boundary'
 import type { CalendarInput } from './types'
 import { DAILY_TASK_TEMPLATES, STATIC_TASKS, parseGoodCode, type StaticTaskTemplate } from './content/index'
+import { festivalTaskForDayKey } from './festival'
 import {
   addTaskCount,
   localDate,
@@ -14,6 +15,7 @@ import {
   type TaskProgress,
   type TaskTab,
 } from './runtime-helpers'
+import { dayKeyAt } from './time'
 import type { RuntimeGood } from './content/index'
 
 function rewardGoods(template: StaticTaskTemplate, rng: RuntimeRng): RuntimeGood[] {
@@ -84,6 +86,9 @@ export function rollDailyTasks(
       good: ['_yb*' + String(rng.randIntInclusive(2, 5) * 10)],
     })
   }
+  // 特供任务固定在 4 条日常之后、法定节假日额外任务之前。
+  const festivalTask = festivalTaskForDayKey(dayKeyAt(gameTimeMs, timeZone), save, rng)
+  if (festivalTask !== null) daily.push(festivalTask)
   const holiday = calendarDay?.holiday
   if (holiday?.off) {
     daily.push({
@@ -197,6 +202,11 @@ export function resetDailyTasks(
     taskList: { daily: [], ...buildResetStaticTaskLists(previous, rng) },
     daily: previous.daily,
     dailyDay: previous.dailyDay,
+    // 日切/时区重掷不得丢失活动领奖账本，否则同一 issueWeek 可重复领奖。
+    festivalClaims: previous.festivalClaims,
+    // 常客进度与徽章跨日保留，否则连续四周会被日切打断。
+    festivalStreak: previous.festivalStreak,
+    festivalBadges: previous.festivalBadges,
   }
   writeTaskProgress(save, next)
   const daily = rollDailyTasks(save, gameTimeMs, timeZone, rng, calendarDay)

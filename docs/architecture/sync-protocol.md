@@ -63,6 +63,13 @@
 - 重复命令（同 `opId` 同类型）返回原结果并标记 `duplicate`，**不推进** `revision`/`eventSeq`（`server/src/command-service.ts:148-175`）；同 `opId` 不同命令返回 `op_id_conflict`。
 - 客户端把 `commandSeq` 当成「该设备在该宠物上的第几条命令」的展示序号，由服务端回填，不能让客户端自增。
 
+
+### 5.1 存档 blob 的可选活动字段
+
+- `saveJsonData.task` 的 `festivalClaims`/`festivalStreak`/`festivalBadges` 是可选存档字段，不改变 WS 帧、命令或快照线格式；旧档缺失按 `{}` 读取，空字段不落盘（`src/shared/pet-runtime/runtime-helpers.ts:167-178`、`:286-299`）。
+- `assertTaskBlob` 接受并校验这三个字段：`festivalClaims` 为两层 `Record<string, true>`，`festivalStreak` 为正整数，`festivalBadges` 为字符串（`src/shared/sync/data-boundary.ts:783-836`）。活动日 `TaskDefinition` 另带可选 `festivalId`/`festivalIssueWeek`（`src/shared/pet-runtime/runtime-helpers.ts:153-165`）。
+- 新字段不改变 `SAVE_SCHEMA_VERSION`；旧版本读取非空活动字段会因 allowlist 报 `forbidden_field`，回滚需清理活动任务/账本或使用兼容版本。共享任务的领取状态仍只由服务端命令结果与 `TaskProgress` 决定（`src/shared/pet-runtime/handlers-c.ts:148-222`）。
+
 ## 6. 权威代次、交接与恢复世代
 
 权威身份由两层结构描述：
