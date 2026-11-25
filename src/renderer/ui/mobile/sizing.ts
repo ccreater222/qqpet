@@ -49,9 +49,16 @@ export const phoneUI = (): boolean => phoneUIFrom({
 /** Turns on the phone stylesheet. Idempotent; other hosts and the desktop are untouched. */
 export const applyPhoneClass = (): boolean => {
   const on = phoneUI()
+  // Startup preloads this before the first phone paint; a resize that enters the phone
+  // layout later gets the stylesheet as soon as the class is applied.
+  if (on) void loadPhoneCss()
   document.body.classList.toggle('qp-phone', on)
   return on
 }
+
+let phoneCssRequest: Promise<unknown> | null = null
+/** Loads the phone-only stylesheets once; safe to call from bootstrap and from resize. */
+export const loadPhoneCss = (): Promise<unknown> => (phoneCssRequest ??= import('./phone-css'))
 
 /** A system bar or cutout inset, in CSS pixels, as the Android bridge reports it. */
 export const safeInset = (side: 'top' | 'right' | 'bottom' | 'left'): number => {

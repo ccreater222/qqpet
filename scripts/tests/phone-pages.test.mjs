@@ -426,13 +426,13 @@ test('each page branches to its phone sheet before the desktop window opens', ()
 
 test('the phone surfaces are sheets over the shared page logic', () => {
   const signin = read('../../src/renderer/ui/mobile/phone-signin.ts')
-  for (const needle of ["from './sheet'", "import '../css/phone-pages.css'", 'signToday(', 'takeOnlineGift(', 'drawGrowth(', 'uiCommands.signIn()', 'showResult(']) {
+  for (const needle of ["from './sheet'", 'signToday(', 'takeOnlineGift(', 'drawGrowth(', 'uiCommands.signIn()', 'showResult(']) {
     assert.ok(signin.includes(needle), `phone-signin.ts lost ${needle}`)
   }
   assert.match(signin, /openSheet\(\{[\s\S]*?title:\s*'签到'/)
 
   const task = read('../../src/renderer/ui/mobile/phone-task.ts')
-  for (const needle of ["from './sheet'", "import '../css/phone-pages.css'", 'claimRuntime(', 'claim(', 'showResult(']) {
+  for (const needle of ["from './sheet'", 'claimRuntime(', 'claim(', 'showResult(']) {
     assert.ok(task.includes(needle), `phone-task.ts lost ${needle}`)
   }
   assert.match(task, /openSheet\(\{[\s\S]*?title:\s*'任务'/)
@@ -440,7 +440,6 @@ test('the phone surfaces are sheets over the shared page logic', () => {
   const email = read('../../src/renderer/ui/mobile/phone-email.ts')
   for (const needle of [
     "from './sheet'",
-    "import '../css/phone-pages.css'",
     'readMails(',
     'writeMails(',
     'give(',
@@ -456,7 +455,7 @@ test('the phone surfaces are sheets over the shared page logic', () => {
   assert.match(email, /e:\s*true/)
 
   const profile = read('../../src/renderer/ui/mobile/phone-petinfo.ts')
-  for (const needle of ["from './sheet'", "import '../css/phone-pages.css'", 'uiCommands.rename(', 'setInfo(', 'formatDate(', 'progress']) {
+  for (const needle of ["from './sheet'", 'uiCommands.rename(', 'setInfo(', 'formatDate(', 'progress']) {
     if (needle === 'progress') continue
     assert.ok(profile.includes(needle), `phone-petinfo.ts lost ${needle}`)
   }

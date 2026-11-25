@@ -68,6 +68,8 @@
 - 隐藏窗必须 `setIdle(true)`/suspend；不可见 prompt 不加载 SWF；不在后台跑 RAF/计时器。
 - 新游戏要给出启动时间、峰值 RSS、单窗增量、最长单帧；超过预算要降级（少窗/池化/改内部对象）。
 
+- 手机小游戏样式（`phone-games.css` 等）由 `src/renderer/ui/mobile/phone-css.ts` 统一按需加载；`phone-games.ts` 不得再静态 import `phone-games.css`，桌面主 chunk/首屏不解析手机小游戏样式。
+
 ## 6. 屏幕/坐标/触摸（R4）
 
 - SWF 不得直接信 `Capabilities.screenResolution`；必须走宿主 `API.GetScreenWidth/Height`（26 个 SWF 补丁模式）。

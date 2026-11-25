@@ -3,7 +3,6 @@ import { WINDOW_MARGIN } from '../../shared/window-direction'
 import { div, touch } from './dom'
 import { pushBack } from './mobile/back'
 import { phoneUI } from './mobile/sizing'
-import './css/phone-panels.css'
 import { windowDirectionAvailable } from './viewport'
 
 const SKINS = {

@@ -37,7 +37,6 @@ import {
   type ShopView,
 } from './phone-shop-model'
 import { openSheet, type SheetHandle } from './sheet'
-import './phone-shop.css'
 
 const catalog = SHOP as ShopCatalog
 

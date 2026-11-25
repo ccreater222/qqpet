@@ -1,4 +1,5 @@
 import type { SaveData } from '../shared/save'
+import { phoneUI } from './ui/mobile/sizing'
 
 /** All eager UI modules receive an initialized store, without top-level await in the module graph. */
 export async function bootstrap(): Promise<void> {
@@ -36,6 +37,9 @@ export async function bootstrap(): Promise<void> {
         restoreGeneration: initialProjection.authority.restoreGeneration,
       }
   window.__qqpetInitialSave = initial
+  // Phone styles are a separate chunk: load them before the first phone paint so a
+  // sheet or menu never flashes the desktop styling. Non-phone hosts skip this load.
+  if (phoneUI()) await import('./ui/mobile/phone-css')
   await import('./main')
 }
 
