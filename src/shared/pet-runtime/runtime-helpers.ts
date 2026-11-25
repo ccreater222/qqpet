@@ -158,6 +158,10 @@ export interface TaskDefinition {
   keep?: boolean
   reroll?: number
   good?: string[]
+  /** 特供任务所属活动 ID；普通任务不设置。 */
+  festivalId?: string
+  /** 特供任务归属周（该周周四 dayKey）；普通任务不设置。 */
+  festivalIssueWeek?: string
 }
 export interface TaskEntry { take: boolean; good: RuntimeGood[] }
 export interface TaskProgress {
@@ -165,6 +169,12 @@ export interface TaskProgress {
   taskList: Record<TaskTab, TaskEntry[]>
   daily: TaskDefinition[]
   dailyDay: number
+  /** 活动领奖账本：activityId -> issueWeek -> 已领取；旧档按空对象读取。 */
+  festivalClaims?: Record<string, Record<string, true>>
+  /** 连续参与周数：activityId -> streak；旧档按空对象读取。 */
+  festivalStreak?: Record<string, number>
+  /** 已获得的常客徽章：activityId -> 徽章标题；旧档按空对象读取。 */
+  festivalBadges?: Record<string, string>
 }
 
 export interface SignInState {
@@ -243,7 +253,15 @@ export function writeSharedBlob(save: SharedSaveData, key: SharedSaveJsonKey, va
 }
 
 export function defaultTaskProgress(): TaskProgress {
-  return { doNums: {}, taskList: { daily: [], ddw: [], growth: [], travel: [] }, daily: [], dailyDay: 0 }
+  return {
+    doNums: {},
+    taskList: { daily: [], ddw: [], growth: [], travel: [] },
+    daily: [],
+    dailyDay: 0,
+    festivalClaims: {},
+    festivalStreak: {},
+    festivalBadges: {},
+  }
 }
 
 export function readTaskProgress(save: SharedSaveData): TaskProgress {
@@ -259,11 +277,25 @@ export function readTaskProgress(save: SharedSaveData): TaskProgress {
     },
     daily: parsed.daily ?? [],
     dailyDay: parsed.dailyDay ?? 0,
+    festivalClaims: parsed.festivalClaims ?? {},
+    festivalStreak: parsed.festivalStreak ?? {},
+    festivalBadges: parsed.festivalBadges ?? {},
   }
 }
 
 export function writeTaskProgress(save: SharedSaveData, task: TaskProgress): void {
-  writeSharedBlob(save, 'task', task)
+  // 空账本/空进度不落盘，保持普通存档与旧 golden 字节一致；有记录时才写入可选字段。
+  const serialized: TaskProgress = { ...task }
+  if (serialized.festivalClaims === undefined || Object.keys(serialized.festivalClaims).length === 0) {
+    delete serialized.festivalClaims
+  }
+  if (serialized.festivalStreak === undefined || Object.keys(serialized.festivalStreak).length === 0) {
+    delete serialized.festivalStreak
+  }
+  if (serialized.festivalBadges === undefined || Object.keys(serialized.festivalBadges).length === 0) {
+    delete serialized.festivalBadges
+  }
+  writeSharedBlob(save, 'task', serialized)
 }
 
 export function addTaskCount(save: SharedSaveData, counter: Exclude<TaskCounter, 'Travel2'>, amount = 1): TaskProgress {

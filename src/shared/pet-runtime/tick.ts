@@ -34,6 +34,7 @@ import { materializeIslandDay } from './island-runtime'
 import { tickFarmState } from './farm-runtime'
 import { tickFishingState } from './fishing-runtime'
 import { ensureTaskTables, resetDailyTasks } from './runtime-tasks'
+import { festivalMailForDayKey, festivalMailGoods, type FestivalRewardSpec } from './festival'
 import { resetFishLimits, settlePinkDiamond } from './handlers-b'
 import type { EngineState, JsonObject, RuntimeContext } from './types'
 import type { RuntimeBatchOutcome } from './runtime-types'
@@ -70,10 +71,19 @@ function resetSignInAtBoundary(save: SharedSaveData): void {
   writeSignIn(save, signin)
 }
 
+interface DueMail {
+  key: string
+  title: string
+  moodMessage: string
+  yb: number
+  /** 指定时使用活动奖池而不是固定 mailGoods；null 表示无附件。 */
+  goodsSpec?: FestivalRewardSpec | null
+}
+
 function deliverMails(state: EngineState, boundaryMs: number, dayKey: string, rng: RuntimeRng): DomainEvent[] {
   const save = state.save
   const mails = readMails(save)
-  const due: { key: string; title: string; moodMessage: string; yb: number }[] = []
+  const due: DueMail[] = []
   const liveUnclaimed = Object.values(mails).some(mail => ('e' in mail) === false)
   if (liveUnclaimed === false) due.push({ key: 'welcome', title: '欢迎来到QQ宠物~', moodMessage: '欢迎回家', yb: 100 })
   const local = localDate(boundaryMs, state.timeZone)
@@ -86,6 +96,17 @@ function deliverMails(state: EngineState, boundaryMs: number, dayKey: string, rn
   if (holiday?.off) {
     due.push({ key: String(local.year) + '-' + holiday.name, title: holiday.name + '快乐！', moodMessage: holiday.name + '快乐', yb: 200 })
   }
+  // 疯狂星期四：preview 无附件预告，active 发登录礼（元宝走难度缩放）。
+  const festivalMail = festivalMailForDayKey(dayKey)
+  if (festivalMail !== null) {
+    due.push({
+      key: festivalMail.key,
+      title: festivalMail.title,
+      moodMessage: festivalMail.moodMessage,
+      yb: 0,
+      goodsSpec: festivalMail.goodsSpec,
+    })
+  }
   const arrivals: DomainEvent[] = []
   let changed = false
   for (const mail of due) {
@@ -96,7 +117,9 @@ function deliverMails(state: EngineState, boundaryMs: number, dayKey: string, rn
       k: mail.key,
       l: mail.title,
       m: mail.moodMessage,
-      glb: mailGoods(save, mail.yb, rng),
+      glb: mail.goodsSpec === undefined
+        ? mailGoods(save, mail.yb, rng)
+        : mail.goodsSpec === null ? [] : festivalMailGoods(save, mail.goodsSpec, rng),
     }
     changed = true
     arrivals.push(event('mail.arrived', { mailId: String(slot), title: mail.title }))

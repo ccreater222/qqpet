@@ -1,8 +1,10 @@
 import type { CalendarDay } from '../../shared/ipc'
 import { findLast } from '../../shared/compat'
+import { CRAZY_THURSDAY, festivalLingerLineForDayKey, festivalLineForDayKey } from '../../shared/pet-runtime/festival'
 import { FESTIVAL, GREET, HOLIDAY } from './data/greet'
 import type { Line } from './data/talk'
 import { rand } from './rand'
+import { save } from './store'
 
 const WEEK = '日一二三四五六'
 
@@ -53,6 +55,20 @@ export function festivalExhausted(): boolean {
   return festivalSaid >= (userAnswered ? 2 : 3)
 }
 
+/** 疯狂星期四常客徽章：任务存档的可选字段，坏档静默视为未获得。 */
+function festivalBadgeTitle(): string | null {
+  try {
+    const task: unknown = JSON.parse(save.saveJsonData.task || '{}')
+    if (task === null || typeof task !== 'object') return null
+    const badges = (task as { festivalBadges?: unknown }).festivalBadges
+    if (badges === null || typeof badges !== 'object') return null
+    const title = (badges as Record<string, unknown>)[CRAZY_THURSDAY.activityId]
+    return typeof title === 'string' && title.length > 0 ? title : null
+  } catch {
+    return null
+  }
+}
+
 export function festival(): string | null {
   const [d, tomorrow] = days
   const now = new Date()
@@ -76,6 +92,13 @@ export function festival(): string | null {
   const cap = userAnswered ? 2 : 3
   if (festivalSaid >= cap) return null
   const said = (line: string): string => { festivalSaid++; saveThrottle(); return line }
+  // 疯狂星期四：周三预告/周四当日/周五余韵优先于普通节日文案；拿到四周常客徽章后换一句自我介绍。
+  const dayKey = d?.date ?? `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const festivalLine = festivalLineForDayKey(dayKey) ?? festivalLingerLineForDayKey(dayKey)
+  if (festivalLine) {
+    const badge = festivalBadgeTitle()
+    return said(badge ? `[host]，我可是「${badge}」，这周的疯狂星期四餐盒可别忘了留给我哦，V我50！~` : festivalLine)
+  }
   const holiday = tomorrow?.lunar === '正月初一' ? '除夕' : d?.holiday?.off ? d.holiday.name : null
   const lines = (holiday && HOLIDAY[holiday]) || FESTIVAL[solar] || (d && FESTIVAL[d.lunar])
   if (lines) return said(pick(lines))

@@ -12,10 +12,11 @@ import { readMails, writeMails, type Live } from '../../pet/mail'
 import { photoUrl } from '../../pet/album'
 import { onStoreEvent, runtimeProjectionMode } from '../../pet/store'
 import { uiCommands } from '../../pet/command-map'
-import { commandSucceeded, dispatchRuntimeCommand } from '../../pet/runtime-command'
+import { commandResultGoods, commandSucceeded, dispatchRuntimeCommand } from '../../pet/runtime-command'
 import '../css/phone-pages.css'
 import { formatDate } from '../date'
 import { div, img } from '../dom'
+import { isFestivalActiveMailKey, showResult } from '../result'
 import { MAIL_PAGE_SIZE, mailPage, mailRows, mailTotals, type MailPage, type MailRow } from './phone-pages-model'
 import { openSheet, type SheetHandle } from './sheet'
 
@@ -64,12 +65,14 @@ export function openPhoneEmail(): void {
   const body = div('qp-email')
   const footer = div('qp-email-footer')
 
-  function act(list: readonly MailRow[]): void {
+  function act(list: readonly MailRow[], fromBulk = false): void {
     if (list.length === 0) return
     if (runtimeProjectionMode) {
       const claiming = list.some((mail) => !mail.claimed)
       const allClaimed = list.every((mail) => mail.claimed)
       const allUnclaimed = list.every((mail) => !mail.claimed)
+      // 单封领取才展示结果面板；一键领取/删除保持原样，避免逐个弹窗。
+      const singleClaim = !fromBulk && list.length === 1 && !list[0].claimed ? list[0] : null
       const commands =
         list.length > 1 && allClaimed
           ? [uiCommands.mailDeleteAll()]
@@ -79,12 +82,20 @@ export function openPhoneEmail(): void {
       void Promise.all(commands.map((command) => dispatchRuntimeCommand(command))).then((results) => {
         if (results.every(commandSucceeded) === false) return
         if (claiming) speak({ s: '[host]，邮箱奖励领取成功！~', now: true }, 'speak')
+        if (singleClaim !== null) {
+          const mail = readMails()[singleClaim.key]
+          const host = sheet?.card
+          if (host && mail !== undefined && 'l' in mail && isFestivalActiveMailKey(mail.k))
+            showResult(host, commandResultGoods(results[0] ?? null), '', { festival: true, shareText: mail.m || 'V我50！' })
+        }
         window.setTimeout(() => {
           if (alive) render()
         }, 0)
       })
       return
     }
+    const single = !fromBulk && list.length === 1 ? list[0] : null
+    let singleFestival: Live | null = null
     for (const row of list) {
       const mail = mails[row.key]
       // New mail may have arrived since the render; a stale row must not resurrect.
@@ -94,10 +105,14 @@ export function openPhoneEmail(): void {
       else {
         give(live.glb, live.m || '邮箱领取成功！')
         live.r = true
+        if (single !== null && row.key === single.key && isFestivalActiveMailKey(live.k)) singleFestival = live
       }
     }
     writeMails(mails)
     render()
+    const host = sheet?.card
+    if (host && singleFestival !== null)
+      showResult(host, singleFestival.glb, '', { festival: true, shareText: singleFestival.m || 'V我50！' })
   }
 
   function rowElement(row: MailRow): HTMLElement {
@@ -180,8 +195,8 @@ export function openPhoneEmail(): void {
     const claimAll = div('qp-email-bulk-act', `一键领取${totals.claimable ? `（${totals.claimable}）` : ''}`)
     const deleteAll = div('qp-email-bulk-act', `一键删除${totals.deletable ? `（${totals.deletable}）` : ''}`)
     for (const [el, label, enabled, run] of [
-      [claimAll, '一键领取全部未领取邮件', totals.claimable > 0, () => act(rows.filter((row) => !row.claimed))],
-      [deleteAll, '一键删除全部已领取邮件', totals.deletable > 0, () => act(rows.filter((row) => row.claimed))],
+      [claimAll, '一键领取全部未领取邮件', totals.claimable > 0, () => act(rows.filter((row) => !row.claimed), true)],
+      [deleteAll, '一键删除全部已领取邮件', totals.deletable > 0, () => act(rows.filter((row) => row.claimed), true)],
     ] as const) {
       el.setAttribute('role', 'button')
       el.setAttribute('aria-label', label)

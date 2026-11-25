@@ -7,6 +7,8 @@ interface Dialog {
   title?: string
   msg: string
   goods?: Pick<Good, 'url' | 'name'>[]
+  /** A large image preview (e.g. the festival share card), shown instead of `goods`. */
+  image?: { url: string; alt?: string }
   /** Shows a quantity picker from 1 to max (initially `init` or max). */
   max?: number
   init?: number
@@ -30,7 +32,9 @@ export function windowView(d: Dialog): void {
   }
 
   const main = div('main', div('msg', d.msg))
-  if (d.goods?.length)
+  if (d.image)
+    main.append(div('sharePreview', Object.assign(img('sharePreviewImg', d.image.url), { alt: d.image.alt ?? '分享图' })))
+  else if (d.goods?.length)
     main.append(
       div(
         'goods',
@@ -56,8 +60,13 @@ export function windowView(d: Dialog): void {
     )
   }
 
-  const view = div(d.sweet ? 'windowView sweetHeart' : 'windowView', ...(d.title ? [div('title', d.title)] : []), main)
-  const close = openFrame(div('ui-window', view), d.sweet ? 'pet/windowTip/sweetHeart/sweetHeart.png' : 'pet/windowTip/alert/bg.png')
+  const view = div(
+    ['windowView', d.sweet ? 'sweetHeart' : '', d.image ? 'shareView' : ''].filter(Boolean).join(' '),
+    ...(d.title ? [div('title', d.title)] : []),
+    main,
+  )
+  const background = d.sweet ? 'pet/windowTip/sweetHeart/sweetHeart.png' : d.image ? undefined : 'pet/windowTip/alert/bg.png'
+  const close = openFrame(div('ui-window', view), background)
   closeCurrent = close
   view.append(
     button('windowViewBut', () => {

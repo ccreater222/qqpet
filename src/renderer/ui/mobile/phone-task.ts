@@ -44,23 +44,24 @@ export function openPhoneTask(): void {
   body.append(tabsRow, list)
 
   const rowsFor = (of: Tab): { row: TaskRow; goods: Good[] }[] =>
-    tasks(of).map((task, index) => ({ row: taskRow(task, index), goods: task.good }))
+    tasks(of).map((task, index) => ({ row: taskRow({ ...task, festival: task.festivalId !== undefined }, index), goods: task.good }))
 
   function claimRow(row: TaskRow): void {
     if (!row.enabled) return
     const host = sheet?.card
     if (!host) return
+    const options = row.festival ? { festival: true, shareText: row.msg } : undefined
     if (runtimeProjectionMode) {
       void claimRuntime(tab, row.index).then((goods) => {
         if (!alive) return
         draw()
-        if (goods !== null) showResult(host, goods)
+        if (goods !== null) showResult(host, goods, '', options)
       })
       return
     }
     const goods = claim(tab, row.index)
     draw()
-    showResult(host, goods || [], '还没完成任务哦！~~')
+    showResult(host, goods || [], goods ? '' : '还没完成任务哦！~~', options)
   }
 
   function rowElement(row: TaskRow, goods: readonly Good[]): HTMLElement {
