@@ -116,6 +116,12 @@ test('the hit-shape tick checks visibility before reading pointer-events (deskto
 
 const bridge = readFileSync(new URL('../../src/android/bridge.ts', import.meta.url), 'utf8')
 
+test('new shells with setTouchableRegion do not start the legacy setBounds tracker', () => {
+  // New Android crops the render child from the page's setHitShape rectangles, so the page must not keep
+  // measuring every DOM node and calling the now no-op setBounds. Old shells (no setTouchableRegion) keep it.
+  assert.match(bridge, /if \(setTouchableRegion === null\) frame\(track\)/)
+})
+
 test('the Android bridge forwards setGameKeyActive through the shared contract', () => {
   // smallgame.ts must not read window.QQPetNative; the capability lives on window.qqpet and the bridge
   // forwards it to the optional native method (old shells simply lack it).

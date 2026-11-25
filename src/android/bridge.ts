@@ -360,7 +360,9 @@ function track(now: number): void {
   }
   bounds = next
 }
-frame(track)
+// New shells crop the render child from the page's setHitShape rectangles; their setBounds is a no-op.
+// Only old shells, which lack setTouchableRegion, keep the full-DOM measured-bounds loop.
+if (setTouchableRegion === null) frame(track)
 
 // The page spans the whole screen, under the status and navigation bars; frames keep clear of them (box.ts).
 function safeArea(): void {
