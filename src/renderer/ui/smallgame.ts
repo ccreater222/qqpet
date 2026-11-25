@@ -665,10 +665,9 @@ function focusGame(w: Win): void {
 
 /** Dispatches into the iframe realm, but constructs the event exactly like gamepad.ts (host realm). */
 function sendKeyTo(w: Win, type: 'keydown' | 'keyup', side: 'left' | 'right'): void {
-  const view = w.frame.contentWindow
-  const doc: Document | null = view?.document ?? w.frame.contentDocument ?? null
   const player = w.player
-  if (!doc && !player) return
+  if (!player) return
+  const view = w.frame.contentWindow
   const spec = KEY_CODES[side]
   const init = {
     key: spec.key,
@@ -688,17 +687,10 @@ function sendKeyTo(w: Win, type: 'keydown' | 'keyup', side: 'left' | 'right'): v
     }
   }
   focusGame(w)
-  // gamepad.ts dispatches on the Ruffle player; do that first so its input path sees it, then
-  // also give the iframe window/document a bubbling copy for verifiers and any document listeners.
-  if (player) {
-    try { player.el.dispatchEvent(make()) } catch { /* the player may have gone */ }
-  }
-  if (view && typeof view.dispatchEvent === 'function') {
-    try { view.dispatchEvent(make()) } catch { /* the iframe may have gone */ }
-  }
-  if (doc) {
-    try { doc.dispatchEvent(make()) } catch { /* the iframe may have gone */ }
-  }
+  // gamepad.ts dispatches exactly one event on the Ruffle player. bubbles+composed carries it
+  // through the iframe document to its window, so extra copies on either target made window
+  // listeners see three keydowns and document listeners two for every press.
+  try { player.el.dispatchEvent(make()) } catch { /* the player may have gone */ }
 }
 
 /**

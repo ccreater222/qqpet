@@ -981,6 +981,11 @@ test('100ceng gets a hold-to-move touch pad that sends arrow keys into its ifram
   assert.deepEqual(player.events.at(-1), { type: 'keydown', key: 'ArrowLeft', keyCode: 37 })
   assert.deepEqual(cloud.events.at(-1), { type: 'keydown', key: 'ArrowLeft', keyCode: 37 }, 'cloud player receives the key')
   assert.ok(cloud.events.some((event) => event.type === 'pointerdown'), 'the first key also clicks the cloud start frame')
+  // gamepad.ts dispatches on the Ruffle element; composed:true bubbles that one event through the
+  // iframe document to its window. Extra window/document copies made listeners see 3 and 2.
+  const keydowns = (events) => events.filter((event) => event.type === 'keydown' && event.keyCode === 37).length
+  assert.equal(keydowns(cloudDoc.events), 1, 'the iframe document must receive exactly one keydown')
+  assert.equal(keydowns(cloud.frame.contentWindow.events), 1, 'the iframe window must receive exactly one keydown')
   assert.equal(host.frames[1].focused, true, 'cloud iframe is focused before the event')
   const cloudKeydown = cloudDoc.events.at(-1)
   assert.equal(cloudKeydown.type, 'keydown')

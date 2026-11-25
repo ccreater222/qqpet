@@ -91,7 +91,7 @@
 - Android 原生键桥（0.16+）：
   - 契约：`window.qqpet.sendGameKey(code: 'ArrowLeft'|'ArrowRight', phase: 'down'|'up') => Promise<boolean>`；只允许左右，返回 false 表示平台不支持/未运行。
   - Android：`PetService` 的 WebView 在 UI 线程 `dispatchKeyEvent(KeyEvent)`；`setGameKeyActive(true)` 只在小游戏运行期；50ms 限流、down 未 up 不重复、up 幂等；结束/隐藏释放所有键。
-  - 其它平台缺失/返回 false 时回退 DOM `KeyboardEvent`；桌面 preload 明确返回 false，不静默假装成功。
+  - 其它平台缺失/返回 false 时回退 DOM `KeyboardEvent`；桌面 preload 明确返回 false，不静默假装成功。DOM 回退只向 `player.el` 派发一次（`bubbles:true, composed:true` 自然冒泡到 iframe document/window），不得再向 window/document 重复派发：否则 window 监听器每键收到 3 次、document 2 次。
   - 安全：不接任意键/文本/组合键，不申请权限，不暴露给非小游戏页面。
 - 100ceng 启动顺序：cloud 的 `StartAnimation` 在 frame 36 发 `playerShow`（`Show(1)` 显示 player），frame 98 发 `addEvent`/“单击鼠标开始”；测试必须等 3.5–4.5s 再点 cloud 文本并按住 D-pad 800ms，不能用瞬时点击/文档 keycount 判过。cloud 启动点击是会话级幂等：每次 down（含 140ms repeat 与原生 `sendGameKey` 的 prepare）只允许触发一次 click，新局/结束重置；800ms 长按的 `cloudClicks` 增量必须 ≤ `nativeDown` 增量。
 
