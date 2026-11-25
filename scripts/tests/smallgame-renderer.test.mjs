@@ -394,6 +394,9 @@ function paopaoHostFixture({ touchHost = true } = {}) {
   return host
 }
 
+/** Quit buttons are the only children a root box owns; children must never inherit one. */
+const quitCount = (box) => box.children.filter((child) => child.className === 'quit').length
+
 /** Root + four base windows + six bubbles: paopao2's full 11-shell budget. */
 async function fillPaopao2(host) {
   host.play()
@@ -641,6 +644,42 @@ test('a full paopao2 game keeps all 11 shells pooled after quit and reopens with
   await fillPaopao2(host)
   assert.equal(host.frames.length, frameCount, 'reopening paopao2 must reuse all 11 iframes')
   assert.equal(host.players.length, playerCount, 'reopening paopao2 must reuse all 11 SwfPlayer instances')
+})
+
+test('a 140x140 base/prompt shell is never promoted to root; every root keeps exactly one quit', async () => {
+  const host = paopaoHostFixture()
+  host.play(GUESS)
+  await host.settle()
+  const bases = [
+    ['wnd_name_status_mood', 'status_mood.swf', 140, 20],
+    ['wnd_name_status_count', 'status_count.swf', 60, 25],
+    ['wnd_name_prompt_mood', 'prompt_mood.swf', 180, 90],
+    ['wnd_name_prompt_money', 'prompt_money.swf', 300, 180],
+    ['wnd_name_prompt_text', 'prompt_text.swf', 150, 65],
+    ['wnd_name_prompt_timer', 'prompt_timer.swf', 140, 140],
+  ]
+  for (const [name, swf, width, height] of bases) host.createWindow(name, swf, 316, 580, width, height)
+  await host.settle()
+  assert.equal(host.state().shells.size, 7, 'guess root + six base windows')
+  const promptTimerBox = host.state().wins.get('wnd_name_prompt_timer').box
+  assert.equal(quitCount(host.state().root.box), 1, 'the root starts with its quit button')
+  host.rootApi.DestroyWindow()
+  await host.settle()
+
+  // A different root variant (sex change) makes the pooled guess root ineligible by pool key, so
+  // the rope root request reaches reclaim() with a 140x140 prompt shell as the only size match.
+  host.context.info.sex = 'MM'
+  host.play(ROPE)
+  await host.settle()
+  const root = host.state().root
+  assert.ok(root)
+  assert.notEqual(root.box, promptTimerBox, 'a prompt shell must never be reused as the root')
+  assert.equal(root.kind, 'root')
+  assert.equal(quitCount(root.box), 1, 'the root must own exactly one quit button')
+  for (const win of host.state().wins.values()) {
+    if (win === root) continue
+    assert.equal(quitCount(win.box), 0, `${win.name} must not inherit a quit button`)
+  }
 })
 
 test('a failed SWF load discards the iframe and player instead of leaving an empty window', async () => {

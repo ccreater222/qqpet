@@ -103,6 +103,8 @@ interface Win {
   pendingVisible: boolean
   /** RemoteCalls that arrived before a lazy prompt's movie was ready. */
   pending: { fn: string; args: unknown[] }[]
+  /** The shell's quit button; only root shells own one, and a reused shell must keep exactly one. */
+  quit: HTMLElement | null
 }
 
 type Fn = (...a: never[]) => unknown
@@ -373,9 +375,14 @@ function trimPool(): void {
  * (its SWF sees a null-safe API); the shell is reloaded with the new SWF.
  */
 function reclaim(name: string, parent: Win | null, swf: string, x: number, y: number, width: number, height: number): Win | undefined {
+  const asRoot = parent === null
   let victim: Win | undefined
   const consider = (w: Win): void => {
     if (w.loading || w.w !== width || w.h !== height) return
+    // Only a root shell may become a root again, and a root shell may never be repurposed as a
+    // base/bubble. A 140x140 prompt/base has no quit button; promoting it to root used to leave
+    // mobile players with no way to quit, while a root demoted to a child kept a stray quit.
+    if (asRoot !== (w.kind === 'root')) return
     if (!victim || w.seq < victim.seq) victim = w
   }
   // Idle shells of any kind may be repurposed; a live window only if it is a shown bubble.
@@ -1008,6 +1015,19 @@ function demand(w: Win): void {
   reload(w)
 }
 
+/** Root shells own exactly one quit button; a shell reused as a child must not keep one. */
+function syncQuit(w: Win): void {
+  if (w.kind === 'root') {
+    if (w.quit) return
+    w.quit = button('quit', () => { if (root) destroy(root) })
+    w.box.append(w.quit)
+    return
+  }
+  if (!w.quit) return
+  w.quit.remove()
+  w.quit = null
+}
+
 function createShell(name: string, parent: Win | null, swf: string, x: number, y: number, width: number, height: number): Win {
   const frame = document.createElement('iframe')
   frame.src = 'swf.html'
@@ -1038,6 +1058,7 @@ function createShell(name: string, parent: Win | null, swf: string, x: number, y
     demanded: false,
     pendingVisible: parent !== null,
     pending: [],
+    quit: null,
   }
   wins.set(name, win)
   shells.add(win)
@@ -1052,7 +1073,7 @@ function createShell(name: string, parent: Win | null, swf: string, x: number, y
       bind(win)
       draggable(win, frame.contentDocument!)
       // Root shells own the quit button; it stays on the shell across games.
-      if (parent === null) box.append(button('quit', () => { if (root) destroy(root) }))
+      syncQuit(win)
       if (win.lazy && !win.demanded) {
         // Prompt overlays stay cheap until their SWF first shows or remote-calls them, but the
         // CreateWindow visibility is honored: hidden=0 keeps the empty iframe visible.
@@ -1091,6 +1112,8 @@ function activate(w: Win, name: string, parent: Win | null, swf: string, x: numb
   w.box.style.display = ''
   delete w.box.dataset.pooled
   w.box.classList.toggle('passive', PASSIVE.test(swf))
+  // A shell can change roles between games: roots need their quit back, children must lose it.
+  syncQuit(w)
   // A live bubble repurposed at the cap keeps its old movie running until reload starts.
   w.player?.setIdle(true)
   wins.set(name, w)
