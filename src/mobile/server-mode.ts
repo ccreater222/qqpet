@@ -98,10 +98,6 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T
-}
-
 function requireObject(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('invalid_payload: ' + label + ' must be an object')
@@ -328,18 +324,38 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
     })
   }
 
-  async function ensureLocalLoaded(): Promise<SaveData> {
+  /**
+   * Starts the local repository at most once. `MobileLocalRepositoryBridge.load`
+   * is the only explicit start seam; after that, commands/settings start the
+   * repository lazily themselves and must not pay for another full save clone.
+   */
+  async function startLocalOnce(): Promise<SaveData | null> {
     if (localStarted === false) {
       localStarted = true
-      const save = await local.load()
-      localSuspended = false
-      return save
+      try {
+        const save = await local.load()
+        localSuspended = false
+        return save
+      } catch (error) {
+        localStarted = false
+        throw error
+      }
     }
     if (localSuspended) {
       await local.resume()
       localSuspended = false
     }
-    return local.load()
+    return null
+  }
+
+  async function ensureLocalStarted(): Promise<void> {
+    await startLocalOnce()
+  }
+
+  /** The bridge already returns a fresh JSON copy; never clone it a second time. */
+  async function loadForRenderer(): Promise<SaveData> {
+    const startedSave = await startLocalOnce()
+    return startedSave ?? local.load()
   }
 
   async function suspendLocalIfStarted(): Promise<void> {
@@ -351,16 +367,7 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
   }
 
   async function resumeLocalIfNeeded(): Promise<void> {
-    if (localStarted === false) {
-      await ensureLocalLoaded()
-      return
-    }
-    if (localSuspended) {
-      await local.resume()
-      localSuspended = false
-      return
-    }
-    await local.load()
+    await ensureLocalStarted()
   }
 
   async function stopRemote(): Promise<void> {
@@ -681,7 +688,7 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
   async function commandActive(command: PetCommand): Promise<CommandResult> {
     await initialize()
     if (activeMode === 'server' && remote !== null) return remote.command(command)
-    await ensureLocalLoaded()
+    await ensureLocalStarted()
     return local.command(command)
   }
 
@@ -700,7 +707,7 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
       if (activeMode === 'server' && remote !== null) {
         await remote.setAdvanceWhileEmpty(enabled)
       } else {
-        await ensureLocalLoaded()
+        await ensureLocalStarted()
         await local.setAdvanceWhileEmpty(enabled)
       }
       emitStatus()
@@ -729,7 +736,7 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
       const json = mode === 'server' && remote !== null
         ? JSON.stringify(await remote.exportBundle())
         : await (async () => {
-          await ensureLocalLoaded()
+          await ensureLocalStarted()
           return local.exportPortableBundleJson()
         })()
       const day = new Date(now()).toISOString().slice(0, 10)
@@ -741,7 +748,7 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
         throw new Error('unsupported: server mode import is desktop-only')
       }
       const parsed = validateImportInput(input)
-      await ensureLocalLoaded()
+      await ensureLocalStarted()
       await local.importPortableBundleJson(parsed.json)
       return {
         status: 'applied',
@@ -777,20 +784,23 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
     runtimeInfo: () => ({ localRepositoryV2: true, serverMode: activeMode === 'server' }),
     async load() {
       await initialize()
-      if (activeMode === 'server' && remote !== null) return clone(await remote.load())
-      return clone(await ensureLocalLoaded())
+      // Both repositories already return a fresh copy: RemoteRepository.load()
+      // clones its projection save, and MobileLocalRepositoryBridge.load()
+      // clones the local projection save. Do not clone a second time here.
+      if (activeMode === 'server' && remote !== null) return remote.load()
+      return loadForRenderer()
     },
     async command(command, commandOptions = {}) {
       await initialize()
       if (activeMode === 'server' && remote !== null) return remote.command(command, commandOptions)
-      await ensureLocalLoaded()
+      await ensureLocalStarted()
       return local.command(command, commandOptions)
     },
     async setAdvanceWhileEmpty(enabled) {
       await initialize()
       if (activeMode === 'server' && remote !== null) await remote.setAdvanceWhileEmpty(enabled)
       else {
-        await ensureLocalLoaded()
+        await ensureLocalStarted()
         await local.setAdvanceWhileEmpty(enabled)
       }
     },
@@ -798,13 +808,13 @@ export function createMobileServerRuntime(options: MobileServerRuntimeOptions): 
       async load() {
         await initialize()
         if (activeMode === 'server' && remote !== null) return remote.loadLocalSettings()
-        await ensureLocalLoaded()
+        await ensureLocalStarted()
         return local.localSettings.load()
       },
       async update(patch) {
         await initialize()
         if (activeMode === 'server' && remote !== null) return remote.updateLocalSettings(patch)
-        await ensureLocalLoaded()
+        await ensureLocalStarted()
         return local.localSettings.update(patch)
       },
     },

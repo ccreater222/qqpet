@@ -170,6 +170,8 @@ function localStatus() {
 function memoryLocal() {
   let started = false
   let suspended = false
+  let loadCalls = 0
+  let lastLoadedSave = null
   let projectionListener = null
   let resyncListener = null
   let commandListener = null
@@ -177,7 +179,16 @@ function memoryLocal() {
   return {
     get started() { return started },
     get suspended() { return suspended },
-    async load() { started = true; return fixtures.save },
+    get loadCalls() { return loadCalls },
+    get lastLoadedSave() { return lastLoadedSave },
+    async load() {
+      loadCalls += 1
+      started = true
+      // The real MobileLocalRepositoryBridge.load() returns a fresh JSON clone;
+      // identity of this object exposes any extra runtime-level clone.
+      lastLoadedSave = JSON.parse(JSON.stringify(fixtures.save))
+      return lastLoadedSave
+    },
     async command() { return { status: 'applied', commandType: 'pet.cheer', opId: 'local-op', commandSeq: 1, revision: 2, eventSeq: 2, result: {} } },
     async setAdvanceWhileEmpty() {},
     async exportPortableBundleJson() { return JSON.stringify(fixtures.bundle) },
@@ -319,6 +330,28 @@ test('a corrupt storage config is surfaced and left untouched', async () => {
   assert.equal(status.activeMode, 'local')
   assert.match(status.notice ?? '', /存储配置不可读/)
   assert.equal(native.files.get('storage-config.json'), '{"mode":', 'a corrupt config must not be rewritten during startup')
+  await runtime.stop()
+})
+
+test('local commands and settings do not reload the save, and each renderer load takes one bridge copy', async () => {
+  const native = memoryNative()
+  const local = memoryLocal()
+  const runtime = createMobileServerRuntime({ local, native, appVersion: 'test', transport: fakeTransport(), connectTimeoutMs: 50 })
+  const first = await runtime.load()
+  assert.equal(local.loadCalls, 1)
+  assert.equal(first, local.lastLoadedSave, 'runtime.load must reuse the bridge copy instead of cloning it twice')
+  const loadsAfterFirst = local.loadCalls
+
+  await runtime.command({ type: 'pet.cheer', payload: {} })
+  assert.equal(local.loadCalls, loadsAfterFirst, 'an already-started local command must not call local.load()')
+  await runtime.localSettings.load()
+  assert.equal(local.loadCalls, loadsAfterFirst, 'local settings reads must not call local.load()')
+  await runtime.setAdvanceWhileEmpty(true)
+  assert.equal(local.loadCalls, loadsAfterFirst, 'advance-while-empty writes must not call local.load()')
+
+  const second = await runtime.load()
+  assert.equal(local.loadCalls, loadsAfterFirst + 1, 'each renderer load takes exactly one fresh bridge copy')
+  assert.equal(second, local.lastLoadedSave)
   await runtime.stop()
 })
 
