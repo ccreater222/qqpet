@@ -28,8 +28,9 @@ const BUSY = [
 
 let panel: HTMLElement | null = null
 /** Bars show their numbers always instead of on hover; toggled by clicking the growth bar. */
-// A touch screen has no hover: the status numbers would never appear.
-let showNums = touch
+// A phone has no hover: the status numbers would never appear there. Tablets and other touch
+// hosts keep the hover behaviour instead of showing the numbers permanently (PU-06).
+let showNums = phoneUI()
 
 /** Level badges: one per 5 levels written in binary (128s down to 2s), then one or two plain bones. */
 function bones(level: number): string[] {
