@@ -9,9 +9,18 @@ registerHooks({
     }
     return nextResolve(specifier)
   },
+  load(url, context, nextLoad) {
+    // The storage pane only needs its pure refresh planner; stub the DOM dialog
+    // module so Node never evaluates renderer DOM/CSS imports.
+    if (url.endsWith('/renderer/ui/window-view.ts')) {
+      return { format: 'module', shortCircuit: true, source: 'export function windowView() {}\n' }
+    }
+    return nextLoad(url, context)
+  },
 })
 
 const { createMobileServerRuntime } = await import('../../src/mobile/server-mode.ts')
+const { planStorageRefresh } = await import('../../src/renderer/ui/storage.ts')
 const { createSyncFixtures, GAME_TIME_MS } = await import('./sync-fixtures.mjs')
 const { PROTOCOL_VERSION, SAVE_SCHEMA_VERSION } = await import('../../src/shared/sync/index.ts')
 
@@ -353,6 +362,28 @@ test('local commands and settings do not reload the save, and each renderer load
   assert.equal(local.loadCalls, loadsAfterFirst + 1, 'each renderer load takes exactly one fresh bridge copy')
   assert.equal(second, local.lastLoadedSave)
   await runtime.stop()
+})
+
+test('a paired local-authority device never requests or surfaces a fake offline device error', () => {
+  const fakeOffline = { devices: [], owner: false, canRevoke: false, error: 'offline: pair a server first' }
+  const localPlan = planStorageRefresh({ paired: true, activeMode: 'local' }, fakeOffline)
+  assert.equal(localPlan.listDevices, false, 'a local-authority device has no server session to list devices from')
+  assert.deepEqual(localPlan.devices, [])
+  assert.equal(localPlan.message, '', 'the canned offline reply must not become a storage panel error')
+
+  const serverPlan = planStorageRefresh(
+    { paired: true, activeMode: 'server' },
+    { devices: [{ deviceId: 'device-1' }], owner: true, canRevoke: true },
+  )
+  assert.equal(serverPlan.listDevices, true)
+  assert.deepEqual(serverPlan.devices, [{ deviceId: 'device-1' }])
+  assert.equal(serverPlan.message, '')
+
+  const ownerOnly = planStorageRefresh(
+    { paired: true, activeMode: 'server' },
+    { devices: [], owner: false, canRevoke: false, error: 'unauthorized: only an owner device can list devices' },
+  )
+  assert.equal(ownerOnly.message, '', 'player devices keep the existing silent unauthorized handling')
 })
 
 test('unpair clears the token/config/cache and restores the local pet', async () => {
