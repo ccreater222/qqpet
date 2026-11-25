@@ -90,6 +90,7 @@
 - 键盘：**只有声明 `keyboard` 的游戏才显示 D-pad**；当前 `100ceng` 用 `ARROW_KEYS`。D-pad 必须在游戏结束/切游戏/页面隐藏时释放所有键。
 - Android 原生键桥（0.16+）：
   - 契约：`window.qqpet.sendGameKey(code: 'ArrowLeft'|'ArrowRight', phase: 'down'|'up') => Promise<boolean>`；只允许左右，返回 false 表示平台不支持/未运行。
+  - 原生键门控同样走宿主契约 `window.qqpet.setGameKeyActive?(on: boolean): void`（可选；缺失时安全 no-op，让键盘注入保持关闭）；renderer 禁止直接读 `window.QQPetNative`。
   - Android：`PetService` 的 WebView 在 UI 线程 `dispatchKeyEvent(KeyEvent)`；`setGameKeyActive(true)` 只在小游戏运行期；50ms 限流、down 未 up 不重复、up 幂等；结束/隐藏释放所有键。
   - 其它平台缺失/返回 false 时回退 DOM `KeyboardEvent`；桌面 preload 明确返回 false，不静默假装成功。DOM 回退只向 `player.el` 派发一次（`bubbles:true, composed:true` 自然冒泡到 iframe document/window），不得再向 window/document 重复派发：否则 window 监听器每键收到 3 次、document 2 次。
   - 安全：不接任意键/文本/组合键，不申请权限，不暴露给非小游戏页面。

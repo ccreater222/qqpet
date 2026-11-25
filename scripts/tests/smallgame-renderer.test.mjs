@@ -125,7 +125,7 @@ const BALL = { dir: 'ball', name: '颠球', icon: 'tanliqiu' }
  * The fake DOM keeps every iframe, box and SwfPlayer so pooling can be asserted
  * by identity (same iframe/player, not a new one).
  */
-function paopaoHostFixture({ touchHost = true } = {}) {
+function paopaoHostFixture({ touchHost = true, qqpetGameKeyGate = true } = {}) {
   const frames = []
   const boxes = []
   const buttons = []
@@ -133,6 +133,8 @@ function paopaoHostFixture({ touchHost = true } = {}) {
   const intervals = []
   const nativeGameKeys = []
   const nativeGameActive = []
+  /** Old direct QQPetNative bridge calls; must stay empty after routing through window.qqpet. */
+  const legacyNativeGameActive = []
   let nativeGameKeyResult = false
   let nativeGameKeyPresent = false
   let loadBehavior = () => 'resolve'
@@ -314,9 +316,10 @@ function paopaoHostFixture({ touchHost = true } = {}) {
       qqpet: {
         setFocusable: () => {},
         get sendGameKey() { return nativeGameKeyPresent ? (code, phase) => { nativeGameKeys.push([code, phase]); return Promise.resolve(nativeGameKeyResult) } : undefined },
+        get setGameKeyActive() { return qqpetGameKeyGate ? (on) => { nativeGameActive.push(on) } : undefined },
       },
       API: { GetCursorPosition: () => '0,0' },
-      QQPetNative: { setGameKeyActive: (on) => { nativeGameActive.push(on) } },
+      QQPetNative: { setGameKeyActive: (on) => { legacyNativeGameActive.push(on) } },
     },
     playingDesk: () => false,
     runtimeProjectionMode: false,
@@ -351,6 +354,7 @@ function paopaoHostFixture({ touchHost = true } = {}) {
     intervals,
     nativeGameKeys,
     nativeGameActive,
+    legacyNativeGameActive,
     setNativeGameKey(result) { nativeGameKeyPresent = true; nativeGameKeyResult = result },
     removeNativeGameKey() { nativeGameKeyPresent = false },
     settle,
@@ -1023,6 +1027,26 @@ test('100ceng gets a hold-to-move touch pad that sends arrow keys into its ifram
   assert.equal(host.state().keypad, null, 'the pad disappears with the game')
 })
 
+test('the native key gate uses the window.qqpet contract and is optional', async () => {
+  const withGate = paopaoHostFixture()
+  withGate.play(CENG)
+  await withGate.settle()
+  assert.deepEqual(withGate.nativeGameActive, [true], 'the contract method receives the open gate')
+  withGate.rootApi.DestroyWindow()
+  await withGate.settle()
+  assert.deepEqual(withGate.nativeGameActive, [true, false], 'finish closes the gate')
+  assert.deepEqual(withGate.legacyNativeGameActive, [], 'QQPetNative must not be read directly')
+
+  const withoutGate = paopaoHostFixture({ qqpetGameKeyGate: false })
+  withoutGate.play(CENG)
+  await withoutGate.settle()
+  assert.deepEqual(withoutGate.nativeGameActive, [], 'a missing optional method is a safe no-op')
+  assert.deepEqual(withoutGate.legacyNativeGameActive, [], 'no direct QQPetNative fallback')
+  withoutGate.rootApi.DestroyWindow()
+  await withoutGate.settle()
+  assert.deepEqual(withoutGate.legacyNativeGameActive, [], 'closing the gate is also a no-op without the method')
+})
+
 test('native game keys replace the DOM fallback and are released when the game ends', async () => {
   const host = paopaoHostFixture()
   host.setNativeGameKey(true)
@@ -1054,6 +1078,7 @@ test('native game keys replace the DOM fallback and are released when the game e
   assert.deepEqual(host.nativeGameKeys.at(-1), ['ArrowRight', 'up'], 'finish releases every held native key')
   assert.equal(host.state().keypad, null)
   assert.deepEqual(host.nativeGameActive, [true, false], 'native gate opens on open and closes on finish')
+  assert.deepEqual(host.legacyNativeGameActive, [], 'the gate never bypasses the window.qqpet contract')
 })
 
 test('no native keys are sent before a game (or for a game without keyboard)', async () => {

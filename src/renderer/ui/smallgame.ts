@@ -792,8 +792,12 @@ try { (window as Window & { __qqpetSmallGameKeys?: GameKeyDebug }).__qqpetSmallG
 const setNativeGameKeyActive = (on: boolean): void => {
   gameKeyDebug.active = on
   try {
-    const native = (window as Window & { QQPetNative?: { setGameKeyActive?: (on: boolean) => void } }).QQPetNative
-    native?.setGameKeyActive?.(on)
+    // The gate is part of the window.qqpet host contract: Android's bridge forwards it to
+    // PetService.setGameKeyActive. Reading window.QQPetNative directly bypassed the contract and
+    // broke every host that exposes the capability through qqpet. Hosts that lack the optional
+    // method keep keyboard injection closed; this is a safe no-op, not a silent fallback.
+    const api = window.qqpet as typeof window.qqpet & { setGameKeyActive?: (on: boolean) => void }
+    api.setGameKeyActive?.(on)
   } catch { /* desktop/older shells */ }
 }
 
