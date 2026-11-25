@@ -64,6 +64,22 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
     ...(initial.noCheckVisibility === true ? {} : { checkVisibility: () => true }),
     getBoundingClientRect: () => ({ x: 0, y: 0, width: initial.area?.width ?? 1920, height: initial.area?.height ?? 1080 }),
   } : null
+  const sheetChildren = initial.sheet === true
+    ? (initial.sheetChildren ?? []).map((child) => ({
+        className: '',
+        closest: (selector) => (selector === '.qp-sheet' ? sheet : null),
+        matches: () => false,
+        checkVisibility: () => true,
+        getBoundingClientRect: () => child.rect,
+      }))
+    : []
+  const extraHits = (initial.extraHits ?? []).map((hit) => ({
+    className: '',
+    closest: () => null,
+    matches: () => false,
+    ...(hit.checkVisibility ? { checkVisibility: hit.checkVisibility } : { checkVisibility: () => true }),
+    getBoundingClientRect: () => hit.rect,
+  }))
   const listeners = []
   const poses = []
   const releases = []
@@ -121,7 +137,7 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
       addEventListener: noop,
       removeEventListener: noop,
       elementFromPoint: (x, y) => hitAt?.(x, y) ? { getRootNode: () => null, closest: selector => selector === '[data-hit]' ? {} : null } : initial.petDOM ? pet : null,
-      querySelectorAll: () => (sheet ? [pet, front, sheet] : [pet, front]),
+      querySelectorAll: () => [...(sheet ? [pet, front, sheet, ...sheetChildren] : [pet, front]), ...extraHits],
       querySelector: selector => (selector === '.ui-menu' ? menu : selector === '.qp-sheet' ? sheet : null),
       documentElement: { dataset: { cropX: String(crop.x), cropY: String(crop.y) } },
     },
@@ -729,6 +745,37 @@ test('a touch host reports the opening sheet layer even while it ignores input',
     { x: 500, y: 300, width: 160, height: 160 },
     { x: 0, y: 0, width: 1920, height: 1080 },
   ])
+})
+
+test('a phone sheet reports its full-page root but no descendant hit rectangles', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, touch: true, hitShape: true, sheet: true,
+    sheetChildren: [
+      { rect: { x: 40, y: 500, width: 300, height: 64 } },
+      { rect: { x: 40, y: 564, width: 300, height: 64 } },
+    ],
+  })
+  app.runIntervals()
+  // Every row of the phone menu lives inside the sheet's full-page layer; scanning them adds no input
+  // rectangle and only makes the 50 ms tick scale with the menu DOM.
+  assert.deepEqual(rects(app), [
+    { x: 500, y: 300, width: 160, height: 160 },
+    { x: 0, y: 0, width: 1920, height: 1080 },
+  ])
+})
+
+test('the modern hit visibility check treats an opacity:0 layer as invisible', () => {
+  const app = renderer(160, { x: 0, y: 0 }, null, 'Egg', {
+    x: 500, y: 300, hitShape: true,
+    // Chrome's checkVisibility({visibilityProperty:true}) returns true for this layer; only
+    // opacityProperty:true reports it as invisible.
+    extraHits: [{
+      rect: { x: 10, y: 10, width: 30, height: 30 },
+      checkVisibility: (options) => options.opacityProperty !== true,
+    }],
+  })
+  app.runIntervals()
+  assert.deepEqual(rects(app), [{ x: 500, y: 300, width: 160, height: 160 }])
 })
 
 test('a touch host keeps the whole page touchable while a finger drags the pet', () => {
