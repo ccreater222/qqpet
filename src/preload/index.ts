@@ -45,7 +45,7 @@ const storage: StorageApi = {
 }
 
 const api: QQPetApi = {
-  capabilities: { serverMode: true },
+  capabilities: { serverMode: true, phoneLayout: false },
   load: () => ipcRenderer.invoke(IPC.load),
   save: send(IPC.save),
   ...runtime,

@@ -121,13 +121,13 @@ Android 手机与平板共用同一份 WebView，但设计空间由 `AssetClient
 返回键增加一条只影响 Android 的可选通道：
 
 - **原生方法**：`Bridge.setBackHandler(on)` 只改 `backHandler` 标志（`PetService.kt:621-625`）。`dispatchKeyEvent` 遇到 `KEYCODE_BACK` 时，若标志为真则执行页面注册的 `window.__qqpetBack && window.__qqpetBack()` 并消费按键；否则走原来的 `setFocusable(false)` 把焦点还给下层（`PetService.kt:146-156`）。
-- **页面入口**：`src/android/bridge.ts:98-101` 把 `native.setBackHandler?.(on)` 暴露为 `window.__qqpetSetBackHandler`，`Native` 接口里它是可选方法（`src/android/bridge.ts:61-63`）。手机模态共享 `src/renderer/ui/mobile/back.ts` 的栈：`pushBack(close)` 入栈时注册只关闭栈顶的 `window.__qqpetBack`，第一层入栈时调用 `setFocusable(true)`，最后一层释放时清空 `__qqpetBack`、调用 `setBackHandler(false)` 与 `setFocusable(false)`（`back.ts:13-39`）；sheet、box 框和宠物状态卡都复用该栈（`src/renderer/ui/mobile/sheet.ts:151`、`src/renderer/ui/box.ts:227-237`、`src/renderer/ui/state.ts:315`）。入栈的必须是会执行 `onClose`/清理的 close 路径，不能只是移除 DOM，否则面板的 `open` 闩锁不释放（见 [手机 UI 层](mobile-ui.md) §5.3）。
-- **旧壳降级**：没有 `setBackHandler` 的壳上钩子 no-op，`__qqpetBack` 永不触发，面板仍可用遮罩、✕ 或下滑关闭；这是显式能力缺席，不是失败兜底（`src/renderer/ui/mobile/back.ts:13-23`）。
-- **焦点与按键分离**：`setBackHandler` 只控制返回键路由，窗口可聚焦性仍由 `setFocusable` 负责；页面在最后一层模态关闭时统一释放两者（`src/renderer/ui/mobile/back.ts:13-23`），不要在 `__qqpetBack` 里单独切换窗口焦点。
+- **页面入口**：`src/android/bridge.ts:98-101` 把 `native.setBackHandler?.(on)` 暴露为 `window.__qqpetSetBackHandler`，`Native` 接口里它是可选方法（`src/android/bridge.ts:61-63`）。手机模态共享 `src/renderer/ui/mobile/back.ts` 的栈：`pushBack(close)` 入栈时注册只关闭栈顶的 `window.__qqpetBack`；仅当 `window.__qqpetSetBackHandler` 存在（Android）时，第一层入栈调用 `setFocusable(true)`，最后一层释放时清空 `__qqpetBack`、调用 `setBackHandler(false)` 与 `setFocusable(false)`（`back.ts`）；没有返回键的 iOS/桌面不会触碰 `setFocusable`，避免 iOS 的 `makeKeyAndVisible`/`endEditing` 副作用。sheet、box 框和宠物状态卡都复用该栈（`src/renderer/ui/mobile/sheet.ts`、`src/renderer/ui/box.ts:227-237`、`src/renderer/ui/state.ts:315`）。入栈的必须是会执行 `onClose`/清理的 close 路径，不能只是移除 DOM，否则面板的 `open` 闩锁不释放（见 [手机 UI 层](mobile-ui.md) §5.3）。
+- **旧壳降级**：没有 `setBackHandler` 的壳上钩子 no-op、`setFocusable` 也不会被调用，`__qqpetBack` 永不触发，面板仍可用遮罩、✕ 或下滑关闭；这是显式能力缺席，不是失败兜底（`src/renderer/ui/mobile/back.ts`）。
+- **焦点与按键分离**：`setBackHandler` 只控制返回键路由，窗口可聚焦性仍由 `setFocusable` 负责；页面在最后一层模态关闭时统一释放两者（仅在宿主有 `__qqpetSetBackHandler` 时），不要在 `__qqpetBack` 里单独切换窗口焦点。
 
 ### 4.3 小游戏方向键桥（Android）
 
-`window.qqpet.sendGameKey?(code: 'ArrowLeft' | 'ArrowRight', phase: 'down' | 'up'): Promise<boolean>` 是只服务运行中小游戏的可选能力。Android 页面桥校验 code/phase 后调用 `QQPetNative.sendGameKey`（`src/android/bridge.ts:466-470`）；`PetService.Bridge.sendGameKey` 再在原生侧白名单 37/39，并在 `setGameKeyActive(true)` 之后才接受（`PetService.kt:651-689`）。按下/释放通过 `WebView.dispatchKeyEvent(KeyEvent(action, keyCode))` 注入，注入前在 UI 线程 `setFocusable(true)`、`requestFocus()` 并让 WebView 可聚焦；这是可信键盘事件，能进 Ruffle 的 AS `KEY_DOWN/KEY_UP`。
+`window.qqpet.sendGameKey?(code: 'ArrowLeft' | 'ArrowRight', phase: 'down' | 'up'): Promise<boolean>` 与 `window.qqpet.setGameKeyActive?(on: boolean): void` 是只服务运行中小游戏的可选能力。Android 页面桥校验 code/phase 后调用 `QQPetNative.sendGameKey`（`src/android/bridge.ts`），并把 `setGameKeyActive` 转发到 `QQPetNative.setGameKeyActive`（旧壳无该方法时 no-op）；`PetService.Bridge.sendGameKey` 再在原生侧白名单 37/39，并在 `setGameKeyActive(true)` 之后才接受（`PetService.kt:651-689`）。按下/释放通过 `WebView.dispatchKeyEvent(KeyEvent(action, keyCode))` 注入，注入前在 UI 线程 `setFocusable(true)`、`requestFocus()` 并让 WebView 可聚焦；这是可信键盘事件，能进 Ruffle 的 AS `KEY_DOWN/KEY_UP`。
 
 - 限流与状态：同一 `(code, phase)` 50 ms 内重复忽略；down 在收到 up 前不重复注入；up 幂等；只保留两个 keyCode 的按下集合。
 - 释放：D-pad 的 `pointerup/pointercancel/pointerleave/mouseup/mouseleave` 发 up；`removeKeypad()`、`finish()`、页面隐藏和 `setGameKeyActive(false)` 都会释放所有按下的键（`smallgame.ts` 的 `releaseAll`、`PetService.kt:304-320`）。
@@ -156,6 +156,9 @@ Android 叠加窗的窗口矩形不再等于触控区：渲染窗是 1x1 `TYPE_A
 
 - `setBounds` 保留 JS 签名但 no-op（`PetService.kt` 的 `setBounds`）：渲染子窗的裁剪改由
   `setTouchableRegion` 的矩形并集决定；页面不会被 `cover()` 的 24dp 收敛再裁剪。
+- **新壳不再运行页面的 setBounds 测量循环**：`src/android/bridge.ts` 仅在 `native.setTouchableRegion` 缺失（旧壳）
+  时启动 `track()` 的全 DOM `cover()` + `setBounds` 循环；存在 `setTouchableRegion` 时页面只靠 `setHitShape` 的矩形
+  驱动原生裁剪，`setBounds` 的 no-op 不会造成空转。
 - **子窗不能全屏**：AOSP `WindowState.getTouchOcclusionMode()` 只对 system alert window 返回 `USE_OPACITY`，
   其余（含 1003）是 `BLOCK_UNTRUSTED`；全屏的 NOT_TOUCHABLE 子窗仍会挡住 launcher 等 untrusted 下层窗口。
   裁剪到可见内容并集 + 6px 边距后，child 外的透明区触摸可穿透到下层，child 内 portal 外只剩有界死区

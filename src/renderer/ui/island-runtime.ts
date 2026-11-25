@@ -9,7 +9,6 @@ import { commandResultData, commandSucceeded, dispatchRuntimeCommand } from '../
 import { currentProjectionView, onProjectionApplied, onStoreEvent, save } from '../pet/store'
 import { openBox } from './box'
 import './css/island.css'
-import './css/phone-pages.css'
 import { button, div } from './dom'
 import { openGames } from './games'
 import { openSheet, type SheetHandle } from './mobile/sheet'

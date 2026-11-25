@@ -692,7 +692,7 @@ test('failed overlay readback stays conservative, throttles retries and recovers
   assert.equal(context.coverageTiming().readbackFailures, 2)
 })
 
-function geometryFixture() {
+function geometryFixture(options = {}) {
   let now = 1000, nextFrame = 0
   const frames = new Map(), messages = [], reads = new Map()
   let currentCanvas
@@ -741,8 +741,20 @@ function geometryFixture() {
   const menu = element('menu', 'DIV', { left: 400, top: 200, width: 100, height: 100 })
   const controls = [point, toolbar, button, menu]
   for (const el of controls) el.style.display = 'none'
+  // A phone sheet: a full-page [data-hit] root whose rows are ordinary descendants. Its root ignores input
+  // during the opening animation but must still be one native region; the rows must not each become one.
+  const sheet = options.sheet ? element('sheet', 'DIV', { left: 0, top: 0, width: 1000, height: 800 }) : null
+  const sheetRow = options.sheet ? element('sheet-row', 'DIV', { left: 20, top: 100, width: 300, height: 56 }, sheet) : null
+  if (sheet) {
+    sheet.style.pointerEvents = 'none'
+    sheet.matches = (selector) => selector === '.qp-sheet'
+    sheet.closest = (selector) => (selector === '.qp-sheet' ? sheet : null)
+    sheetRow.matches = () => false
+    sheetRow.closest = (selector) => (selector === '.qp-sheet' ? sheet : null)
+  }
   const all = [pet, front, back, decoration, mood, ...controls]
-  document.body = { querySelectorAll: selector => selector === '*' ? all : [front, back, mood, ...controls] }
+  const interactive = [...(sheet ? [sheet, sheetRow] : []), front, back, mood, ...controls]
+  document.body = { querySelectorAll: selector => (selector === '*' ? [...all, ...(sheet ? [sheet, sheetRow] : [])] : interactive) }
   const context = {
     document, window: {}, HTMLCanvasElement: Canvas, visibleContent,
     performance: { now: () => now }, getComputedStyle: el => el.style,
@@ -758,7 +770,7 @@ function geometryFixture() {
   const fixtureContext = { ...context, messages }
   runInNewContext(source + '\nthis.geometry=startGeometry({notify:(op,args)=>messages.push({op,args})})', fixtureContext)
   return {
-    front, back, mood, pet, point, button, menu, reads, geometry: fixtureContext.geometry,
+    front, back, mood, pet, point, button, menu, sheet, sheetRow, reads, geometry: fixtureContext.geometry,
     frame(ms = 16) {
       now += ms
       const pending = [...frames.values()]
@@ -823,6 +835,20 @@ test('iOS keeps point and overflowing control regions separate and captures an e
   payload = f.frame()
   assert.equal(payload.dragging, false)
   assert.ok(payload.bounds.width < 1000)
+  f.geometry.stop()
+})
+
+test('iOS ignores phone sheet rows but keeps the full-page sheet root interactive', () => {
+  const f = geometryFixture({ sheet: true })
+  const payload = f.frame()
+  assert.ok(
+    payload.interactiveRegions.some(r => r.x === 0 && r.y === 0 && r.width === 1000 && r.height === 800),
+    'the pointer-events:none sheet root must still be one native region',
+  )
+  assert.ok(
+    !payload.interactiveRegions.some(r => r.x === 20 && r.y === 100 && r.width === 300),
+    'capturing every sheet row as a separate native region scales with the menu DOM',
+  )
   f.geometry.stop()
 })
 

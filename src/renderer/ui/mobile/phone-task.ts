@@ -8,7 +8,6 @@
 import { claim, claimRuntime, TABS, tasks, type Tab } from '../../pet/tasks'
 import { onStoreEvent, runtimeProjectionMode } from '../../pet/store'
 import type { Good } from '../../pet/data/goods'
-import '../css/phone-pages.css'
 import { div, img } from '../dom'
 import { showResult } from '../result'
 import { taskRow, taskSections, taskTabs, type TaskRow } from './phone-pages-model'
