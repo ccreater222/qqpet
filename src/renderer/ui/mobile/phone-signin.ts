@@ -26,7 +26,6 @@ import { info, onStoreEvent, runtimeProjectionMode, save } from '../../pet/store
 import { uiCommands } from '../../pet/command-map'
 import { commandResultData, commandResultGoods, commandSucceeded, dispatchRuntimeCommand } from '../../pet/runtime-command'
 import { dayStart } from '../../pet/vip'
-import '../css/phone-pages.css'
 import { div, img } from '../dom'
 import { showResult } from '../result'
 import { windowView } from '../window-view'

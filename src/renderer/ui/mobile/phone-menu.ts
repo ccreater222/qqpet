@@ -31,7 +31,6 @@ import {
 } from './phone-menu-model'
 import { openPetStage, type PetStageHandle } from './pet-stage'
 import { openSheet, type SheetHandle } from './sheet'
-import './menu-phone.css'
 
 /** The open phone menu, so a second request replaces it instead of stacking sheets. */
 let current: SheetHandle | null = null

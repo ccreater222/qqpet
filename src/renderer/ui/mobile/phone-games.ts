@@ -18,7 +18,6 @@ import {
   type PhoneGamesView,
 } from './phone-games-model'
 import { openSheet, type SheetHandle } from './sheet'
-import './phone-games.css'
 
 /** The open lobby, so a second request replaces it instead of stacking sheets. */
 let current: SheetHandle | null = null

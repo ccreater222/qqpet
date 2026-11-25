@@ -59,6 +59,8 @@ interface Native {
   openGame(swf: string, windowId: number): void
   /** Trusted arrow-key injection while a small game owns the overlay; absent on older shells. */
   sendGameKey?(code: string, phase: string): boolean
+  /** Trusted keyboard mode while a small game owns the overlay; absent on older shells. */
+  setGameKeyActive?(on: boolean): void
   quit(): void
   copyText(text: string): void
   openUrl(url: string): void
@@ -358,7 +360,9 @@ function track(now: number): void {
   }
   bounds = next
 }
-frame(track)
+// New shells crop the render child from the page's setHitShape rectangles; their setBounds is a no-op.
+// Only old shells, which lack setTouchableRegion, keep the full-DOM measured-bounds loop.
+if (setTouchableRegion === null) frame(track)
 
 // The page spans the whole screen, under the status and navigation bars; frames keep clear of them (box.ts).
 function safeArea(): void {
@@ -384,6 +388,7 @@ listeners.outside.push(() => {
 const api: QQPetApi = {
   capabilities: {
     rotatableScreen: native.rotatableScreen?.() ?? false,
+    phoneLayout: true,
     serverMode: serverRuntime !== null,
     serverModeClientOnly: serverRuntime !== null,
     localRepositoryV2: localRuntime !== null,
@@ -521,6 +526,7 @@ const api: QQPetApi = {
   // Overlay windows are always on top.
   setAlwaysOnTop() {},
   setFocusable: (on) => native.setFocusable(on),
+  setGameKeyActive: (on) => native.setGameKeyActive?.(on),
   setAutoStart: (on) => native.setAutoStart(on),
   setTrayState(state) {
     tray = state

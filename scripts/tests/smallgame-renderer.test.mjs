@@ -125,13 +125,16 @@ const BALL = { dir: 'ball', name: '颠球', icon: 'tanliqiu' }
  * The fake DOM keeps every iframe, box and SwfPlayer so pooling can be asserted
  * by identity (same iframe/player, not a new one).
  */
-function paopaoHostFixture({ touchHost = true } = {}) {
+function paopaoHostFixture({ touchHost = true, qqpetGameKeyGate = true } = {}) {
   const frames = []
   const boxes = []
+  const buttons = []
   const players = []
   const intervals = []
   const nativeGameKeys = []
   const nativeGameActive = []
+  /** Old direct QQPetNative bridge calls; must stay empty after routing through window.qqpet. */
+  const legacyNativeGameActive = []
   let nativeGameKeyResult = false
   let nativeGameKeyPresent = false
   let loadBehavior = () => 'resolve'
@@ -144,8 +147,10 @@ function paopaoHostFixture({ touchHost = true } = {}) {
   }
 
   class FakeSwfPlayer {
-    constructor(frame) {
-      this.frame = frame
+    constructor(body) {
+      // startPlayer() passes frame.contentDocument.body; keep the owning frame so a dispatched
+      // KeyboardEvent can bubble through the fake iframe document/window like the real DOM event.
+      this.frame = body?.ownerFrame ?? null
       this.loads = []
       this.calls = []
       this.events = []
@@ -153,7 +158,10 @@ function paopaoHostFixture({ touchHost = true } = {}) {
       this.destroyed = false
       this.el = {
         focus: () => {},
-        dispatchEvent: (event) => { this.events.push({ type: event.type, key: event.key, keyCode: event.keyCode }) },
+        dispatchEvent: (event) => {
+          this.events.push({ type: event.type, key: event.key, keyCode: event.keyCode })
+          this.frame?.contentDocument?.dispatchEvent(event)
+        },
         ruffle: () => ({
           addFSCommandHandler: () => {},
           callExternalInterface: (fn, ...args) => { this.calls.push([fn, ...args]) },
@@ -182,15 +190,25 @@ function paopaoHostFixture({ touchHost = true } = {}) {
   }
 
   function createFrame() {
+    const windowEvents = []
     const frame = {
       focused: false,
-      contentWindow: {},
+      contentWindow: {
+        focus: () => { frame.focused = true },
+        events: windowEvents,
+        dispatchEvent(event) {
+          windowEvents.push(event)
+          return true
+        },
+      },
       contentDocument: {
         body: {},
         events: [],
         addEventListener: () => {},
         dispatchEvent(event) {
           this.events.push(event)
+          // A composed event dispatched inside the iframe document still reaches its window.
+          windowEvents.push(event)
           return true
         },
       },
@@ -199,7 +217,7 @@ function paopaoHostFixture({ touchHost = true } = {}) {
         this.listeners[type] = callback
       },
     }
-    frame.contentWindow.focus = () => { frame.focused = true }
+    frame.contentDocument.body.ownerFrame = frame
     frame.contentWindow.document = frame.contentDocument
     frames.push(frame)
     return frame
@@ -222,7 +240,10 @@ function paopaoHostFixture({ touchHost = true } = {}) {
         },
         contains(name) { return this.values.has(name) },
       },
-      append: () => {},
+      children: [],
+      append(...nodes) {
+        this.children.push(...nodes)
+      },
       addEventListener(type, callback) {
         ;(this.handlers[type] ??= []).push(callback)
       },
@@ -232,6 +253,22 @@ function paopaoHostFixture({ touchHost = true } = {}) {
     }
     boxes.push(box)
     return box
+  }
+
+  function createButton() {
+    const el = {
+      className: 'quit',
+      removed: false,
+      handlers: {},
+      addEventListener(type, callback) {
+        ;(this.handlers[type] ??= []).push(callback)
+      },
+      remove() {
+        this.removed = true
+      },
+    }
+    buttons.push(el)
+    return el
   }
 
   const context = {
@@ -248,7 +285,7 @@ function paopaoHostFixture({ touchHost = true } = {}) {
     },
     SwfPlayer: FakeSwfPlayer,
     div: () => createBox(),
-    button: () => ({ remove: () => {} }),
+    button: () => createButton(),
     clampRoot,
     paopaoGameArea,
     setTimeout: (run) => { run(); return 0 },
@@ -279,9 +316,10 @@ function paopaoHostFixture({ touchHost = true } = {}) {
       qqpet: {
         setFocusable: () => {},
         get sendGameKey() { return nativeGameKeyPresent ? (code, phase) => { nativeGameKeys.push([code, phase]); return Promise.resolve(nativeGameKeyResult) } : undefined },
+        get setGameKeyActive() { return qqpetGameKeyGate ? (on) => { nativeGameActive.push(on) } : undefined },
       },
       API: { GetCursorPosition: () => '0,0' },
-      QQPetNative: { setGameKeyActive: (on) => { nativeGameActive.push(on) } },
+      QQPetNative: { setGameKeyActive: (on) => { legacyNativeGameActive.push(on) } },
     },
     playingDesk: () => false,
     runtimeProjectionMode: false,
@@ -316,6 +354,7 @@ function paopaoHostFixture({ touchHost = true } = {}) {
     intervals,
     nativeGameKeys,
     nativeGameActive,
+    legacyNativeGameActive,
     setNativeGameKey(result) { nativeGameKeyPresent = true; nativeGameKeyResult = result },
     removeNativeGameKey() { nativeGameKeyPresent = false },
     settle,
@@ -357,6 +396,25 @@ function paopaoHostFixture({ touchHost = true } = {}) {
     },
   }
   return host
+}
+
+/** Quit buttons are the only children a root box owns; children must never inherit one. */
+const quitCount = (box) => box.children.filter((child) => child.className === 'quit').length
+
+/** Root + four base windows + six bubbles: paopao2's full 11-shell budget. */
+async function fillPaopao2(host) {
+  host.play()
+  await host.settle()
+  host.createWindow('wnd_name_status_mood', 'status_mood.swf', 316, 720, 140, 20)
+  host.createWindow('wnd_name_status_count', 'status_count.swf', 236, 650, 60, 55)
+  host.createWindow('wnd_name_prompt_mood', 'prompt_mood.swf', 291, 568, 180, 90, { show: false })
+  host.createWindow('wnd_name_prompt_money', 'prompt_money.swf', 241, 581, 300, 180, { show: false })
+  await host.settle()
+  host.createWindow('b1', 'BubbleGreen.swf', 316, 580, 70, 70, { show: false })
+  host.rootApi.Show(1, 'b1')
+  for (let i = 2; i <= 6; i++) host.createWindow(`b${i}`, 'BubbleGreen.swf', 316, 580, 70, 70)
+  await host.settle()
+  assert.equal(host.state().shells.size, 11, 'fixture must fill paopao2 to its 11-shell cap')
 }
 
 test('paopao2 maps only the root onto the virtual game area; children keep real coordinates', () => {
@@ -574,6 +632,88 @@ test('the paopao2 pool caps at 11 and evicts the oldest shown bubble, never a pr
   assert.equal(host.players.filter((player) => player.destroyed).length, 1)
   assert.equal(host.state().wins.has('b1'), true, 'provisional windows are still protected')
   assert.equal(host.state().wins.has('b3'), false, 'the next oldest shown bubble was destroyed')
+})
+
+test('a full paopao2 game keeps all 11 shells pooled after quit and reopens without new players', async () => {
+  const host = paopaoHostFixture()
+  await fillPaopao2(host)
+  const frameCount = host.frames.length
+  const playerCount = host.players.length
+
+  host.rootApi.DestroyWindow()
+  await host.settle()
+  assert.equal(host.state().wins.size, 0, 'quit closes every game window')
+  assert.equal(host.state().shells.size, 11, 'quit must not trim the pool to DEFAULT_SHELL_CAP=9')
+
+  await fillPaopao2(host)
+  assert.equal(host.frames.length, frameCount, 'reopening paopao2 must reuse all 11 iframes')
+  assert.equal(host.players.length, playerCount, 'reopening paopao2 must reuse all 11 SwfPlayer instances')
+})
+
+test('a 140x140 base/prompt shell is never promoted to root; every root keeps exactly one quit', async () => {
+  const host = paopaoHostFixture()
+  host.play(GUESS)
+  await host.settle()
+  const bases = [
+    ['wnd_name_status_mood', 'status_mood.swf', 140, 20],
+    ['wnd_name_status_count', 'status_count.swf', 60, 25],
+    ['wnd_name_prompt_mood', 'prompt_mood.swf', 180, 90],
+    ['wnd_name_prompt_money', 'prompt_money.swf', 300, 180],
+    ['wnd_name_prompt_text', 'prompt_text.swf', 150, 65],
+    ['wnd_name_prompt_timer', 'prompt_timer.swf', 140, 140],
+  ]
+  for (const [name, swf, width, height] of bases) host.createWindow(name, swf, 316, 580, width, height)
+  await host.settle()
+  assert.equal(host.state().shells.size, 7, 'guess root + six base windows')
+  const promptTimerBox = host.state().wins.get('wnd_name_prompt_timer').box
+  assert.equal(quitCount(host.state().root.box), 1, 'the root starts with its quit button')
+  host.rootApi.DestroyWindow()
+  await host.settle()
+
+  // A different root variant (sex change) makes the pooled guess root ineligible by pool key, so
+  // the rope root request reaches reclaim() with a 140x140 prompt shell as the only size match.
+  host.context.info.sex = 'MM'
+  host.play(ROPE)
+  await host.settle()
+  const root = host.state().root
+  assert.ok(root)
+  assert.notEqual(root.box, promptTimerBox, 'a prompt shell must never be reused as the root')
+  assert.equal(root.kind, 'root')
+  assert.equal(quitCount(root.box), 1, 'the root must own exactly one quit button')
+  for (const win of host.state().wins.values()) {
+    if (win === root) continue
+    assert.equal(quitCount(win.box), 0, `${win.name} must not inherit a quit button`)
+  }
+})
+
+test('switching to a smaller-budget game keeps the upcoming root shell instead of trimming it away', async () => {
+  const host = paopaoHostFixture()
+  host.play(GUESS)
+  await host.settle()
+  const bases = [
+    ['wnd_name_status_mood', 'status_mood.swf', 140, 20],
+    ['wnd_name_status_count', 'status_count.swf', 60, 25],
+    ['wnd_name_prompt_mood', 'prompt_mood.swf', 180, 90],
+    ['wnd_name_prompt_money', 'prompt_money.swf', 300, 180],
+    ['wnd_name_prompt_text', 'prompt_text.swf', 150, 65],
+    ['wnd_name_prompt_timer', 'prompt_timer.swf', 140, 140],
+  ]
+  for (const [name, swf, width, height] of bases) host.createWindow(name, swf, 316, 580, width, height)
+  await host.settle()
+  assert.equal(host.state().shells.size, 7)
+  const oldRoot = host.state().root
+  const frameCount = host.frames.length
+  host.rootApi.DestroyWindow()
+  await host.settle()
+  assert.equal(host.state().shells.size, 7, 'guess pools all seven shells')
+
+  // rope has the same main_102 root variant but caps at 5; trimming before open() used to evict
+  // the oldest shell first, which is always the root, so rope had to allocate a new root shell.
+  host.play(ROPE)
+  await host.settle()
+  assert.equal(host.state().root, oldRoot, 'rope root must reuse the pooled guess root shell')
+  assert.equal(host.frames.length, frameCount, 'a kept root shell must not allocate a new iframe')
+  assert.equal(quitCount(oldRoot.box), 1, 'the reused root keeps exactly one quit button')
 })
 
 test('a failed SWF load discards the iframe and player instead of leaving an empty window', async () => {
@@ -845,6 +985,11 @@ test('100ceng gets a hold-to-move touch pad that sends arrow keys into its ifram
   assert.deepEqual(player.events.at(-1), { type: 'keydown', key: 'ArrowLeft', keyCode: 37 })
   assert.deepEqual(cloud.events.at(-1), { type: 'keydown', key: 'ArrowLeft', keyCode: 37 }, 'cloud player receives the key')
   assert.ok(cloud.events.some((event) => event.type === 'pointerdown'), 'the first key also clicks the cloud start frame')
+  // gamepad.ts dispatches on the Ruffle element; composed:true bubbles that one event through the
+  // iframe document to its window. Extra window/document copies made listeners see 3 and 2.
+  const keydowns = (events) => events.filter((event) => event.type === 'keydown' && event.keyCode === 37).length
+  assert.equal(keydowns(cloudDoc.events), 1, 'the iframe document must receive exactly one keydown')
+  assert.equal(keydowns(cloud.frame.contentWindow.events), 1, 'the iframe window must receive exactly one keydown')
   assert.equal(host.frames[1].focused, true, 'cloud iframe is focused before the event')
   const cloudKeydown = cloudDoc.events.at(-1)
   assert.equal(cloudKeydown.type, 'keydown')
@@ -882,6 +1027,26 @@ test('100ceng gets a hold-to-move touch pad that sends arrow keys into its ifram
   assert.equal(host.state().keypad, null, 'the pad disappears with the game')
 })
 
+test('the native key gate uses the window.qqpet contract and is optional', async () => {
+  const withGate = paopaoHostFixture()
+  withGate.play(CENG)
+  await withGate.settle()
+  assert.deepEqual(withGate.nativeGameActive, [true], 'the contract method receives the open gate')
+  withGate.rootApi.DestroyWindow()
+  await withGate.settle()
+  assert.deepEqual(withGate.nativeGameActive, [true, false], 'finish closes the gate')
+  assert.deepEqual(withGate.legacyNativeGameActive, [], 'QQPetNative must not be read directly')
+
+  const withoutGate = paopaoHostFixture({ qqpetGameKeyGate: false })
+  withoutGate.play(CENG)
+  await withoutGate.settle()
+  assert.deepEqual(withoutGate.nativeGameActive, [], 'a missing optional method is a safe no-op')
+  assert.deepEqual(withoutGate.legacyNativeGameActive, [], 'no direct QQPetNative fallback')
+  withoutGate.rootApi.DestroyWindow()
+  await withoutGate.settle()
+  assert.deepEqual(withoutGate.legacyNativeGameActive, [], 'closing the gate is also a no-op without the method')
+})
+
 test('native game keys replace the DOM fallback and are released when the game ends', async () => {
   const host = paopaoHostFixture()
   host.setNativeGameKey(true)
@@ -913,6 +1078,7 @@ test('native game keys replace the DOM fallback and are released when the game e
   assert.deepEqual(host.nativeGameKeys.at(-1), ['ArrowRight', 'up'], 'finish releases every held native key')
   assert.equal(host.state().keypad, null)
   assert.deepEqual(host.nativeGameActive, [true, false], 'native gate opens on open and closes on finish')
+  assert.deepEqual(host.legacyNativeGameActive, [], 'the gate never bypasses the window.qqpet contract')
 })
 
 test('no native keys are sent before a game (or for a game without keyboard)', async () => {
@@ -951,6 +1117,54 @@ test('the direct native bridge can focus/start the cloud before injecting keys',
   assert.deepEqual(host.nativeGameActive.at(-1), false)
 })
 
+test('100ceng clicks the cloud once per press session, even across a long hold and repeated downs', async () => {
+  const host = paopaoHostFixture()
+  host.play(CENG)
+  await host.settle()
+  host.createWindow('w_name_cloud', 'cloud_boy.swf', 105, 310, 350, 500)
+  await host.settle()
+  const pad = host.state().keypad
+  const debug = host.context.window.__qqpetSmallGameKeys
+  const press = { preventDefault: () => {}, stopPropagation: () => {} }
+
+  // An 800ms hold = one pointerdown + ~6 repeat ticks at 140ms.
+  const clicksBefore = debug.cloudClicks
+  const downsBefore = debug.nativeDown
+  pad.left.handlers.pointerdown[0](press)
+  await host.settle()
+  const interval = host.intervals.at(-1)
+  for (let i = 0; i < 6; i++) {
+    interval()
+    await host.settle()
+  }
+  assert.equal(debug.cloudClicks - clicksBefore, 1, 'a held press must click the cloud exactly once')
+  assert.ok(debug.cloudClicks - clicksBefore <= debug.nativeDown - downsBefore, 'cloudClicks growth must not exceed down growth')
+  pad.left.handlers.pointerup[0]()
+  await host.settle()
+
+  // Releasing and pressing again in the same round must not re-click either.
+  const clicksAfterHold = debug.cloudClicks
+  pad.right.handlers.pointerdown[0](press)
+  await host.settle()
+  assert.equal(debug.cloudClicks, clicksAfterHold, 'a second press in the same round is a no-op for the cloud')
+  pad.right.handlers.pointerup[0]()
+  await host.settle()
+
+  // A fresh round builds a fresh cloud and gets one click of its own.
+  host.rootApi.DestroyWindow()
+  await host.settle()
+  host.play(CENG)
+  await host.settle()
+  host.createWindow('w_name_cloud', 'cloud_boy.swf', 105, 310, 350, 500)
+  await host.settle()
+  const nextPad = host.state().keypad
+  const clicksBeforeNewRound = debug.cloudClicks
+  nextPad.left.handlers.pointerdown[0](press)
+  await host.settle()
+  assert.equal(debug.cloudClicks - clicksBeforeNewRound, 1, 'the session flag resets when a new round starts')
+  nextPad.left.handlers.pointerup[0]()
+})
+
 test('the touch pad only appears for keyboard games on touch hosts', async () => {
   const guess = paopaoHostFixture()
   guess.play(GUESS)
@@ -975,4 +1189,21 @@ test('desktop hosts keep the old lifecycle: no pooling and a fresh iframe/player
   await host.settle()
   assert.equal(host.frames.length, 2)
   assert.equal(host.players.length, 2)
+})
+
+test('desktop recycle destroys every SwfPlayer so repeated games do not accumulate live players', async () => {
+  const host = paopaoHostFixture({ touchHost: false })
+  for (let round = 0; round < 3; round++) {
+    host.play()
+    await host.settle()
+    host.createWindow('wnd_name_status_mood', 'status_mood.swf', 316, 720, 140, 20)
+    await host.settle()
+    assert.equal(host.players.filter((player) => !player.destroyed).length, 2, `round ${round}: two live players while playing`)
+    host.rootApi.DestroyWindow()
+    await host.settle()
+    assert.equal(host.state().wins.size, 0)
+    assert.equal(host.players.filter((player) => !player.destroyed).length, 0, `round ${round}: quit must destroy every SwfPlayer`)
+    assert.ok(host.boxes.every((box) => box.removed), `round ${round}: removed iframes must be dropped from the DOM`)
+  }
+  assert.equal(host.players.length, 6, 'each round builds fresh players; none stay referenced as live')
 })

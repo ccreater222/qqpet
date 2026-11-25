@@ -215,7 +215,7 @@ test('openShop branches to the phone surface before the desktop window opens', (
 
 test('the phone surface is a sheet over the shared shop/food/items contracts', () => {
   const src = read('../../src/renderer/ui/mobile/phone-shop.ts')
-  for (const needle of ["from './sheet'", "from '../../pet/items'", "from '../../pet/goods'", "import './phone-shop.css'"]) {
+  for (const needle of ["from './sheet'", "from '../../pet/items'", "from '../../pet/goods'"]) {
     assert.ok(src.includes(needle), `phone-shop.ts lost its ${needle} dependency`)
   }
   assert.match(src, /openSheet\(\{[\s\S]*?title:\s*'商城'/)

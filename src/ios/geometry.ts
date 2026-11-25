@@ -110,7 +110,11 @@ export function startGeometry(rpc: IOSRPC): { pointer(input: PetPointer): void; 
     // (the pet toolbar). Those controls must also bypass the native drag plane.
     for (const element of document.body.querySelectorAll('[data-hit], [data-hit] *, .point, input, textarea, select, button, iframe, ruffle-player')) {
       if (element.closest('#pet') && !element.matches('.point')) continue
-      if (!visible(element) || getComputedStyle(element).pointerEvents === 'none') continue
+      // The phone sheet's root already covers the page; its rows live inside that one native region.
+      if (element.closest('.qp-sheet') && !element.matches('.qp-sheet')) continue
+      // The opening tap marks the sheet pointer-events:none for 220 ms; its full-page region must still exist,
+      // matching the Android hit-shape scan.
+      if (!visible(element) || (getComputedStyle(element).pointerEvents === 'none' && !element.matches('.qp-sheet'))) continue
       interactiveRegions.push(rect(element.getBoundingClientRect()))
     }
     const payload = { bounds, dragRegions, interactiveRegions, viewport: { width: innerWidth, height: innerHeight }, dragging }

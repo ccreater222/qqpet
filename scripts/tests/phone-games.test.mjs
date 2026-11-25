@@ -110,7 +110,6 @@ test('the phone surface reuses the desktop play paths instead of copying them', 
   const source = read('../../src/renderer/ui/mobile/phone-games.ts')
   for (const needle of [
     "from './sheet'",
-    "import './phone-games.css'",
     "from '../smallgame'",
     "from '../diudiule'",
     "from '../games'",

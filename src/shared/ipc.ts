@@ -276,6 +276,11 @@ export interface QQPetApi {
   capabilities?: {
     /** This host adapts to screen rotation; omitted means windows always follow the screen. */
     rotatableScreen?: boolean
+    /**
+     * This host runs the phone UI on phone-sized touch screens. `false` forbids it (desktop and Harmony keep
+     * their established layouts); omitted keeps the legacy viewport heuristic for bridges without the flag.
+     */
+    phoneLayout?: boolean
     autoStart?: boolean; autoStartReason?: string
     clipboardWatch?: boolean; clipboardWatchReason?: string
     frontWatch?: boolean; frontWatchReason?: string
@@ -328,6 +333,8 @@ export interface QQPetApi {
   openGame(swf: string, windowId?: number): void
   /** Optional small-game arrow keys; Android injects a trusted KeyEvent, other hosts omit or return false. */
   sendGameKey?(code: 'ArrowLeft' | 'ArrowRight', phase: 'down' | 'up'): Promise<boolean>
+  /** Trusted keyboard mode while a small game owns the overlay; only Android forwards it to the native host. */
+  setGameKeyActive?(on: boolean): void
   /** Native game-page exit; ordinary browser/Electron pages can keep window.close(). */
   closeGame?(): void
   /** Today and the next 30 days; computed locally when no upstream is configured, empty while the upstream fails. */
