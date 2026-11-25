@@ -402,7 +402,15 @@ function reclaim(name: string, parent: Win | null, swf: string, x: number, y: nu
 function recycle(w: Win): void {
   if (!touchHost()) {
     shells.delete(w)
-    setTimeout(() => w.box.remove())
+    const player = w.player
+    w.player = undefined
+    // The player.ts MutationObserver cannot see an iframe that was removed from a detached
+    // document (isConnected stays true, defaultView is null), so without this every desktop round
+    // kept its SwfPlayer/Ruffle instance alive in the module-level players Set.
+    setTimeout(() => {
+      w.box.remove()
+      player?.destroy()
+    })
     return
   }
   // A half-built or still-loading player cannot be reloaded; SwfPlayer.load rejects while busy.

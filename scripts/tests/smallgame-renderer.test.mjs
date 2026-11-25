@@ -1165,3 +1165,20 @@ test('desktop hosts keep the old lifecycle: no pooling and a fresh iframe/player
   assert.equal(host.frames.length, 2)
   assert.equal(host.players.length, 2)
 })
+
+test('desktop recycle destroys every SwfPlayer so repeated games do not accumulate live players', async () => {
+  const host = paopaoHostFixture({ touchHost: false })
+  for (let round = 0; round < 3; round++) {
+    host.play()
+    await host.settle()
+    host.createWindow('wnd_name_status_mood', 'status_mood.swf', 316, 720, 140, 20)
+    await host.settle()
+    assert.equal(host.players.filter((player) => !player.destroyed).length, 2, `round ${round}: two live players while playing`)
+    host.rootApi.DestroyWindow()
+    await host.settle()
+    assert.equal(host.state().wins.size, 0)
+    assert.equal(host.players.filter((player) => !player.destroyed).length, 0, `round ${round}: quit must destroy every SwfPlayer`)
+    assert.ok(host.boxes.every((box) => box.removed), `round ${round}: removed iframes must be dropped from the DOM`)
+  }
+  assert.equal(host.players.length, 6, 'each round builds fresh players; none stay referenced as live')
+})
