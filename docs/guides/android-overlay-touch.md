@@ -27,6 +27,7 @@
 | 11 | 拖动/长按/点击偶尔全部失效，但点击正常或重载恢复 | 手势期间移动/移除 portal 窗口会切断系统手势流 | 手势 active 时 portal 只 `updateViewLayout` 不 remove/add；移动等 UP/CANCEL；跨 portal 多指是两条独立手势流 |
 | 12 | 模拟器上坐标对不上（`dumpsys window` 与 `dumpsys input` 差一倍/偏移） | `dumpsys window` 是逻辑坐标；`dumpsys input` 是物理显示坐标，可能带 `WindowedMagnification`/旋转的 display transform | 用 `dumpsys input` 的 display transform 换算；页面 CSS × `web.layoutParams.width/innerWidth`；不要拿两套原始坐标直接比 |
 | 13 | 单元测试全绿但真机仍有白闪/裁剪/穿透问题 | 这些是窗口管理器/合成器/触摸分发行为，vm 夹具测不到 | 视觉/窗口类改动必须 60fps 录屏逐帧 + `dumpsys window/input` + 真实触摸；把「首帧内容」「blankBlock」「child 外观」作为量化验收 |
+| 14 | 电脑端（Linux）气泡文字发虚、宠物拖动卡顿/闪烁 | Linux 的 `win.setShape` 是**渲染裁剪**，由 50 ms hit-shape 循环驱动；循环在可见性判断前无条件对每个 `[data-hit] *`（含大量隐藏节点）调用 `getComputedStyle(el).pointerEvents`，主线程反复 style/layout，窗口 shape 更新滞后 → 气泡边缘/文字发虚、拖动时 shape 抖动闪烁 | 先 `hitTargetVisible(el)` 再读 `pointer-events`；不可见元素绝不强制 `getComputedStyle`。桌面 Linux 必须与 Android 一起手测，不能只测移动端 |
 
 ## 3. 调试与验收最佳实践
 
@@ -54,6 +55,7 @@ ffmpeg -i tap.mp4 -vf fps=30 frames/f%03d.png
 ### 3.3 页面 hit-shape 循环的过滤规则
 
 - 只有「真的不可见」才能丢：`display:none`、`visibility:hidden`、`opacity:0`、零尺寸。
+- **先判可见，再读 `pointer-events`**：`getComputedStyle` 会触发布局/样式计算；桌面的 50 ms `setShape` 循环不要对不可见子树做无谓读取，否则 Linux 窗口 shape 会滞后，气泡发虚、拖动闪烁（见坑点 14）。
 - `pointer-events:none` 只表示**不接收输入**，仍然可能占满屏幕（sheet 开屏锁、过渡层）；这类层必须上报矩形，否则原生窗口不会扩。
 - WebView 版本较老时 `Element.checkVisibility` 可能不存在；回退到 `display/visibility/opacity` 三读，不要让整个 50 ms tick 抛错。
 - 新增任何「临时 input 锁」时，同时检查它是否被 hit-shape 循环过滤；写一条 vm 测试固定这个行为（参考 `scripts/tests/pet-drag.test.mjs` 的「opening sheet layer even while it ignores input」）。
