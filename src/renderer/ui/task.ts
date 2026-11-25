@@ -14,6 +14,10 @@ export function openTask(): void {
   if (open) return
   open = true
   const root = div('ui-task')
+  // One stable child carries the task list; showResult() appends its overlay to
+  // root as a sibling, so a projection redraw must not replace root's children.
+  const body = div('task fC')
+  root.append(body)
   let tab: Tab = 'daily'
 
   const render = (): void => {
@@ -58,7 +62,7 @@ export function openTask(): void {
         TABS[k],
       ),
     )
-    root.replaceChildren(div('task fC', div('t_top f1 fC h0', div('t_title', '活动列表'), div('t_tabs', ...tabs), div('tasks f1 mt8 h0', ...items))))
+    body.replaceChildren(div('t_top f1 fC h0', div('t_title', '活动列表'), div('t_tabs', ...tabs), div('tasks f1 mt8 h0', ...items)))
   }
   render()
   const stopProjection = onStoreEvent((event) => {
